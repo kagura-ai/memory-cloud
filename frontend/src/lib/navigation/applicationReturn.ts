@@ -13,6 +13,13 @@
 /** The in-app path of Workspace settings > Plan. */
 export const PLAN_PAGE_PATH = "/workspace/settings/plan";
 
+/**
+ * The plan the notice reports, compared exactly with the workspace's plan
+ * name: the server's rule for `eligible_for=kagura-public`, not "the highest
+ * tier there is".
+ */
+export const APPLICATION_RETURN_TOP_PLAN = "promax";
+
 const ARRIVAL_PARAM = "return";
 const ARRIVAL_VALUE = "kagura-public";
 

@@ -37,9 +37,11 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useToast } from "@/hooks/use-toast";
 import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import type { Workspace } from "@/lib/api/workspaces";
 import {
+  APPLICATION_RETURN_TOP_PLAN,
   PLAN_PAGE_PATH,
   forgetApplicationReturn,
   hasApplicationReturn,
@@ -49,9 +51,6 @@ import {
 } from "@/lib/navigation/applicationReturn";
 import { cn } from "@/lib/utils/cn";
 import { httpsHref } from "@/lib/utils/httpsHref";
-
-/** The top tier, by the workspace picker's rule for the application. */
-const TOP_PLAN = "promax";
 
 export interface ApplicationReturnNoticeProps {
   /** The workspace on screen (the one the plan button acts on). */
@@ -76,6 +75,8 @@ export function ApplicationReturnNotice({
   className,
 }: ApplicationReturnNoticeProps) {
   const t = useTranslations("workspace");
+  const tCommon = useTranslations("common");
+  const { toast } = useToast();
   const { user, refetchUser } = useAuth();
   const { refreshWorkspaces } = useWorkspace();
   const info = useSystemInfo();
@@ -117,7 +118,7 @@ export function ApplicationReturnNotice({
   }, [arrival, mayShow, router]);
 
   const visible = mayShow && user !== null && marked;
-  const onPlan = workspace.plan_name === TOP_PLAN;
+  const onPlan = workspace.plan_name === APPLICATION_RETURN_TOP_PLAN;
 
   // After a re-check that had the focus inside the notice: the return link
   // when the plan is found, the plan section when the notice went away.
@@ -143,8 +144,20 @@ export function ApplicationReturnNotice({
     setChecking(true);
     try {
       // Another tab may have switched the account; nothing syncs tabs.
-      await refetchUser();
-      await refreshWorkspaces({ quiet: true });
+      // refetchUser answers undefined on a transient failure (null is a
+      // signed-out session, which the layout handles), and refreshWorkspaces
+      // false when its read failed: then the notice says so instead of
+      // showing the unchanged plan as if it had been checked.
+      const userRead = (await refetchUser()) !== undefined;
+      const listRead = userRead && (await refreshWorkspaces({ quiet: true })) !== false;
+      if (!listRead) {
+        toast({
+          variant: "destructive",
+          title: tCommon("error"),
+          description: t("planPage.applicationReturn.checkFailed"),
+        });
+        return;
+      }
       // Move the focus afterwards only if it was in the notice and still is,
       // or was dropped because what held it went away meanwhile.
       const active = document.activeElement;
