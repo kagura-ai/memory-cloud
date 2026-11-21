@@ -4,6 +4,17 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.175.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.175.0) — 2026-11-21
+
+A link back to a linking application on the plan page, an id hint when the MCP `reference` tool finds nothing, and a routed recall that keeps answering when the embedding is unavailable. One new setting, off by default. No migration.
+
+### Added
+- **A link back to the application on the plan page** ([#2950](https://github.com/kagura-ai/memory-cloud/issues/2950)): new setting `KAGURA_PUBLIC_RETURN_URL` (default empty: nothing changes). When it is set to an absolute `https` address, the workspace's canonical owner who opens `/workspace/settings/plan?return=kagura-public` gets a timestamp kept in that browser tab for 24 hours, and the parameter is removed from the address bar. While the timestamp is valid, the plan page shows that owner a notice: the signed-in account, whether the workspace on screen is on the top plan (with "Check again"), a same-tab link to the configured address, and "Hide this notice". `GET /api/v1/system/info` gains `kagura_public_return_url` (`null` when empty). A signed-out visitor who opens that URL comes back to it after sign-in. Nothing is stored on the server, nothing redirects by itself, and payment and the billing handoff are unchanged. The notice needs `ENABLE_PLAN_PAGE=true`; it is of use only where the billing handoff is configured too. The application must link to the same web origin the payment service returns owners to. An invalid value fails start-up.
+- **`reference` names memories with a similar id on a miss** ([#2959](https://github.com/kagura-ai/memory-cloud/issues/2959)): when the MCP `reference` tool answers `memory_not_found`, it now names up to 3 live memories of the same context that the caller can read and whose ids share at least the first 8 hex characters with the asked id: `similar_ids: [{memory_id, summary, summary_cut?}]`, longest shared part first, with a help line to retry with one exactly as listed. `error` and `message` are unchanged, and nothing is read or picked. Without such a memory, or in a capacity-locked workspace, the answer is unchanged. REST and the public `reference` tool are unchanged.
+
+### Fixed
+- **A routed recall failed with 500 / 502 when the embedding could not be computed** ([#2960](https://github.com/kagura-ai/memory-cloud/issues/2960)): on a context with `routing_mode: "active"`, a recall that names no `search_mode` and is routed to the semantic lane now answers from keyword search with `degraded: true` and `degraded_reason` when the embedding provider fails, a self-hosted inference server cannot be reached or the vector store fails, as a hybrid recall does. An explicit `search_mode: "semantic"` still answers the error. This covers REST and MCP recall, share-key recall and the agent bootstrap recall.
+
 ## [v0.174.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.174.0) — 2026-11-21
 
 The OIDC consent page in Japanese, more settings in the admin environment read, a hybrid recall that keeps answering when the self-hosted inference server is down, and an api image that applies Debian updates at build time. No migration, no new setting.
