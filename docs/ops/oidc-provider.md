@@ -141,8 +141,9 @@ as `ui_locales_supported`). The language is chosen in this order:
 3. the browser's `Accept-Language` header (q-values respected);
 4. English.
 
-Unsupported, malformed or overlong values are skipped without an error and the
-next source decides. An account's saved language is `en` unless the user chose
+Unsupported or malformed tags, and a `ui_locales` longer than 255 characters,
+are skipped without an error and the next source decides; the authorization
+request's overall size limit and the one-value-per-parameter rule still apply. An account's saved language is `en` unless the user chose
 another, so a relying party that wants the Japanese page for such an account
 passes `ui_locales=ja`; `Accept-Language` decides only when the account has no
 supported saved language. `ui_locales` is optional and covered by the consent

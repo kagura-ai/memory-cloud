@@ -837,6 +837,18 @@ def test_consent_page_en_account_with_accept_language_ja_stays_english(api):
     assert _visible(page) == _EN_PAGE
 
 
+def test_consent_page_accept_language_decides_without_a_supported_account_locale(api, store):
+    # The route passes the header to the negotiation: with no ui_locales and a
+    # saved language that is not a supported one, Accept-Language answers.
+    _set_account_locale(store, "fr")
+    _, page = _consent_page(api, headers={"Accept-Language": "ja"})
+    assert _lang(page) == "ja"
+    assert _visible(page) == _JA_PAGE
+    _, page = _consent_page(api, headers={"Accept-Language": "fr, en;q=0.5"})
+    assert _lang(page) == "en"
+    assert _visible(page) == _EN_PAGE
+
+
 def test_consent_page_falls_back_to_the_japanese_account_label(api, store):
     with store.factory() as db:
         db.scalars(select(User)).one().name = None
@@ -850,6 +862,7 @@ def test_consent_page_falls_back_to_the_japanese_account_label(api, store):
 def test_every_grantable_scope_has_an_english_and_a_japanese_permission_line():
     from auth.oidc_server import IDENTITY_SCOPES
     from utils.oidc_messages import OIDC_MESSAGES, get_oidc_messages
+    from utils.user_prefs import SUPPORTED_LOCALES
 
     en = get_oidc_messages("en")["permissions"]
     ja = get_oidc_messages("ja")["permissions"]
@@ -858,7 +871,7 @@ def test_every_grantable_scope_has_an_english_and_a_japanese_permission_line():
     for scope in IDENTITY_SCOPES:
         assert ja[scope] and ja[scope] != en[scope]
     # Same keys, nothing left in English on a ja page.
-    assert set(OIDC_MESSAGES) == {"en", "ja"}
+    assert set(OIDC_MESSAGES) == set(SUPPORTED_LOCALES)
     assert set(OIDC_MESSAGES["en"]) == set(OIDC_MESSAGES["ja"])
     for key, value in OIDC_MESSAGES["en"].items():
         if key != "permissions" and any(ch.isalpha() for ch in value):

@@ -48,9 +48,9 @@ OIDC_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "openid": "KMC アカウントの識別",
             "profile": "表示名とプロフィール画像の読み取り",
             "workspaces:read": "ワークスペースのメンバーシップと権限の読み取り",
-            "integrations:manage": "現在の KMC 権限の範囲内での連携の管理",
+            "integrations:manage": "連携の管理 (現在の KMC 権限の範囲内)",
             "sync.records:read": (
-                "現在の KMC 権限の範囲内での、承認済みの同期された製品・FAQ レコードの読み取り"
+                "同期された承認済みの商品・FAQ レコードの読み取り (現在の KMC 権限の範囲内)"
             ),
         },
     },
