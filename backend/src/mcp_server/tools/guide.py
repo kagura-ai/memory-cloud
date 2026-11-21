@@ -598,7 +598,12 @@ GUIDE_TOPICS: dict[str, str] = {
         "context_offset = the *_next_offset value (one per call); details/context "
         "pages arrive as details_json / context_json text: join, then parse. fields "
         "picks the heavy fields to return (default all four; with an offset, only "
-        "that one). Errors to branch on: memory_not_found, invalid_argument."
+        "that one). Errors to branch on: memory_not_found, invalid_argument. "
+        "A memory_not_found may carry similar_ids: [{memory_id, summary, summary_cut?}], "
+        "at most 3 memories of this context you can read whose ids share at least their "
+        "first 8 hex characters with the one you sent, longest shared part first. None of "
+        "them was read or picked: retry only with a memory_id exactly as listed, and only "
+        "when its summary is the memory you meant; never edit an id yourself."
     ),
     "reference.versions": (
         "Earlier versions: reference(memory_id, version=N) returns version N rebuilt "

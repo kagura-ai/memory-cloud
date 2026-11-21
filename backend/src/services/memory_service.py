@@ -649,6 +649,25 @@ def _prune_unhydrated_hits(
     return unhydrated, duplicates
 
 
+#: #2959: a ``reference`` miss names live memories of the named context whose
+#: ids share at least this many leading hex characters with the asked id, at
+#: most ``SIMILAR_ID_LIMIT`` of them, looked for among the
+#: ``SIMILAR_ID_SCAN_PER_SIDE`` nearest ids below and above the asked one.
+SIMILAR_ID_PREFIX_HEX = 8
+SIMILAR_ID_LIMIT = 3
+SIMILAR_ID_SCAN_PER_SIDE = 10
+
+
+def _shared_hex_prefix(a: str, b: str) -> int:
+    """How many leading characters two hex strings have in common."""
+    shared = 0
+    for x, y in zip(a, b, strict=False):
+        if x != y:
+            break
+        shared += 1
+    return shared
+
+
 #: #2201: the bound on forget's whole post-commit point delete, so the global
 #: lock is never held past it and a stalled vector store cannot turn a
 #: committed delete into a tool timeout.
@@ -3620,6 +3639,106 @@ class MemoryService:
             memory_source_type=memory.source_type,
             key_workspace_id=key_workspace_id,
         )
+
+    async def similar_id_candidates(
+        self,
+        memory_id: UUID,
+        user_id: str,
+        *,
+        context_id: UUID,
+        workspace_id: UUID,
+        key_workspace_id: UUID | None = None,
+        limit: int = SIMILAR_ID_LIMIT,
+    ) -> list[tuple[UUID, str]]:
+        """Memories whose ids start like ``memory_id``, for a ``reference`` miss (#2959).
+
+        An agent that mis-copies an id usually keeps its first characters.
+        The live memories of ``context_id`` (in ``workspace_id``) whose ids
+        share at least the first ``SIMILAR_ID_PREFIX_HEX`` hex characters with
+        it are looked up: in id order the longest shared parts are the nearest
+        neighbours, so one primary-key range walks down from the asked id and
+        one walks up, each inside the bounds of that prefix. They are ranked by
+        the length of the shared leading part, longest first, then by id, and
+        each must pass the read gate a direct ``reference`` of it would pass.
+
+        Nothing is read, recorded or picked: no access statistics, no read
+        marker, no context touch, and the permission check runs without an
+        operation, so no access event names a memory nobody asked for. A
+        capacity-locked workspace gets none (a direct read answers the lock
+        there).
+
+        Args:
+            memory_id: The id that was not found.
+            user_id: The caller.
+            context_id: The context the call named (already authorized).
+            workspace_id: That context's workspace.
+            key_workspace_id: The #963 pure key scope, as for ``reference``.
+            limit: At most this many are returned.
+
+        Returns:
+            ``(memory_id, summary)`` pairs, plain values, best match first.
+        """
+        from models.memory import Memory
+        from services.permission_service import CallerId, MemoryAuthorId, PermissionService
+        from utils.exceptions import CapacityLockedError
+
+        asked = memory_id.hex
+        prefix = asked[:SIMILAR_ID_PREFIX_HEX]
+        low = UUID(prefix + "0" * (32 - SIMILAR_ID_PREFIX_HEX))
+        high = UUID(prefix + "f" * (32 - SIMILAR_ID_PREFIX_HEX))
+        columns = (
+            Memory.id,
+            Memory.user_id,
+            Memory.workspace_id,
+            Memory.context_id,
+            Memory.type,
+            Memory.source_type,
+            Memory.summary,
+        )
+        scope = (
+            Memory.context_id == context_id,
+            Memory.workspace_id == workspace_id,
+            Memory.deleted_at.is_(None),
+        )
+        below = (
+            select(*columns)
+            .where(Memory.id >= low, Memory.id < memory_id, *scope)
+            .order_by(Memory.id.desc())
+            .limit(SIMILAR_ID_SCAN_PER_SIDE)
+        )
+        above = (
+            select(*columns)
+            .where(Memory.id > memory_id, Memory.id <= high, *scope)
+            .order_by(Memory.id.asc())
+            .limit(SIMILAR_ID_SCAN_PER_SIDE)
+        )
+        rows = [*(await self.db.execute(below)).all(), *(await self.db.execute(above)).all()]
+        if not rows:
+            return []
+        try:
+            await self._ensure_capacity(user_id, workspace_id=workspace_id)
+        except CapacityLockedError:
+            return []
+
+        rows.sort(key=lambda row: (-_shared_hex_prefix(row.id.hex, asked), row.id.hex))
+        gate = PermissionService(self.db)
+        found: list[tuple[UUID, str]] = []
+        for row in rows:
+            if await gate.can_access_memory(
+                user_id=CallerId(user_id),
+                memory_user_id=MemoryAuthorId(row.user_id),
+                workspace_id=row.workspace_id,
+                context_id=row.context_id,
+                operation=None,
+                memory_id=None,
+                memory_type=row.type,
+                memory_source_type=row.source_type,
+                key_workspace_id=key_workspace_id,
+            ):
+                found.append((row.id, row.summary))
+                if len(found) == limit:
+                    break
+        return found
 
     async def list_revisions(
         self,

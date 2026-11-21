@@ -45,6 +45,7 @@ from mcp_server.tools.memory import (
 from models.schemas import LinkedMemoryRef, ReferenceResponse, SupersedeCandidate
 from services.write_provenance import WriteProvenance
 from utils.exceptions import NotFoundException
+from utils.recall_projection import COMPACT_SUMMARY_CHARS, compact_summary
 
 MEM_ID = uuid4()
 CTX_ID = uuid4()
@@ -109,15 +110,19 @@ async def _call(
     mark=None,
     adoption_lands=True,
     db=None,
+    similar=None,
 ):
     """Run handle_reference with the service mocked; return (text, service mock).
 
     ``mark`` replaces the #2139 once-per-session read marker (default: an
-    AsyncMock returning True); it is exposed as ``svc.mark``.
+    AsyncMock returning True); it is exposed as ``svc.mark``. ``similar``
+    replaces the #2959 lookup of memories with a similar id (default: an
+    AsyncMock finding none, so a miss does not lean on the fail-soft path).
     """
     svc = MagicMock(
         reference=AsyncMock(return_value=service_result, side_effect=service_error),
         record_adoption=AsyncMock(return_value=adoption_lands),
+        similar_id_candidates=similar if similar is not None else AsyncMock(return_value=[]),
     )
     svc.mark = mark if mark is not None else AsyncMock(return_value=True)
     svc.unmark = AsyncMock()
@@ -1012,3 +1017,143 @@ async def test_light_fields_over_the_budget_still_page_in_useful_steps():
     memory = _memory(text)
     assert len(memory["content"]) == REFERENCE_MIN_PAGE_CHARS
     assert memory["content_next_offset"] == REFERENCE_MIN_PAGE_CHARS
+
+
+# --------------------------------------------- #2959: similar ids on a miss
+
+_PLAIN_MISS_HELP = "Use recall() to find memories you have access to."
+_SIMILAR_IDS_HELP = (
+    "The memories in similar_ids are in this context and their ids start like the one "
+    "you sent; if one of them is the memory you meant, call reference again with its "
+    "memory_id exactly as listed."
+)
+
+
+def _plain_miss_text(memory_id) -> str:
+    """The exact text a reference miss answered before #2959."""
+    return json.dumps(
+        {
+            "status": "error",
+            "error": "memory_not_found",
+            "message": f"Memory not found or you don't have access: {memory_id}",
+            "help": _PLAIN_MISS_HELP,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+class _ExpiringContext:
+    """A context row whose attributes cannot be read once the session rolled
+    back, like an ORM instance that rollback expired under an async session
+    (the attribute read would lazy-load and raise)."""
+
+    def __init__(self, db, workspace_id):
+        self._db = db
+        self._workspace_id = workspace_id
+        self.last_used_at = None
+
+    def _alive(self) -> None:
+        if self._db.rollback.await_count:
+            raise RuntimeError("expired: attribute read after the rollback")
+
+    @property
+    def id(self):
+        self._alive()
+        return CTX_ID
+
+    @property
+    def workspace_id(self):
+        self._alive()
+        return self._workspace_id
+
+
+@pytest.mark.parametrize(
+    "args",
+    [{}, {"version": 2}, {"content_offset": 5}],
+    ids=["plain", "version", "continuation"],
+)
+@pytest.mark.asyncio
+async def test_a_miss_names_memories_with_a_similar_id(args):
+    short_id, long_id = uuid4(), uuid4()
+    long_summary = "deploy " * 40
+    head, cut = compact_summary(long_summary, COMPACT_SUMMARY_CHARS)
+    assert cut
+    similar = AsyncMock(return_value=[(short_id, "deploy runbook"), (long_id, long_summary)])
+    db = AsyncMock()
+    workspace_id = uuid4()
+
+    text, _ = await _call(
+        args,
+        service_error=NotFoundException("Memory", str(MEM_ID)),
+        similar=similar,
+        db=db,
+        resolver=AsyncMock(return_value=_ExpiringContext(db, workspace_id)),
+    )
+
+    payload = _error(text)
+    assert payload == {
+        "status": "error",
+        "error": "memory_not_found",
+        "message": f"Memory not found or you don't have access: {MEM_ID}",
+        "help": _SIMILAR_IDS_HELP,
+        "similar_ids": [
+            {"memory_id": str(short_id), "summary": "deploy runbook"},
+            {"memory_id": str(long_id), "summary": head, "summary_cut": True},
+        ],
+    }
+    assert list(payload) == ["status", "error", "message", "help", "similar_ids"]
+    # The lookup got the named context and its workspace as plain values,
+    # read before the rollback of the miss.
+    similar.assert_awaited_once()
+    assert similar.await_args.args == (MEM_ID, "u")
+    assert similar.await_args.kwargs == {
+        "context_id": CTX_ID,
+        "workspace_id": workspace_id,
+        "key_workspace_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_miss_without_similar_ids_answers_as_before():
+    """Guard: no candidate, the answer is today's byte for byte."""
+    text, svc = await _call({}, service_error=NotFoundException("Memory", str(MEM_ID)))
+    assert text == _plain_miss_text(MEM_ID)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_lookup_falls_back_to_the_plain_miss():
+    import structlog
+
+    similar = AsyncMock(side_effect=RuntimeError("lookup failed"))
+    with structlog.testing.capture_logs() as logs:
+        text, _ = await _call(
+            {}, service_error=NotFoundException("Memory", str(MEM_ID)), similar=similar
+        )
+
+    assert text == _plain_miss_text(MEM_ID)
+    similar.assert_awaited_once()
+    (event,) = [e for e in logs if e["event"] == "reference_id_hint_failed"]
+    # The class only: an exception text can carry anything.
+    assert event == {
+        "event": "reference_id_hint_failed",
+        "log_level": "warning",
+        "error_class": "RuntimeError",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_found_memory_never_looks_for_similar_ids():
+    """Guard: the lookup belongs to the miss only."""
+    result = _response()
+    text, svc = await _call({}, service_result=result)
+    assert text == _legacy_text(result)
+    svc.similar_id_candidates.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_id_keeps_its_own_error_and_looks_for_nothing():
+    """Guard: a malformed id is refused before any read."""
+    text, svc = await _call({"memory_id": "2347bb5a-not-a-uuid"})
+    assert _error(text)["error"] == "invalid_memory_id_format"
+    svc.similar_id_candidates.assert_not_awaited()
