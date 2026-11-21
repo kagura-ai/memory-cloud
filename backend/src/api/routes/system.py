@@ -153,6 +153,11 @@ async def system_info():
         # CHATGPT_APP_URL is empty. A public listing URL (https only, checked at
         # startup); the web UI links to it next to the plugin guide.
         "chatgpt_app_url": settings.chatgpt_app_url or None,
+        # Issue #2950: the address the plan page links back to after an arrival
+        # from the application, or null when KAGURA_PUBLIC_RETURN_URL is empty
+        # (https only, checked at startup). The web UI never takes the address
+        # from anywhere else.
+        "kagura_public_return_url": settings.kagura_public_return_url or None,
         "features": {
             # Issue #2767: true only when this process serves the system-admin
             # surface to signed-in admins (SYSTEM_ADMIN_MODE=session). The web
