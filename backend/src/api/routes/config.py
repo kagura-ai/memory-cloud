@@ -929,7 +929,8 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             requires_restart=True,
             impact=(
                 "Ignored while the sign-up gate is on. With the gate off, false admits only "
-                "users with a pending workspace invitation and the first admin."
+                "allowlisted identities, users with a pending workspace invitation and the "
+                "first admin."
             ),
             examples=["true", "false"],
         ),
