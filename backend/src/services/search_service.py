@@ -80,6 +80,7 @@ class SearchService:
         is_shared_context_read: bool = False,
         degradation: dict[str, Any] | None = None,
         timings: RecallTimings | None = None,
+        search_mode_explicit: bool = True,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
@@ -87,8 +88,12 @@ class SearchService:
         Issue #81: context_id can be a single string or list of strings for cross-context recall.
 
         Modes:
-        - hybrid (default): Semantic + BM25 blend with configurable weights
-        - semantic: Vector search only (embedding similarity)
+        - hybrid (default): Semantic + BM25 blend with configurable weights.
+          When the semantic arm fails, it degrades to BM25 only (#1515).
+        - semantic: Vector search only (embedding similarity). A failure
+          raises when the caller chose this mode; when the query router chose
+          it (``search_mode_explicit=False``) it degrades to BM25 only like
+          hybrid (#2960).
         - keyword: BM25 only (Sudachi tokenized, good for hiragana queries)
 
         Args:
@@ -123,6 +128,12 @@ class SearchService:
                 when a provider scored or the rerank failed open, not when
                 there was nothing to score or no provider. A degraded embed or
                 vector search records its time-to-failure in its own stage.
+            search_mode_explicit: #2960 False when the query router chose
+                ``search_mode`` (#1212, ``routing_mode='active'`` and no mode
+                in the request) rather than the caller. A routed ``semantic``
+                lane then degrades to keyword when its arm fails, as hybrid
+                does; an explicit ``semantic`` raises. Only
+                ``MemoryService.recall`` passes it.
 
         Returns:
             List of search results with scores
@@ -298,8 +309,8 @@ class SearchService:
         fulltext_results: list[dict] = []
 
         # The mode actually served. It diverges from search_mode only when
-        # the semantic arm fails and a hybrid search degrades to keyword
-        # -only (#1515).
+        # the semantic arm fails and a hybrid search (#1515) or a semantic
+        # lane the query router chose (#2960) degrades to keyword-only.
         effective_search_mode: SearchMode = search_mode
         if timings is None:
             timings = RecallTimings()  # discarded; keeps the stage blocks unconditional
@@ -408,19 +419,21 @@ class SearchService:
             except (ExternalServiceError, SelfHostedUnreachableError) as exc:
                 # The semantic arm is down (embedding provider, vector store,
                 # or a self-hosted inference server that cannot be reached,
-                # #2957). A hybrid search can still answer from BM25, so
-                # degrade instead of failing the whole request — but record
-                # it, because keyword-only hits carry no raw cosine and their
-                # confidence is therefore computed on a different basis.
+                # #2957). A hybrid search, and a semantic lane the query
+                # router chose because the caller named no mode (#2960), can
+                # still answer from BM25, so degrade instead of failing the
+                # whole request — but record it, because keyword-only hits
+                # carry no raw cosine and their confidence is therefore
+                # computed on a different basis.
                 #
                 # Only the unreachable subclass of ConfigurationError degrades:
                 # a server that answered and refused (401/403), a missing key
                 # and every other ConfigurationError keep raising CFG-001.
                 #
-                # An explicitly requested "semantic" search has no arm to
-                # fall back to: returning BM25 hits there would answer a
-                # different question than the caller asked, so it re-raises.
-                if search_mode != "hybrid":
+                # A "semantic" search the caller asked for explicitly has no
+                # arm to fall back to: returning BM25 hits there would answer
+                # a different question than the caller asked, so it re-raises.
+                if search_mode == "semantic" and search_mode_explicit:
                     raise
                 if isinstance(exc, SelfHostedUnreachableError):
                     reason = "embedding_unavailable"
@@ -453,7 +466,10 @@ class SearchService:
                     degradation["reason"] = reason
                     degradation["detail"] = detail
 
-        if search_mode in ("hybrid", "keyword"):
+        # effective_search_mode, not search_mode: a semantic lane that just
+        # degraded (#2960) has to run the keyword arm it now answers from,
+        # while a healthy semantic search still runs none.
+        if effective_search_mode in ("hybrid", "keyword"):
             logger.debug(
                 "fulltext_search_starting", query=normalized_query[:50], fetch_size=fetch_size
             )

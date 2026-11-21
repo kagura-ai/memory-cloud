@@ -456,3 +456,249 @@ class TestRecallTimingsWiring:
         assert kw["duration_ms"] == 70
         # the log is the last thing finalize does: the audit row was already written
         emitted.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# #2960: a recall the query router sent to the semantic lane degrades.
+#
+# One chain, nothing in the middle faked: the real ``MemoryService.recall``,
+# the real ``_recall_prepare`` (routing_mode read from the context's search
+# config) and the real ``SearchService.hybrid_search``, with only the IO
+# mocked the way ``test_recall_degraded_fallback._search`` mocks it. A fake
+# hybrid_search that wrote the degradation itself would pass with the flag
+# ignored.
+# ---------------------------------------------------------------------------
+
+# "how do we deploy": plain natural language, which the router sends to its
+# default semantic lane (asserted below on the search the recall ran).
+_ROUTED_QUERY = "how do we deploy"
+_INFERENCE_BASE_URL = "http://inference.example.com:8000"
+_INFERENCE_HOST = "inference.example.com"
+
+
+def _unreachable_server() -> Exception:
+    from utils.exceptions import SelfHostedUnreachableError
+
+    return SelfHostedUnreachableError(
+        f"Cannot connect to self-hosted inference server at {_INFERENCE_BASE_URL}. "
+        "Is your inference server running?"
+    )
+
+
+def _provider_failure() -> Exception:
+    from utils.exceptions import OpenAIError
+
+    # A client error text that names the server it tried: the answer must not.
+    return OpenAIError(f"Embedding generation failed: connection to {_INFERENCE_BASE_URL} failed")
+
+
+_CAUSES = pytest.mark.parametrize(
+    "make_error",
+    [_unreachable_server, _provider_failure],
+    ids=["self_hosted_unreachable", "provider_error"],
+)
+
+
+def _page_row(memory_id):
+    from datetime import UTC, datetime
+
+    from models.schemas import MemoryResponse
+
+    return MemoryResponse(
+        memory_id=memory_id,
+        summary="deploy runbook",
+        context_summary=None,
+        type="note",
+        importance=0.5,
+        scope="persistent",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        client="t",
+        tags=[],
+        context=None,
+        score=0.9,
+    )
+
+
+class _RoutedRig(SimpleNamespace):
+    """What a routed-recall test reads back: the service, the IO mocks and the
+    keyword arguments ``recall`` passed to the real ``hybrid_search``."""
+
+
+def _routed_rig(*, embed_error: Exception | None) -> _RoutedRig:
+    from services.memory_service import MemoryService
+
+    embed_svc = MagicMock()
+    embed_svc.provider = "openai"
+    embed_svc.model = "text-embedding-3-small"
+    if embed_error is not None:
+        embed_svc.embed_with_usage = AsyncMock(side_effect=embed_error)
+    else:
+        embed_svc.embed_with_usage = AsyncMock(return_value=([0.1] * 8, 0))
+    embed_svc.resolve_paid_by = AsyncMock(return_value="platform")
+
+    keyword_memory_id = uuid4()
+    vector_memory_id = uuid4()
+    rig = _RoutedRig(
+        embed_svc=embed_svc,
+        fulltext=AsyncMock(return_value=[{"id": "kw-1", "score": 0.9, "payload": {}}]),
+        vector=AsyncMock(return_value=[{"id": "vec-1", "score": 0.8, "payload": {}}]),
+        keyword_memory_id=keyword_memory_id,
+        vector_memory_id=vector_memory_id,
+        search_kwargs={},
+    )
+
+    service = MemoryService(db=AsyncMock())
+    search_service = service.search_service
+    search_service._get_search_config = AsyncMock(
+        return_value=SimpleNamespace(
+            context_id=uuid4(),
+            fetch_factor=2,
+            use_rerank=False,
+            semantic_weight=0.6,
+            bm25_weight=0.4,
+        )
+    )
+    real_hybrid_search = search_service.hybrid_search
+
+    async def recording_hybrid_search(**kwargs):
+        rig.search_kwargs.update(kwargs)
+        return await real_hybrid_search(**kwargs)
+
+    search_service.hybrid_search = recording_hybrid_search
+
+    rows = {
+        "kw-1": SimpleNamespace(id=keyword_memory_id, tags=[]),
+        "vec-1": SimpleNamespace(id=vector_memory_id, tags=[]),
+    }
+
+    async def hydrate(_request, *, search_results, **_kwargs):
+        return {hit["id"]: rows[hit["id"]] for hit in search_results}
+
+    async def build(request, search_results, memories, **_kwargs):
+        return [_page_row(memories[hit["id"]].id) for hit in search_results[: request.k]]
+
+    service._recall_check_agent_bindings = AsyncMock()
+    service._recall_resolve_cluster_filter = AsyncMock(return_value=None)
+    service._recall_hydrate_memories = hydrate
+    service._recall_filter_rows_by_binding = AsyncMock(side_effect=lambda _r, m, **_k: (m, 0))
+    service._apply_supersede_shadowing = AsyncMock(return_value=({}, {}))
+    service._apply_supersede_fold = AsyncMock(return_value={})
+    service._maybe_reinforce_rerank = AsyncMock()
+    service._maybe_graph_boost = AsyncMock()
+    service._recall_build_responses = build
+    service._recall_record_access = AsyncMock()
+    service._recall_run_hebbian_learning = AsyncMock()
+    service._tag_suggestions_for_empty_result = AsyncMock(return_value=None)
+    rig.service = service
+    return rig
+
+
+async def _routed_recall(rig: _RoutedRig, *, routing_mode: str, search_mode: str | None = None):
+    from unittest.mock import patch
+
+    from models.schemas import RecallRequest
+
+    request = (
+        RecallRequest(query=_ROUTED_QUERY)
+        if search_mode is None
+        else RecallRequest(query=_ROUTED_QUERY, search_mode=search_mode)
+    )
+    with (
+        patch(
+            "repositories.config_repository.ContextSearchConfigRepository.get_by_context",
+            new=AsyncMock(return_value=SimpleNamespace(routing_mode=routing_mode)),
+        ),
+        patch("services.search_service.LLMCallLogWriter", MagicMock()),
+        patch(
+            "services.search_service.resolve_routing_from_config",
+            return_value=("default", rig.embed_svc),
+        ),
+        patch("services.search_service.search_memories_qdrant", new=rig.vector),
+        patch("services.search_service.search_memories_fulltext", new=rig.fulltext),
+        patch(
+            "services.context_service.ContextService.is_context_shared",
+            new=AsyncMock(return_value=False),
+        ),
+        patch("services.memory_access_event_writer.emit_memory_access_event", new=AsyncMock()),
+    ):
+        return await rig.service.recall(
+            request,
+            "u1",
+            current_context_id=uuid4(),
+            current_workspace_id=uuid4(),
+            capacity_gate=False,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("no_identity_links")
+class TestRoutedSemanticRecallDegrades:
+    @_CAUSES
+    async def test_active_routing_without_search_mode_answers_keyword_hits_flagged_degraded(
+        self, make_error
+    ):
+        rig = _routed_rig(embed_error=make_error())
+
+        response = await _routed_recall(rig, routing_mode="active")
+
+        # The router chose semantic and recall told the search so.
+        assert rig.search_kwargs["search_mode"] == "semantic"
+        assert rig.search_kwargs["search_mode_explicit"] is False
+        rig.embed_svc.embed_with_usage.assert_awaited_once()
+        # Keyword results, not an empty page with a flag.
+        rig.fulltext.assert_awaited_once()
+        assert [row.memory_id for row in response.results] == [rig.keyword_memory_id]
+        assert response.degraded is True
+        assert response.degraded_reason == "embedding_unavailable"
+        # The serialised answer (as the REST route sends it) names no server.
+        body = response.model_dump_json(exclude_none=True)
+        assert body.count(_INFERENCE_HOST) == 0
+
+    @_CAUSES
+    async def test_explicit_semantic_through_recall_still_raises(self, make_error):
+        error = make_error()
+        rig = _routed_rig(embed_error=error)
+
+        with pytest.raises(type(error)):
+            await _routed_recall(rig, routing_mode="active", search_mode="semantic")
+
+        assert rig.search_kwargs["search_mode"] == "semantic"
+        assert rig.search_kwargs["search_mode_explicit"] is True
+        rig.fulltext.assert_not_called()
+
+    @pytest.mark.parametrize("routing_mode", ["log_only", "off"])
+    async def test_log_only_and_off_still_search_hybrid(self, routing_mode):
+        rig = _routed_rig(embed_error=None)
+
+        response = await _routed_recall(rig, routing_mode=routing_mode)
+
+        assert rig.search_kwargs["search_mode"] == "hybrid"
+        rig.vector.assert_awaited_once()
+        rig.fulltext.assert_awaited_once()
+        assert response.degraded is None
+
+    async def test_hybrid_search_call_carries_search_mode_explicit(self):
+        """The hybrid_search call itself passes the caller's choice; a
+        source-string check would pass for any call site (#1989)."""
+        import ast
+        import inspect
+        import textwrap
+
+        from services.memory_service import MemoryService
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(MemoryService.recall)))
+        searches = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "hybrid_search"
+        ]
+        assert searches, "recall no longer calls hybrid_search"
+        for call in searches:
+            passed = {kw.arg: kw.value for kw in call.keywords}
+            assert "search_mode_explicit" in passed, (
+                "MemoryService.recall must tell hybrid_search whether the caller "
+                "chose search_mode; without it a routed semantic recall fails "
+                "instead of degrading (#2960)."
+            )

@@ -7026,6 +7026,12 @@ class MemoryService:
             user_id=user_id,
         )
 
+        # #2960: whether the caller chose the search mode, read from the
+        # caller's own request before ``plan.request`` replaces it. A mode the
+        # query router chose degrades to keyword when the semantic arm fails;
+        # one the caller asked for keeps raising.
+        search_mode_explicit = request.search_mode is not None
+
         # Resolve the effective query parameters once (#708 paying workspace,
         # neural flag, #81 search scope, #1220 config prefetch, #1212 search
         # mode). ``plan.request`` supersedes the caller's request from here on.
@@ -7177,6 +7183,7 @@ class MemoryService:
             is_shared_context_read=is_shared_context_read,
             degradation=degradation,
             timings=timings,
+            search_mode_explicit=search_mode_explicit,
         )
 
         if not search_results:

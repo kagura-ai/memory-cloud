@@ -878,12 +878,14 @@ class RecallResponse(BaseModel):
     # Issue #1047: top-level relevance confidence. None on legacy/explore paths
     # that don't compute it; recall() always populates it (incl. "none" on empty).
     confidence: RecallConfidence | None = None
-    # #1515: set only when the semantic arm was unavailable and a hybrid recall
-    # was served from BM25 alone. Absent on the happy path (both recall routes
-    # use response_model_exclude_none=True), so this is additive for existing
-    # clients. It matters because keyword-only hits carry no raw cosine, which
-    # puts ``confidence`` on a different basis than usual — a caller that
-    # thresholds on confidence needs to know that happened.
+    # #1515: set only when the semantic arm was unavailable and a hybrid recall,
+    # or a semantic lane the query router chose because the caller named no
+    # search_mode (#2960), was served from BM25 alone. Absent on the happy path
+    # (both recall routes use response_model_exclude_none=True), so this is
+    # additive for existing clients. It matters because keyword-only hits
+    # carry no raw cosine, which puts ``confidence`` on a different basis than
+    # usual — a caller that thresholds on confidence needs to know that
+    # happened.
     degraded: bool | None = Field(
         default=None,
         description=(
