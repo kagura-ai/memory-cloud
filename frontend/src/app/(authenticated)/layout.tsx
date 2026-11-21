@@ -12,7 +12,7 @@
  * workspace, and an owner who must choose is sent there once per session
  */
 
-import { Fragment, Suspense, useEffect, useState } from "react";
+import { Fragment, Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLocale } from "@/i18n";
@@ -213,13 +213,21 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
       pathname === "/workspace/settings/general") &&
     searchParams.get("create") === "true";
 
-  // Redirect to login for protected routes (not homepage). #2950: an arrival
-  // from the application signs in and comes back to it, through a login path
-  // built from constants only (nothing of the URL is carried over).
+  // Redirect to login for protected routes (not homepage). #2950: a visitor
+  // who arrives signed out from the application signs in and comes back to
+  // it, through a login path built from constants only (nothing of the URL is
+  // carried over). Signing out on that URL is not an arrival: it goes to
+  // /login like any sign-out, so this layout remembers having had a user.
   const applicationReturnArrival = isApplicationReturnArrival(pathname, searchParams);
+  const hadUser = useRef(false);
+  useEffect(() => {
+    if (user) hadUser.current = true;
+  }, [user]);
   useEffect(() => {
     if (!isLoading && !user && pathname !== "/") {
-      router.push(applicationReturnArrival ? APPLICATION_RETURN_LOGIN_PATH : "/login");
+      router.push(
+        applicationReturnArrival && !hadUser.current ? APPLICATION_RETURN_LOGIN_PATH : "/login",
+      );
     }
   }, [user, isLoading, pathname, router, applicationReturnArrival]);
 

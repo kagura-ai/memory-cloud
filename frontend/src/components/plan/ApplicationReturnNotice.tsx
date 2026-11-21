@@ -16,9 +16,15 @@
  * one effect writes the marker and takes the parameter out of the address bar,
  * and only when the notice may show. With no address set it renders nothing,
  * writes nothing and leaves the URL alone.
+ *
+ * Keyboard focus is never dropped to the page body: "Hide this notice" and a
+ * re-check that hides the notice move it to the page's plan section
+ * (`focusTargetRef`), and a re-check that finds the plan moves it to the
+ * return link. "Check again" stays focusable while it runs.
  */
 
 import {
+  type RefObject,
   useEffect,
   useId,
   useRef,
@@ -54,6 +60,11 @@ export interface ApplicationReturnNoticeProps {
   planLabel: string;
   /** Called after "Check again" re-read the user and the workspaces. */
   onRechecked: () => void;
+  /**
+   * Where keyboard focus goes when the notice goes away (the page's plan
+   * section, focusable with `tabIndex={-1}`).
+   */
+  focusTargetRef: RefObject<HTMLElement | null>;
   className?: string;
 }
 
@@ -61,6 +72,7 @@ export function ApplicationReturnNotice({
   workspace,
   planLabel,
   onRechecked,
+  focusTargetRef,
   className,
 }: ApplicationReturnNoticeProps) {
   const t = useTranslations("workspace");
@@ -84,6 +96,11 @@ export function ApplicationReturnNotice({
   const written = useRef(false);
   const [checking, setChecking] = useState(false);
   const [rechecked, setRechecked] = useState(false);
+  // Refs read and written only in handlers and effects, never in render.
+  const checkInFlight = useRef(false);
+  const focusAfterCheck = useRef(false);
+  const regionRef = useRef<HTMLDivElement>(null);
+  const returnLinkRef = useRef<HTMLAnchorElement>(null);
 
   const href = httpsHref(info?.kagura_public_return_url);
   const isCanonicalOwner =
@@ -99,27 +116,59 @@ export function ApplicationReturnNotice({
     router.replace(PLAN_PAGE_PATH, { scroll: false });
   }, [arrival, mayShow, router]);
 
+  const visible = mayShow && user !== null && marked;
+  const onPlan = workspace.plan_name === TOP_PLAN;
+
+  // After a re-check that had the focus inside the notice: the return link
+  // when the plan is found, the plan section when the notice went away.
+  // Otherwise Check again is still there and keeps the focus.
+  useEffect(() => {
+    if (checking || !focusAfterCheck.current) return;
+    focusAfterCheck.current = false;
+    if (!visible) focusTargetRef.current?.focus();
+    else if (onPlan) returnLinkRef.current?.focus();
+  }, [checking, visible, onPlan, focusTargetRef]);
+
   if (href === null || user === null || !isCanonicalOwner || !marked)
     return null;
 
-  const onPlan = workspace.plan_name === TOP_PLAN;
   const account = user.email || user.name;
 
   const handleCheckAgain = async () => {
+    // aria-disabled, not disabled, while it runs: the button keeps the focus,
+    // and a second activation is ignored here.
+    if (checkInFlight.current) return;
+    checkInFlight.current = true;
+    const focusedInside = regionRef.current?.contains(document.activeElement) ?? false;
     setChecking(true);
     try {
       // Another tab may have switched the account; nothing syncs tabs.
       await refetchUser();
       await refreshWorkspaces({ quiet: true });
+      // Move the focus afterwards only if it was in the notice and still is,
+      // or was dropped because what held it went away meanwhile.
+      const active = document.activeElement;
+      focusAfterCheck.current =
+        focusedInside &&
+        (active === null ||
+          active === document.body ||
+          (regionRef.current?.contains(active) ?? false));
       onRechecked();
       setRechecked(true);
     } finally {
+      checkInFlight.current = false;
       setChecking(false);
     }
   };
 
+  const handleHide = () => {
+    focusTargetRef.current?.focus();
+    forgetApplicationReturn();
+  };
+
   return (
     <Alert
+      ref={regionRef}
       role="region"
       aria-labelledby={titleId}
       className={cn("mb-6", className)}
@@ -146,7 +195,12 @@ export function ApplicationReturnNotice({
         <div className="flex flex-wrap items-center gap-3 pt-1">
           {onPlan ? (
             <Button asChild>
-              <a href={href} rel="noopener noreferrer" referrerPolicy="no-referrer">
+              <a
+                ref={returnLinkRef}
+                href={href}
+                rel="noopener noreferrer"
+                referrerPolicy="no-referrer"
+              >
                 {t("planPage.applicationReturn.returnLink")}
               </a>
             </Button>
@@ -155,8 +209,9 @@ export function ApplicationReturnNotice({
               <Button
                 variant="outline"
                 onClick={() => void handleCheckAgain()}
-                disabled={checking}
+                aria-disabled={checking}
                 aria-busy={checking}
+                className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
               >
                 {t("planPage.applicationReturn.checkAgain")}
               </Button>
@@ -170,7 +225,7 @@ export function ApplicationReturnNotice({
               </a>
             </>
           )}
-          <Button variant="ghost" onClick={forgetApplicationReturn}>
+          <Button variant="ghost" onClick={handleHide}>
             {t("planPage.applicationReturn.dismiss")}
           </Button>
         </div>

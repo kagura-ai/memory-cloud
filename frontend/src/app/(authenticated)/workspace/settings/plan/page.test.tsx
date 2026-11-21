@@ -19,6 +19,8 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import type { ApplicationReturnNoticeProps } from "@/components/plan/ApplicationReturnNotice";
+import { ApiError } from "@/lib/api/base";
+import { resetApplicationReturnFallback } from "@/lib/navigation/applicationReturn";
 
 import WorkspacePlanPage from "./page";
 
@@ -34,8 +36,20 @@ vi.mock("next-intl", () => ({
 }));
 // FeatureGateNotice routes any CTA with the app router — there must be none.
 const mockPush = vi.fn();
+const mockReplace = vi.fn();
+let mockSearchParams = new URLSearchParams();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush }),
+  useRouter: () => ({ push: mockPush, replace: mockReplace }),
+  usePathname: () => "/workspace/settings/plan",
+  useSearchParams: () => mockSearchParams,
+}));
+// #2950: the real notice (one test renders it) reads the signed-in user.
+const OWNER_ID = "user-owner";
+vi.mock("@/contexts/AuthContext", () => ({
+  useAuth: () => ({
+    user: { id: OWNER_ID, email: "owner@example.com", name: "Owner" },
+    refetchUser: async () => undefined,
+  }),
 }));
 // useFeatureGate subscribes to the shared tier matrix; plan_page has no
 // matrix test, so it never waits on it. Mocked so jsdom never fetches.
@@ -45,7 +59,9 @@ vi.mock("@/hooks/usePlanFeatures", () => ({
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: "en" }) }));
 
 let mockWorkspace: {
+  id?: string;
   name?: string;
+  owner_user_id?: string;
   current_user_role?: string;
   plan_name?: string;
 } | null = null;
@@ -53,6 +69,7 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
     currentWorkspaceId: "ws-1",
     currentWorkspace: mockWorkspace,
+    refreshWorkspaces: async () => undefined,
   }),
 }));
 
@@ -71,7 +88,11 @@ vi.mock("@/lib/api/billing", () => ({
 }));
 vi.mock("@/lib/api/base", () => ({
   ApiError: class ApiError extends Error {
-    status = 0;
+    status: number;
+    constructor(init?: { message?: string; status?: number }) {
+      super(init?.message);
+      this.status = init?.status ?? 0;
+    }
   },
 }));
 // Keep the real tier predicates (isPlanTier / isPaidTier); echo the tier as
@@ -88,19 +109,29 @@ vi.mock("@/components/plan/PlanFeatureMatrix", () => ({
   PlanFeatureMatrix: () => null,
 }));
 // #2950: the notice has its own test; here only whether and how the page
-// renders it. The stub keeps the props it was given.
+// renders it. The stub keeps the props it was given; one test renders the
+// real notice instead.
 let mockNoticeProps: ApplicationReturnNoticeProps | null = null;
-vi.mock("@/components/plan/ApplicationReturnNotice", () => ({
-  ApplicationReturnNotice: (props: ApplicationReturnNoticeProps) => {
-    mockNoticeProps = props;
-    return <div data-testid="application-return-notice" data-plan-label={props.planLabel} />;
-  },
-}));
+let mockRealNotice = false;
+vi.mock("@/components/plan/ApplicationReturnNotice", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/components/plan/ApplicationReturnNotice")
+  >("@/components/plan/ApplicationReturnNotice");
+  return {
+    ApplicationReturnNotice: (props: ApplicationReturnNoticeProps) => {
+      mockNoticeProps = props;
+      if (mockRealNotice) return <actual.ApplicationReturnNotice {...props} />;
+      return <div data-testid="application-return-notice" data-plan-label={props.planLabel} />;
+    },
+  };
+});
 // #1145: the page is gated behind the backend ENABLE_PLAN_PAGE flag. Default
 // the mocked hook to enabled; flip per-test for the disabled-notice case.
 let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+let mockReturnUrl: string | null = null;
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+  useSystemInfo: () => ({ kagura_public_return_url: mockReturnUrl }),
 }));
 
 const planInfo = (overrides: Record<string, unknown> = {}) => ({
@@ -127,6 +158,11 @@ const planInfo = (overrides: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mockNoticeProps = null;
+  mockRealNotice = false;
+  mockReturnUrl = null;
+  mockSearchParams = new URLSearchParams();
+  window.sessionStorage.clear();
+  resetApplicationReturnFallback();
   mockFeatures = { plan_page: true };
   mockGetWorkspacePlan.mockResolvedValue(planInfo());
 });
@@ -299,6 +335,43 @@ describe("WorkspacePlanPage link back to the application (#2950)", () => {
     expect(
       notice.compareDocumentPosition(currentPlan) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    // Where keyboard focus goes when the notice goes away: the plan section.
+    const focusTarget = mockNoticeProps?.focusTargetRef.current;
+    expect(focusTarget).toHaveAttribute("tabindex", "-1");
+    expect(focusTarget).toContainElement(currentPlan);
+  });
+
+  it("with the plan page on and an address set, the notice renders even when the billing handoff answers 503", async () => {
+    mockRealNotice = true;
+    mockReturnUrl = "https://app.example.com/return";
+    mockSearchParams = new URLSearchParams("return=kagura-public");
+    mockWorkspace = {
+      id: "ws-1",
+      name: "Research",
+      owner_user_id: OWNER_ID,
+      current_user_role: "owner",
+      plan_name: "free",
+    };
+    mockMintBillingHandoff.mockRejectedValueOnce(
+      new ApiError({ message: "billing unavailable", status: 503 }),
+    );
+    render(<WorkspacePlanPage />);
+    const title = "planPage.applicationReturn.title";
+    expect(await screen.findByRole("region", { name: title })).toBeInTheDocument();
+    expect(mockReplace).toHaveBeenCalledWith("/workspace/settings/plan", { scroll: false });
+
+    fireEvent.click(screen.getByText("planPage.manageBilling"));
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ description: "planPage.unavailable" }),
+      ),
+    );
+    // Nothing in the notice depends on the handoff: it stays, with its texts.
+    expect(screen.getByRole("region", { name: title })).toBeInTheDocument();
+    expect(screen.getByText("planPage.applicationReturn.notOnPlan")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "planPage.applicationReturn.returnLink" }),
+    ).toHaveAttribute("href", "https://app.example.com/return");
   });
 
   it.each(["admin", "member", "viewer"])("not for a non-owner (%s)", async (role) => {
