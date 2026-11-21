@@ -3651,7 +3651,6 @@ class MemoryService:
         context_id: UUID,
         workspace_id: UUID,
         key_workspace_id: UUID | None = None,
-        limit: int = SIMILAR_ID_LIMIT,
     ) -> list[tuple[UUID, str]]:
         """Memories whose ids start like ``memory_id``, for a ``reference`` miss (#2959).
 
@@ -3676,10 +3675,10 @@ class MemoryService:
             context_id: The context the call named (already authorized).
             workspace_id: That context's workspace.
             key_workspace_id: The #963 pure key scope, as for ``reference``.
-            limit: At most this many are returned.
 
         Returns:
-            ``(memory_id, summary)`` pairs, plain values, best match first.
+            At most ``SIMILAR_ID_LIMIT`` ``(memory_id, summary)`` pairs, plain
+            values, best match first.
         """
         from models.memory import Memory
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
@@ -3739,7 +3738,7 @@ class MemoryService:
                 key_workspace_id=key_workspace_id,
             ):
                 found.append((row.id, row.summary))
-                if len(found) == limit:
+                if len(found) >= SIMILAR_ID_LIMIT:
                     break
         return found
 

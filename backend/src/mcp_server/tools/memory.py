@@ -2422,12 +2422,16 @@ async def _record_session_read(
         )
 
 
+_REFERENCE_NOT_FOUND_HELP = "Use recall() to find memories you have access to."
 # #2959: the help of a reference miss that names memories with a similar id.
-# One sentence that names no other tool, so the google view keeps it.
+# The retry sentence names no other tool, so the google view keeps it; the
+# second keeps the pointer for an agent that finds none of them is the memory
+# it meant (the google view drops it, as it drops every pointer to another tool).
 _REFERENCE_SIMILAR_IDS_HELP = (
     "The memories in similar_ids are in this context and their ids start like the one "
     "you sent; if one of them is the memory you meant, call reference again with its "
-    "memory_id exactly as listed."
+    "memory_id exactly as listed. Otherwise use recall() to find memories you have "
+    "access to."
 )
 
 
@@ -2439,17 +2443,13 @@ def _reference_not_found(
     ``similar`` (#2959) are memories of the named context whose ids start like
     ``memory_id``, as ``MemoryService.similar_id_candidates`` found them. With
     any, they follow as ``similar_ids`` (summaries cut as compact recall rows
-    are) and ``help`` says to retry with one exactly as listed; ``error`` and
-    ``message`` stay the same. Without any, the answer is the one ``reference``
-    always gave.
+    are) and ``help`` says to retry with one exactly as listed, and otherwise
+    to use recall; ``error`` and ``message`` stay the same. Without any, the
+    answer is the one ``reference`` always gave.
     """
     message = f"Memory not found or you don't have access: {memory_id}"
     if not similar:
-        return _error_response(
-            "memory_not_found",
-            message,
-            help="Use recall() to find memories you have access to.",
-        )
+        return _error_response("memory_not_found", message, help=_REFERENCE_NOT_FOUND_HELP)
     listed = []
     for similar_id, summary in similar:
         head, cut = compact_summary(summary, COMPACT_SUMMARY_CHARS)

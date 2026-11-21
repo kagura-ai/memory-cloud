@@ -1022,10 +1022,15 @@ async def test_light_fields_over_the_budget_still_page_in_useful_steps():
 # --------------------------------------------- #2959: similar ids on a miss
 
 _PLAIN_MISS_HELP = "Use recall() to find memories you have access to."
-_SIMILAR_IDS_HELP = (
+_SIMILAR_IDS_RETRY = (
     "The memories in similar_ids are in this context and their ids start like the one "
     "you sent; if one of them is the memory you meant, call reference again with its "
     "memory_id exactly as listed."
+)
+# The retry sentence names no other tool; the second keeps the pointer for an
+# agent that finds none of them is the memory it meant.
+_SIMILAR_IDS_HELP = (
+    _SIMILAR_IDS_RETRY + " Otherwise " + _PLAIN_MISS_HELP[0].lower() + _PLAIN_MISS_HELP[1:]
 )
 
 
@@ -1233,3 +1238,24 @@ async def test_a_failing_rollback_after_the_lookup_cannot_raise():
 
     assert found == [candidate]
     db.rollback.assert_awaited_once()
+
+
+def test_the_similar_ids_help_retries_first_then_points_to_recall():
+    from mcp_server.tools.memory import _reference_not_found
+
+    payload = _error(_reference_not_found(MEM_ID, [(uuid4(), "deploy runbook")])[0].text)
+    assert payload["help"] == (
+        "The memories in similar_ids are in this context and their ids start like the one "
+        "you sent; if one of them is the memory you meant, call reference again with its "
+        "memory_id exactly as listed. Otherwise use recall() to find memories you have "
+        "access to."
+    )
+
+
+def test_similar_id_candidates_takes_no_limit():
+    """The cap is the constant: a ``limit`` of 0 would have returned every row."""
+    import inspect
+
+    from services.memory_service import MemoryService
+
+    assert "limit" not in inspect.signature(MemoryService.similar_id_candidates).parameters
