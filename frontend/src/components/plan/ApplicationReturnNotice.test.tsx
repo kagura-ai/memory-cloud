@@ -5,9 +5,11 @@
  * the workspace's canonical owner; an arrival writes the marker once and takes
  * the parameter out of the address bar; the link is a plain same-tab anchor to
  * the configured address and nothing navigates by itself; "Check again" is one
- * quiet re-read. The wording itself is checked against the catalogues in
+ * quiet re-read; keyboard focus is never dropped to the page body. The wording
+ * itself is checked against the catalogues in
  * src/messages/applicationReturnCopy.test.ts (this translator echoes keys).
  */
+import { useReducer } from "react";
 import {
   act,
   cleanup,
@@ -93,14 +95,36 @@ function workspaceWith(overrides: Partial<Workspace> = {}): Workspace {
 
 const onRechecked = vi.fn();
 
-function renderNotice(workspace: Workspace = workspaceWith()) {
-  return render(
+// The plan page around the notice: its plan section is the focus target, and
+// the workspace it passes is re-read when a re-check reports back (as the
+// page re-renders from the refreshed workspace list).
+const planSectionRef: { current: HTMLElement | null } = { current: null };
+let mockPageWorkspace: Workspace = workspaceWith();
+
+function NoticeOnPlanPage() {
+  const [, rerenderPage] = useReducer((n: number) => n + 1, 0);
+  return (
     <ApplicationReturnNotice
-      workspace={workspace}
+      workspace={mockPageWorkspace}
       planLabel="Max"
-      onRechecked={onRechecked}
-    />,
+      onRechecked={() => {
+        onRechecked();
+        rerenderPage();
+      }}
+      focusTargetRef={planSectionRef}
+    />
   );
+}
+
+function renderNotice(workspace: Workspace = workspaceWith()) {
+  mockPageWorkspace = workspace;
+  return render(<NoticeOnPlanPage />);
+}
+
+function planSection(): HTMLElement {
+  const section = planSectionRef.current;
+  if (!section) throw new Error("no plan section");
+  return section;
 }
 
 const TITLE = "planPage.applicationReturn.title";
@@ -123,10 +147,18 @@ beforeEach(() => {
   mockSearchParams = new URLSearchParams();
   mockUser = OWNER;
   mockSystemInfo = { kagura_public_return_url: RETURN_URL };
+  mockPageWorkspace = workspaceWith();
+  const section = document.createElement("div");
+  section.tabIndex = -1;
+  section.dataset.testid = "plan-section";
+  document.body.appendChild(section);
+  planSectionRef.current = section;
 });
 
 afterEach(() => {
   cleanup();
+  planSectionRef.current?.remove();
+  planSectionRef.current = null;
   vi.restoreAllMocks();
   window.sessionStorage.clear();
   resetApplicationReturnFallback();
@@ -236,21 +268,9 @@ describe("ApplicationReturnNotice (#2950)", () => {
 
     // A new params object with the same arrival, then the cleaned address.
     mockSearchParams = new URLSearchParams("return=kagura-public");
-    rerender(
-      <ApplicationReturnNotice
-        workspace={workspaceWith()}
-        planLabel="Max"
-        onRechecked={onRechecked}
-      />,
-    );
+    rerender(<NoticeOnPlanPage />);
     mockSearchParams = new URLSearchParams();
-    rerender(
-      <ApplicationReturnNotice
-        workspace={workspaceWith()}
-        planLabel="Max"
-        onRechecked={onRechecked}
-      />,
-    );
+    rerender(<NoticeOnPlanPage />);
 
     expect(screen.getByRole("region", { name: TITLE })).toBeInTheDocument();
     expect(storedMarkerWrites(setItem)).toBe(1);
@@ -394,7 +414,11 @@ describe("ApplicationReturnNotice (#2950)", () => {
 
   it("Check again re-reads the user and the workspaces quietly, calls onRechecked and announces the plan", async () => {
     rememberApplicationReturn();
-    const { rerender } = renderNotice();
+    // The re-read workspace list says the top plan.
+    mockRefreshWorkspaces.mockImplementation(async () => {
+      mockPageWorkspace = workspaceWith({ plan_name: "promax" });
+    });
+    renderNotice();
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("");
     expect(status).toHaveClass("sr-only");
@@ -421,14 +445,6 @@ describe("ApplicationReturnNotice (#2950)", () => {
     expect(mockRefetchUser).toHaveBeenCalledTimes(1);
     expect(mockRefreshWorkspaces).toHaveBeenCalledTimes(1);
 
-    // The re-read workspace list now says the top plan.
-    rerender(
-      <ApplicationReturnNotice
-        workspace={workspaceWith({ plan_name: "promax" })}
-        planLabel="Max"
-        onRechecked={onRechecked}
-      />,
-    );
     const announced = await screen.findByText(
       "planPage.applicationReturn.nowOnPlan Max",
     );
@@ -499,5 +515,106 @@ describe("ApplicationReturnNotice (#2950)", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     // The polite status sits inside the region, not inside an alert.
     expect(region).toContainElement(screen.getByRole("status"));
+  });
+});
+
+describe("ApplicationReturnNotice keyboard focus (#2950)", () => {
+  const checkAgain = () =>
+    screen.getByRole("button", { name: "planPage.applicationReturn.checkAgain" });
+
+  it("Hide this notice moves focus to the plan section", async () => {
+    rememberApplicationReturn();
+    renderNotice();
+    const hide = screen.getByRole("button", {
+      name: "planPage.applicationReturn.dismiss",
+    });
+    hide.focus();
+    expect(document.activeElement).toBe(hide);
+    fireEvent.click(hide);
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: TITLE })).toBeNull(),
+    );
+    expect(document.activeElement).toBe(planSection());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("when Check again finds the plan, focus moves to the return link", async () => {
+    rememberApplicationReturn();
+    mockRefreshWorkspaces.mockImplementation(async () => {
+      mockPageWorkspace = workspaceWith({ plan_name: "promax" });
+    });
+    renderNotice();
+    const button = checkAgain();
+    button.focus();
+    fireEvent.click(button);
+    await screen.findByText("planPage.applicationReturn.nowOnPlan Max");
+    const link = screen.getByRole("link", {
+      name: "planPage.applicationReturn.returnLink",
+    });
+    await waitFor(() => expect(document.activeElement).toBe(link));
+  });
+
+  it("when Check again finds another account, focus moves to the plan section", async () => {
+    rememberApplicationReturn();
+    const other: MockUser = {
+      id: "user-second",
+      email: "second@example.com",
+      name: "Second",
+    };
+    mockRefetchUser.mockImplementation(async () => {
+      mockUser = other;
+      return other;
+    });
+    renderNotice();
+    const button = checkAgain();
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: TITLE })).toBeNull(),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(planSection()));
+  });
+
+  it("a re-check that changes nothing leaves focus on Check again", async () => {
+    rememberApplicationReturn();
+    renderNotice();
+    const button = checkAgain();
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => expect(onRechecked).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "false"));
+    expect(checkAgain()).toBe(button);
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("Check again stays focusable while it runs and ignores a second activation", async () => {
+    rememberApplicationReturn();
+    let finishRefetch: () => void = () => {};
+    mockRefetchUser.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishRefetch = () => resolve(mockUser);
+        }),
+    );
+    renderNotice();
+    const button = checkAgain();
+    button.focus();
+    fireEvent.click(button);
+    await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "true"));
+    expect(button).toHaveAttribute("aria-busy", "true");
+    // Never `disabled`: a disabled button would lose the focus.
+    expect(button).not.toBeDisabled();
+    expect(document.activeElement).toBe(button);
+
+    fireEvent.click(button);
+    expect(mockRefetchUser).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishRefetch();
+    });
+    await waitFor(() => expect(onRechecked).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(button).toHaveAttribute("aria-disabled", "false"));
+    expect(mockRefreshWorkspaces).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(button);
   });
 });

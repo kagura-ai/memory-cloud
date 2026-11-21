@@ -390,6 +390,24 @@ describe("(authenticated) layout — signed-out arrival from the application (#2
     expect(screen.queryByText("plan page")).toBeNull();
   });
 
+  it("signing out on the arrival URL goes to /login", async () => {
+    // The parameter stays in the address bar whenever the notice may not show
+    // (no address set, not the canonical owner). Signing out there is not an
+    // arrival: the next sign-in goes where it always went.
+    mockUser = { id: "u1", email: "u@example.test", name: "U", terms_acceptance_required: false };
+    mockPathname = "/workspace/settings/plan";
+    mockSearchParams = new URLSearchParams("return=kagura-public");
+    const { rerender } = render(<DashboardLayout><p>plan page</p></DashboardLayout>);
+    expect(await screen.findByTestId("app")).toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalledWith("/login");
+    expect(mockPush).not.toHaveBeenCalledWith(APPLICATION_RETURN_LOGIN_PATH);
+
+    mockUser = null;
+    rerender(<DashboardLayout><p>plan page</p></DashboardLayout>);
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith("/login"));
+    expect(mockPush).not.toHaveBeenCalledWith(APPLICATION_RETURN_LOGIN_PATH);
+  });
+
   it.each([
     ["the plan page without the parameter", "/workspace/settings/plan", ""],
     ["another value", "/workspace/settings/plan", "return=other"],
