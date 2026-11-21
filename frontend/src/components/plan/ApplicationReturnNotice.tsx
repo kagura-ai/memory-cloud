@@ -151,6 +151,8 @@ export function ApplicationReturnNotice({
       const userRead = (await refetchUser()) !== undefined;
       const listRead = userRead && (await refreshWorkspaces({ quiet: true })) !== false;
       if (!listRead) {
+        // Hidden (or gone) while the reads ran: nothing is left to try again.
+        if (!hasApplicationReturn()) return;
         toast({
           variant: "destructive",
           title: tCommon("error"),

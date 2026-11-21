@@ -648,9 +648,7 @@ describe("ApplicationReturnNotice failed re-check (#2950)", () => {
     async (_label, fail) => {
       rememberApplicationReturn();
       fail();
-      renderNotice(workspaceWith());
-      // Had the re-check counted, the page would now pass the top plan.
-      mockPageWorkspace = workspaceWith({ plan_name: "promax" });
+      const { rerender } = renderNotice(workspaceWith());
       fireEvent.click(checkAgain());
       await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
       expect(mockToast).toHaveBeenCalledWith({
@@ -664,8 +662,44 @@ describe("ApplicationReturnNotice failed re-check (#2950)", () => {
       expect(
         screen.getByText("planPage.applicationReturn.notOnPlan Research|Max"),
       ).toBeInTheDocument();
+
+      // The re-check is not marked as done: when the top plan reaches the page
+      // later by itself, nothing announces it as found by this check.
+      mockPageWorkspace = workspaceWith({ plan_name: "promax" });
+      rerender(<NoticeOnPlanPage />);
+      expect(
+        screen.getByText("planPage.applicationReturn.onPlan Research|Max"),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("status")).toHaveTextContent("");
     },
   );
+
+  it("a re-check that fails after the notice was hidden shows no toast", async () => {
+    rememberApplicationReturn();
+    let failList: () => void = () => {};
+    mockRefreshWorkspaces.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          failList = () => resolve(false);
+        }),
+    );
+    renderNotice();
+    fireEvent.click(checkAgain());
+    await waitFor(() => expect(mockRefreshWorkspaces).toHaveBeenCalledTimes(1));
+    fireEvent.click(
+      screen.getByRole("button", { name: "planPage.applicationReturn.dismiss" }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: TITLE })).toBeNull(),
+    );
+
+    await act(async () => {
+      failList();
+    });
+    // Nothing is left to try again.
+    expect(mockToast).not.toHaveBeenCalled();
+    expect(onRechecked).not.toHaveBeenCalled();
+  });
 
   it("a failed re-check leaves focus on Check again", async () => {
     rememberApplicationReturn();
