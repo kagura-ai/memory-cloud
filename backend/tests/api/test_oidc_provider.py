@@ -844,9 +844,9 @@ def test_consent_page_accept_language_decides_without_a_supported_account_locale
     _, page = _consent_page(api, headers={"Accept-Language": "ja"})
     assert _lang(page) == "ja"
     assert _visible(page) == _JA_PAGE
-    _, page = _consent_page(api, headers={"Accept-Language": "fr, en;q=0.5"})
-    assert _lang(page) == "en"
-    assert _visible(page) == _EN_PAGE
+    _, page = _consent_page(api, headers={"Accept-Language": "fr, ja;q=0.5"})
+    assert _lang(page) == "ja"
+    assert _visible(page) == _JA_PAGE
 
 
 def test_consent_page_falls_back_to_the_japanese_account_label(api, store):
