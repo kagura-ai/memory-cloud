@@ -54,11 +54,9 @@ const FORBIDDEN = {
     /購入/,
     /課金/,
     /契約/,
-    // A wait stated as a fact; "少し待ってから" (wait a moment, then try
-    // again) in checkFailed is an instruction, not a statement.
-    /待って(い|お)/,
-    /お待ち/,
-    /待機/,
+    // Any wait (待ち, 待って, 待機, お待たせ, …) except the instruction in
+    // checkFailed: "少し待ってから" (wait a moment, then try again).
+    /待(?!ってから)/,
     /必要/,
     /来ました/,
     /戻ってきた/,
@@ -74,6 +72,28 @@ const CATALOGUES = [
   ["en", en.workspace.planPage.applicationReturn],
   ["ja", ja.workspace.planPage.applicationReturn],
 ] as const;
+
+describe("the Japanese wait guard (#2950)", () => {
+  const refused = (text: string) => FORBIDDEN.ja.some((pattern) => pattern.test(text));
+
+  it.each([
+    "確認待ちです",
+    "承認待ちです",
+    "待ってます",
+    "あなたを待つ",
+    "お待たせしました",
+    "待たれています",
+    "待っています",
+    "お待ちしています",
+    "待機中です",
+  ])("refuses a wait stated as a fact: %s", (text) => {
+    expect(refused(text)).toBe(true);
+  });
+
+  it("allows the instruction to wait a moment and try again", () => {
+    expect(refused("少し待ってから、もう一度お試しください。")).toBe(false);
+  });
+});
 
 describe("application-return texts (#2950)", () => {
   it.each(CATALOGUES)("%s has exactly the ten keys", (_locale, texts) => {
