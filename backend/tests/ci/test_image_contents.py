@@ -215,6 +215,20 @@ def test_api_image_installs_no_compiler() -> None:
             assert not packages & _COMPILER_PACKAGES, f"{name}: every locked package has a wheel"
 
 
+def test_api_base_upgrades_debian_packages() -> None:
+    # The base image is rebuilt only now and then; the upgrade brings in the
+    # Debian updates published since. In `base`, so dev and runtime both get it.
+    _, base = _stages("backend/Dockerfile")["base"]
+    upgrades = [line for line in base if re.match(r"RUN\b.*\bapt-get upgrade -y\b", line)]
+    assert upgrades, "the base stage upgrades the packages the base image came with"
+    for line in upgrades:
+        # In the layer that refreshed the lists, and before they are removed.
+        assert line.index("apt-get update") < line.index("apt-get upgrade"), line
+        assert line.index("apt-get upgrade") < line.index("rm -rf /var/lib/apt/lists/*"), line
+    for target in ("dev", _API_SHIPPED):
+        assert set(upgrades) <= set(_api_stage(target)), target
+
+
 def test_dev_compose_builds_the_api_dev_stage_with_the_dev_extra() -> None:
     compose = yaml.safe_load(_read("docker-compose.yml"))
     assert compose["services"]["api"]["build"]["target"] == "dev"
