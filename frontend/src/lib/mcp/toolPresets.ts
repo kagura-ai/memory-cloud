@@ -11,4 +11,6 @@ export const MCP_TOOL_PRESETS = [
   { key: "ingestion", tools: MCP_RESOURCE_TOOLS },
   { key: "analysis", tools: ["analyze_context", "get_analysis", "list_analyses", "get_active_analysis", "get_cluster"] },
   { key: "secrets", tools: ["secret_register_pubkey", "secret_put", "secret_get", "secret_list", "secret_revoke_grant"] },
+  // #2972: the account's other workspaces, listed by id from either URL.
+  { key: "workspaces", tools: ["list_workspaces"] },
 ] as const;

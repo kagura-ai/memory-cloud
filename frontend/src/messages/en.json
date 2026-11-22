@@ -2087,9 +2087,9 @@
     "claudeCodeHint": "No API key needed — Claude Code opens the OAuth sign-in in your browser on first use.",
     "copyCommand": "Copy command",
     "apiKeyHint": "Codex CLI, the Python SDK and .mcp.json use an API key instead — the ready-to-paste snippets are on the API Keys tab.",
-    "followsWorkspace": "An OAuth connection on this URL follows the workspace selected in the web UI: switch workspaces here and the connector follows.",
+    "followsWorkspace": "An OAuth connection on this URL follows the workspace selected in the web UI: switch workspaces here and the connector follows. From either URL, your account's other workspaces can be listed (list_workspaces) and used by id.",
     "pinToggle": "URL pinned to this workspace",
-    "pinHint": "Use this URL to keep one connector on this workspace regardless of the workspace selected in the web UI.",
+    "pinHint": "Use this URL to keep one connector on this workspace regardless of the workspace selected in the web UI. From either URL, your account's other workspaces can be listed (list_workspaces) and used by id.",
     "copyPinnedUrl": "Copy pinned URL",
     "links": {
       "mcpClients": "MCP client setup guide",
@@ -2111,7 +2111,8 @@
         "exploration": "Explore related memories",
         "ingestion": "Data ingestion",
         "analysis": "Memory analysis",
-        "secrets": "Secret sharing"
+        "secrets": "Secret sharing",
+      "workspaces": "Other workspaces"
       }
     },
     "help": {
@@ -5362,6 +5363,10 @@
     "list_contexts": {
       "title": "List contexts",
       "description": "Find contexts you can access."
+    },
+    "list_workspaces": {
+      "title": "List workspaces",
+      "description": "Find the other workspaces of your account and use them by id."
     },
     "list_tags": {
       "title": "List tags",

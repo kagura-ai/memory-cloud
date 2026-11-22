@@ -369,7 +369,7 @@ The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound 
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 72 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories.
+Kagura Memory Cloud exposes 73 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories.
 
 **Tool profiles.** `tools/list` answers with the 21-tool `core` profile unless the MCP URL asks for more: `?profile=full` lists all 72, `?add_tools=<name,...>` adds tools to a profile, `?tools=<name,...>` picks an exact set, and `?profile=google` / `?profile=microsoft` serve the core set shaped for Google connected apps and Microsoft 365 Copilot (#2773, #2778). A profile only changes what is listed — every tool stays callable. The core set is `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `create_edge`, `get_context_info`, `list_contexts`, `list_tags`, `create_context`, `update_context`, `delete_context`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since` and `bootstrap` (`backend/src/mcp_server/tools/_profiles.py`). `describe_tools` and `guide` are how a client finds and learns the tools it does not list.
 

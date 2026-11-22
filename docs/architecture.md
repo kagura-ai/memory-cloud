@@ -35,7 +35,7 @@ Karpathy's pattern describes any "living knowledge base" as 5 layers. Kagura's i
                               ↓
 ┌──────────────────────┬──────────────────────────────────────┐
 │   MCP Server (HTTP)  │          REST API (FastAPI)          │
-│  - 72 MCP Tools      │  - Memory CRUD                       │
+│  - 73 MCP Tools      │  - Memory CRUD                       │
 │    (21 listed by     │                                      │
 │     default: `core`) │                                      │
 │    (memory / agent   │  - OAuth2 endpoints                  │

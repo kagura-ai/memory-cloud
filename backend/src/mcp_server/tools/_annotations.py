@@ -110,6 +110,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "delete_edge": _destructive("Delete Memory Edge", idempotent=True),
     "get_context_info": _read("Get Context Info"),
     "list_contexts": _read("List Contexts"),
+    "list_workspaces": _read("List Workspaces"),  # #2972
     "list_tags": _read("List Tags"),
     "create_context": _additive("Create Context"),
     # is_public publishes the context; on a public one, resource_id names the

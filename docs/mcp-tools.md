@@ -2,7 +2,7 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-72 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+73 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
@@ -11,7 +11,7 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
 | `/mcp` (or `?profile=core`) | The 21 core tools — the default: `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `create_edge`, `get_context_info`, `list_contexts`, `list_tags`, `create_context`, `update_context`, `delete_context`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 40k chars |
-| `/mcp?profile=full` | All 72 tools | ≈ 108k chars (about 2.7× the default) |
+| `/mcp?profile=full` | All 73 tools | ≈ 108k chars (about 2.7× the default) |
 | `/mcp?profile=google` | The core tools without `describe_tools` and `guide`, with prose that names no other tool and a read-only `recall` — for Google's connected apps ([below](#the-google-profile)) | ≈ 38k chars |
 | `/mcp?profile=microsoft` | The same list as `profile=google` (an alias) — for Microsoft 365 Copilot ([below](#the-google-profile)) | ≈ 38k chars |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 11k chars for these three |
@@ -91,7 +91,7 @@ Every definition in `tools/list` carries a human-readable `title` and the standa
 | Destructive, safe to repeat | `create_edge`, `update_edge`, `delete_edge`, `update_context`, `delete_context`, `update_search_config`, `rollback_sleep_run`, `delete_file`, `update_agent`, `delete_agent`, `update_agent_binding`, `unbind_agent_context`, `secret_revoke_grant` |
 | Destructive, not idempotent | `recall`, `get_agent_bootstrap` (learning writes, below), `update_memory` (`external_id` mode replaces the memory each call), `forget` (`query` mode deletes the next top-k), `merge_contexts`, `ingest_events`, `set_state` (`ttl_seconds` restarts the expiry each call), `secret_put`, `rollback_session` (each call continues an unfinished rollback) |
 | Additive writes | `remember`, `remember_batch`, `feedback`, `record_measurement`, `create_context`, `setup_resource`, `setup_connector`, `analyze_context`, `init_file_upload`, `complete_file_upload` (idempotent), `register_agent`, `bind_agent_context`, `secret_register_pubkey` |
-| Read-only | The other 37 tools |
+| Read-only | The other 38 tools |
 
 - **`recall` is destructive.** It runs Hebbian learning over the memories it returns and promotes working memories that reach the promotion threshold; both change later results. The learning pass also overwrites and removes existing edges: it rewrites the weight of each edge it updates, including one you declared with `create_edge`, deletes an edge whose weight decays below the prune threshold, and evicts the weakest automatic edges past the per-memory cap. Under the rule that makes `create_edge` destructive, `recall` is too, and a repeat changes the weights again, so it is not idempotent. `get_agent_bootstrap` runs the same recall when given a `query`. A client that confirms destructive tools asks before these two as well. `reference` and `explore` only bump access counters; `load_pinned`, `load_guardrails`, `recall_upcoming` and `recall_nearby` write only usage and audit rows. All six stay read-only.
 - `create_edge` is destructive because, on a pair that already has an edge, it applies your values over an automatic edge (and over a declared one with `overwrite=true`). `set_state` overwrites the value at its key, and with `ttl_seconds` each call restarts the expiry, so a repeat is not a no-op; `secret_put` revokes the grants the new version does not list. `secret_get` writes an audit entry and nothing else, so it is read-only.
@@ -104,7 +104,7 @@ With an OAuth access token, `tools/call` checks the token's scope before the too
 
 | Scope | Tools |
 |-------|-------|
-| `memory:read` | The 37 read-only tools (`readOnlyHint: true`), plus `recall` and `get_agent_bootstrap`: searches whose only writes are ranking updates |
+| `memory:read` | The 38 read-only tools (`readOnlyHint: true`), plus `recall` and `get_agent_bootstrap`: searches whose only writes are ranking updates |
 | `memory:write` | Every other tool |
 
 - A token without the scope gets HTTP `403` with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…", resource_metadata="…"`. `scope` lists the scopes the token already has plus the missing one, so a client that re-authorizes with it keeps what it had. The body is a JSON-RPC error whose `data` carries `error: "insufficient_scope"`, `required_scope` and `help`; the code is `-32002` on session-based connections and `-32603` on stateless ones. The tool does not run. To recover, reconnect the server in the client and approve the missing scope.
@@ -447,12 +447,13 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `update_edge` | Update edge weight or type | Member+ |
 | `delete_edge` | Delete an edge between two memories | Member+ |
 
-## Contexts (7)
+## Contexts (8)
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
-| `list_contexts` | Slim name→id directory of the contexts you can access, most recently used first (details are opt-in — see below) | Viewer+ |
+| `list_contexts` | Slim name→id directory of the contexts you can access, most recently used first (details are opt-in — see below); `workspace_id` lists another workspace of yours | Viewer+ |
+| `list_workspaces` | The workspaces your account is a member of: `{id, name, role, current}` each, `current` marking the connection's ([#2972](https://github.com/kagura-ai/memory-cloud/issues/2972)). Full profile; under a workspace-scoped API key only the key's workspace | Member of each |
 | `create_context` | Create a new context | Owner/Admin |
 | `update_context` | Update context settings (summary, usage guide, resource_id, is_public). Changing `resource_id` revokes the resource tokens the caller issued for the old slug | Editor+ |
 | `delete_context` | Delete a context, all its memories and its files (storage released at once; files restorable by an admin for 6 days) | Owner/Admin |
@@ -494,8 +495,11 @@ A client that already knows its context (a plugin option, a desktop entry config
 | `include_details` | Adds the full `summary` (up to 2,000 characters each) and `embedding_model` — the previous default item shape ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)). Wins over `include_summary`; combine it with `name_contains`. Without `name_contains` the page size defaults to 20 and a larger `limit` is a `validation_error` ([#1743](https://github.com/kagura-ai/memory-cloud/issues/1743)). |
 | `limit` | Contexts per page, clamped to 1–200 (default 100, or 20 with `include_details` and no `name_contains`). A page also stops once its items reach the 20,000-character response budget. |
 | `cursor` | The `next_cursor` of the previous page. Pages follow the most-recently-used order, so a context used between two calls can move between pages. |
+| `workspace_id` | Another workspace your account is a member of (an id from `list_workspaces`); omitted, `null` or `""` = the connection's workspace. Its contexts are listed under your role there, as a connection to that workspace would list them. A workspace you are not a member of (or a deleted one) is refused with `permission_denied` (`your_role: "not_a_member"`), and under a workspace-scoped API key so is every workspace but the key's. A value that is not a UUID is an `invalid_argument` ([#2972](https://github.com/kagura-ai/memory-cloud/issues/2972)). |
 
-The list comes from the workspace the connection is bound to: the API key's workspace for a workspace-scoped key, else the workspace in the MCP URL, else your current workspace ([#2884](https://github.com/kagura-ai/memory-cloud/issues/2884)). Switching workspaces in the web UI does not change what a key- or URL-bound connection lists.
+The list comes from the workspace the connection is bound to: the API key's workspace for a workspace-scoped key, else the workspace in the MCP URL, else your current workspace ([#2884](https://github.com/kagura-ai/memory-cloud/issues/2884)), unless `workspace_id` names another. Switching workspaces in the web UI does not change what a key- or URL-bound connection lists.
+
+When your account is a member of more than one workspace, the envelope also carries `other_workspaces` (how many workspaces there are besides the one listed) and `workspaces_hint`, one line naming `list_workspaces` and the `workspace_id` argument, so a client on the core profile finds the other workspaces without `list_workspaces` in its tool list. An account in one workspace gets neither, and neither does a workspace-scoped API key. On the google / microsoft view the reply carries the count alone, since that view's replies name no other tool ([#2972](https://github.com/kagura-ai/memory-cloud/issues/2972)).
 
 Envelope: `{status, contexts, count, total, limit, can_create, has_more, next_cursor}`, plus `hint` on an empty list or a full workspace (below). `has_more: true` means more contexts match: pass `next_cursor` as `cursor`. `count` is the number of contexts you can see in that same workspace; it is not affected by `name_contains` and is the same on every page ([#2891](https://github.com/kagura-ai/memory-cloud/issues/2891); earlier releases counted every context of the workspace, including ones you cannot see). `limit` and `can_create` are the context quota of the workspace: `limit` is the plan's cap, not the page size, and `can_create` says whether one more context fits. Both are decided on every context of the workspace, so contexts you cannot see (for example ones private to other members or not shared with you) count toward `limit`, and `can_create` can be `false` while `count` is below `limit`. `total` is the number of contexts in this response. When the access lookup fails, `count` is `0` and `limit` / `can_create` are left out. A non-boolean flag or an over-long `name_contains` returns a `validation_error`; an explicit `null` for any parameter is treated as omitted.
 

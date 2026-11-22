@@ -860,6 +860,47 @@ _EMPTY_FULL_WORKSPACE_HINT = (
 )
 
 
+# #2972: an account in several workspaces is told of the others, so a ``core``
+# client (list_workspaces is in ``full`` only) finds them from this reply.
+def _workspaces_hint(other_workspaces: int) -> str:
+    noun = "workspace" if other_workspaces == 1 else "workspaces"
+    return (
+        f"You are a member of {other_workspaces} other {noun}: list_workspaces() lists "
+        "them (outside the core profile but callable here; "
+        'describe_tools(["list_workspaces"]) has its schema), and '
+        "list_contexts(workspace_id=...) lists one's contexts."
+    )
+
+
+def _list_contexts_target(
+    args: dict[str, Any], connection_workspace_id: UUID | None
+) -> tuple[UUID | None, bool, list[TextContent] | None]:
+    """The workspace ``list_contexts`` lists (#2972).
+
+    Returns ``(workspace_id, named, error)``: the ``workspace_id`` argument when
+    it is given (``named``), else the connection's workspace. ``null`` and ``""``
+    are an omitted argument; anything else that is not a UUID is refused.
+    """
+    raw = args.get("workspace_id")
+    if raw is None or raw == "":
+        return connection_workspace_id, False, None
+    try:
+        if not isinstance(raw, str):
+            raise ValueError(raw)
+        return UUID(raw), True, None
+    except ValueError:
+        return (
+            None,
+            True,
+            _error_response(
+                "invalid_argument",
+                "'workspace_id' must be a workspace UUID.",
+                received=raw,
+                help="list_workspaces() returns the ids of your workspaces.",
+            ),
+        )
+
+
 def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | None:
     """Validate list_contexts arguments (#1600).
 
@@ -963,6 +1004,11 @@ async def handle_list_contexts(
     arg_error = _validate_list_contexts_args(args)
     if arg_error:
         return arg_error
+    # #2972: the connection's workspace is still the one usage is logged under.
+    connection_workspace_id = workspace_id
+    workspace_id, named_workspace, target_error = _list_contexts_target(args, workspace_id)
+    if target_error:
+        return target_error
 
     include_stats = args.get("include_stats", False)
     include_details = args.get("include_details", False)
@@ -985,6 +1031,18 @@ async def handle_list_contexts(
             from services.context_service import ContextListingFailedError, ContextService
 
             context_service = ContextService(db)
+            if named_workspace:
+                # #2972: a named workspace is listed only for a member (the
+                # WorkspaceMember row the transport reads for a /mcp/w/{id}
+                # URL); under a workspace-scoped key, only the key's own. The
+                # listing below then applies the caller's role there.
+                from mcp_server.tools._helpers import _check_workspace_membership
+
+                refusal = await _check_workspace_membership(
+                    db, user_id, workspace_id, "list contexts"
+                )
+                if refusal:
+                    return refusal
             # #1658: a failed access lookup (not a member of the current
             # workspace, a database error) still answers the empty success it
             # always has, but it is not an empty account, so it gets no hint.
@@ -1148,7 +1206,27 @@ async def handle_list_contexts(
             if full_with_unseen_contexts:
                 hint = _EMPTY_FULL_WORKSPACE_HINT if visible_count == 0 else _WORKSPACE_FULL_HINT
 
-            await _log_tool_usage(db, user_id, "list_contexts", start_time, 200, None, workspace_id)
+            # #2972: the account's other workspaces. The google view names no
+            # other tool, so it gets the count alone.
+            from mcp_server.tools._google_profile import google_mode_active
+            from mcp_server.tools.workspaces import other_workspace_count
+
+            pointer: dict[str, Any] = {}
+            try:
+                other_workspaces = await other_workspace_count(db, user_id, workspace_id)
+            except Exception as e:
+                # Advisory: a failed lookup leaves the pointer out, not the listing.
+                logger.warning("list_contexts_workspace_count_failed: %s", type(e).__name__)
+                await db.rollback()
+                other_workspaces = 0
+            if other_workspaces:
+                pointer["other_workspaces"] = other_workspaces
+                if not google_mode_active():
+                    pointer["workspaces_hint"] = _workspaces_hint(other_workspaces)
+
+            await _log_tool_usage(
+                db, user_id, "list_contexts", start_time, 200, None, connection_workspace_id
+            )
 
             return [
                 TextContent(
@@ -1160,6 +1238,7 @@ async def handle_list_contexts(
                             **quota_info,
                             **page_info,
                             **({"hint": hint} if hint else {}),
+                            **pointer,
                         }
                     ),
                 )

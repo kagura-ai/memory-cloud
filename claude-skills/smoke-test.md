@@ -13,7 +13,7 @@ When the caller is a workspace owner/admin, it also exercises the v0.49 Agent Co
 (registry, context bindings, and bootstrap composition).
 Optionally exercises the XL-only resource rows (setup_resource, ingest_events, get_resource_impact, get_resource_schema, list_resource_tokens, plus delete_context cleanup) if the workspace plan has the `resources` feature (XL / `promax`; since #1551 lower tiers may only keep serving resources that already exist).
 
-The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**72 tools**). The
+The canonical definitions are `backend/src/mcp_server/tools/_definitions.py` (**73 tools**). The
 **Coverage cross-check** section near the end mirrors that registry so the "all MCP tools" claim
 stays honest — every registered tool is either exercised here or listed there with a reason. This
 is a live runbook, not a pytest suite, so the run itself checks the count through `describe_tools`
@@ -54,12 +54,12 @@ Use this after deployments, tool description changes, or MCP server updates.
 
 ```
 describe_tools()
--> Verify: status=success; `listed` (the names this URL's tools/list returns, sorted) has 72
+-> Verify: status=success; `listed` (the names this URL's tools/list returns, sorted) has 73
    entries and `count` (the tools the URL leaves out, itemised in `tools`) is 0
--> Verify: len(listed) + count == 72 on any connection — the registry total this runbook is built
+-> Verify: len(listed) + count == 73 on any connection — the registry total this runbook is built
    for. A different sum means a tool was added or removed: reconcile the Coverage cross-check
    (section 8) before trusting the run
--> ABORT when count > 0 (a default connection answers count=51 with the 21 core tools in
+-> ABORT when count > 0 (a default connection answers count=52 with the 21 core tools in
    `listed`): create nothing, report step 0 as FAIL and tell the user to reconnect with the full
    tool list — `?profile=full` on the MCP endpoint URL, or `--tool-profile full` for the
    `kagura-mcp` stdio bridge — then run the smoke test again. The reply's `url` block says the same
@@ -94,6 +94,12 @@ list_contexts()
    even on a workspace with many contexts
 -> Note: this run creates two contexts (three with the resource rows). If `can_create` is false
    the context quota is exhausted: stop here and report it instead of failing step 1 halfway
+
+list_workspaces()
+-> Verify: status=success; `total` equals the length of `workspaces`, each item has id, name, role
+   and current, and exactly one has current=true (this connection's workspace)
+-> Verify: with more than one workspace, the list_contexts() reply above carries
+   other_workspaces == total - 1 and a `workspaces_hint`; with one workspace it carries neither
 
 create_context(name="smoke-test-{unix_timestamp}", description="Temporary context for MCP smoke test. Safe to delete.")
 -> Verify: status=success with a top-level `context_id` (UUID format) — there is no nested context
@@ -824,14 +830,14 @@ delete_context(context_id=...)
 ### 8. Coverage cross-check (anti-drift)
 
 Reconcile this skill against the canonical registry so the "all MCP tools" claim cannot silently
-rot. The source of truth is `backend/src/mcp_server/tools/_definitions.py` (**72 tools**). Every
+rot. The source of truth is `backend/src/mcp_server/tools/_definitions.py` (**73 tools**). Every
 registered tool must be in exactly one group below. **If the registry and these groups disagree,
 the skill is out of date — add a row (or a documented exclusion) before merging.**
 
 Two checks keep this honest:
 
 - **In the run:** step 0's `describe_tools()` — `len(listed) + count` is the live server's registry
-  size and must equal 72, the number these groups are built for. It replaces the old `grep -c` on
+  size and must equal 73, the number these groups are built for. It replaces the old `grep -c` on
   `_definitions.py`, which needed a repository checkout and said nothing about the server under test.
 - **In CI:** `backend/tests/mcp_server/test_smoke_test_runbook.py` parses the groups below and fails
   when a registered tool is in none of them, when a group's stated size or the total differs from
@@ -840,7 +846,7 @@ Two checks keep this honest:
 "Inline" below means "called by every run"; it has nothing to do with the server's `core` tool
 profile (the default `tools/list` view), which is why the run needs `?profile=full`.
 
-**Exercised inline (43 tools):** `describe_tools`, `guide`, `list_contexts`, `create_context`,
+**Exercised inline (44 tools):** `describe_tools`, `guide`, `list_contexts`, `list_workspaces`, `create_context`,
 `get_context_info`, `update_context`, `update_search_config`, `remember`, `remember_batch`,
 `recall`, `recall_upcoming`, `recall_nearby`, `load_pinned`, `load_guardrails`, `feedback`,
 `set_state`, `get_state`, `reference`, `list_revisions`, `explore`, `update_memory`, `forget`, `list`,
@@ -876,7 +882,7 @@ profile (the default `tools/list` view), which is why the run needs `?profile=fu
 | `secret_list` | Owner/admin metadata listing; grouped with the secret-store flow. |
 | `secret_revoke_grant` | Operates on an existing grant produced by `secret_put`. |
 
-43 + 2 + 10 + 5 + 12 = **72** — the full registry. The conditional rows are the 10 owner/admin Agent
+44 + 2 + 10 + 5 + 12 = **73** — the full registry. The conditional rows are the 10 owner/admin Agent
 Control Plane tools and 5 `resources`-gated (XL) tools; the remaining 12 are documented exclusions.
 
 ### 9. Report
@@ -888,85 +894,86 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 
 | # | Tool | Action | Result |
 |---|------|--------|--------|
-| 1 | describe_tools | Registry count 72, nothing hidden (else abort: reconnect with ?profile=full) | PASS/FAIL |
+| 1 | describe_tools | Registry count 73, nothing hidden (else abort: reconnect with ?profile=full) | PASS/FAIL |
 | 2 | describe_tools | Full definition by name + unknown name | PASS/FAIL |
 | 3 | guide | Index topic | PASS/FAIL |
 | 4 | guide | Tool name expands to sections + unknown topic | PASS/FAIL |
 | 5 | list_contexts | List contexts (total = page length; count = contexts you can see) | PASS/FAIL |
-| 6 | create_context | Create test context (top-level context_id) | PASS/FAIL |
-| 7 | list_contexts (verify) | Find the new context with name_contains + include_summary | PASS/FAIL |
-| 8 | get_context_info | Get context details | PASS/FAIL |
-| 9 | update_context | Update display name | PASS/FAIL |
-| 10 | update_search_config | Update search weights | PASS/FAIL |
-| 11 | remember | Create test memory (source_uri, source_type; compact persistence, no detail) | PASS/FAIL |
-| 12 | remember | Create time memory (verbose=true keeps persistence.detail) | PASS/FAIL |
-| 13 | remember | Create located memory (details.location lat/lon) | PASS/FAIL |
-| 14 | remember | Create pinned memory (delivery_mode="always") | PASS/FAIL |
-| 15 | remember | Create tool guardrail memory (details.tool_trigger) | PASS/FAIL |
-| 16 | remember | Reject a guardrail with a nested quantifier (validation_error) | PASS/FAIL |
-| 17 | recall | Search for memory (tags present, updated_at null) | PASS/FAIL |
-| 18 | list_tags | Unknown argument refused with invalid_argument (SKIP if the client validates first) | PASS/FAIL/SKIP |
-| 19 | recall | Search with include_explore_hints=true | PASS/FAIL |
-| 20 | recall | Search with source_uri_prefix filter | PASS/FAIL |
-| 21 | recall | Search with source_type filter | PASS/FAIL |
-| 22 | recall | Search with trust_tier="trusted" filter | PASS/FAIL |
-| 23 | reference | Get full memory | PASS/FAIL |
-| 24 | explore | Graph traversal | PASS/FAIL |
-| 25 | recall_upcoming | List upcoming time memories | PASS/FAIL |
-| 26 | recall_nearby | Spatial query around the located memory (distance_m, stored location with label) | PASS/FAIL |
-| 27 | load_pinned | Deterministic load of pinned set | PASS/FAIL |
-| 28 | load_guardrails | Deterministic load of the guardrail set (format=1, version, normalized tool_trigger) | PASS/FAIL |
-| 29 | feedback | Record helpful signal on a recall result | PASS/FAIL |
-| 30 | set_state | Set + overwrite agent run-state (TTL) | PASS/FAIL |
-| 31 | get_state | Read one key + list all live keys (has_more / next_cursor) | PASS/FAIL |
-| 32 | record_measurement | Append observation (measured_at defaults to now) | PASS/FAIL |
-| 33 | record_measurement | Append backdated observation (measured_at -48h) | PASS/FAIL |
-| 34 | recall_series | Default day/avg — one bucket per UTC day, count=2 | PASS/FAIL |
-| 35 | recall_series | period=month agg=sum — values sum to 40.0 | PASS/FAIL |
-| 36 | update_memory | Update memory (compact persistence, no detail) | PASS/FAIL |
-| 37 | update_memory | Update with verbose=true (persistence.detail) | PASS/FAIL |
-| 38 | recall (verify) | Verify update (new summary, updated_at set, version 3); list_revisions + reference(version=1) | PASS/FAIL |
-| 39 | remember | Create 2nd memory (linked_memory_ids, linked_source_uris) | PASS/FAIL |
-| 40 | list_edges (verify) | Verify declared link (origin="declared", confidence 1.0, weight >= 1.0) | PASS/FAIL |
-| 41 | create_edge | Create test edge (weight 1.0 default; created or #1321 updated) | PASS/FAIL |
-| 42 | list_edges | List edges (origin exposed) | PASS/FAIL |
-| 43 | update_edge | Update edge weight | PASS/FAIL |
-| 44 | delete_edge | Delete edge | PASS/FAIL |
-| 45 | list_tags | List tags in context | PASS/FAIL |
-| 46 | list_tags | List tags with prefix filter | PASS/FAIL |
-| 47 | list_my_bindings | List owner-scoped API-key bindings | PASS/FAIL |
-| 48 | describe_binding | Describe a binding by key_id (or fake context_id → binding_not_found) | PASS/FAIL |
-| 49 | remember_batch | 3 items with tags_normalize + dedupe="off" (tag_normalized lint) | PASS/FAIL |
-| 50 | remember_batch | Refused atomic=true batch (batch_refused, nothing written) | PASS/FAIL |
-| 51 | recall (verify) | Untagged batch item has no tags key | PASS/FAIL |
-| 52 | list | Default order (updated_at desc), total=9 | PASS/FAIL |
-| 53 | list | tags filter (normalized spelling stored) | PASS/FAIL |
-| 54 | list | Paging with limit=1 + cursor | PASS/FAIL |
-| 55 | list | Refused filter (near → validation_error) | PASS/FAIL |
-| 56 | forget | Delete batch item 3 (seeds a forgotten change) | PASS/FAIL |
-| 57 | changes_since | Created / updated / forgotten kinds, oldest first | PASS/FAIL |
-| 58 | changes_since | kinds=["forgotten"] only | PASS/FAIL |
-| 59 | changes_since | until guard (until <= since → validation_error) | PASS/FAIL |
-| 60 | changes_since | Unused session_id → count=0 | PASS/FAIL |
-| 61 | bootstrap | Default: pinned + upcoming + changes, degraded=false | PASS/FAIL |
-| 62 | bootstrap | Narrowed include=["pinned"], since="1d" | PASS/FAIL |
-| 63 | create_context | Create merge target context | PASS/FAIL |
-| 64 | merge_contexts | Merge source into target | PASS/FAIL |
-| 65 | get_usage | Get workspace usage | PASS/FAIL |
-| 66 | list_analyses | List analysis runs (or gate error) | PASS/FAIL |
-| 67 | get_active_analysis | Get latest succeeded analysis (or gate error) | PASS/FAIL |
-| 68 | get_analysis | Fake run_id (run_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
-| 69 | get_cluster | Fake run_id (cluster_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
-| 70 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
-| 71 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
-| 72 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
-| 73 | rollback_session | Unused session (session_not_found) + malformed id (validation_error) + empty window (no_writes_in_window) + both modes (validation_error) + changes_since(by_me) | PASS/FAIL |
-| 74 | update_memory | Unpin pinned memory (delivery_mode="on_recall") | PASS/FAIL |
-| 75 | forget | Delete guardrail memory | PASS/FAIL |
-| 76 | forget | Delete pinned memory | PASS/FAIL |
-| 77 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
-| 78 | forget | Delete memory 2 | PASS/FAIL |
-| 79 | delete_context | Soft-delete source context (agent-state + measurement series go unreachable) | PASS/FAIL |
+| 6 | list_workspaces | List the account's workspaces (one current; pointer on list_contexts with several) | PASS/FAIL |
+| 7 | create_context | Create test context (top-level context_id) | PASS/FAIL |
+| 8 | list_contexts (verify) | Find the new context with name_contains + include_summary | PASS/FAIL |
+| 9 | get_context_info | Get context details | PASS/FAIL |
+| 10 | update_context | Update display name | PASS/FAIL |
+| 11 | update_search_config | Update search weights | PASS/FAIL |
+| 12 | remember | Create test memory (source_uri, source_type; compact persistence, no detail) | PASS/FAIL |
+| 13 | remember | Create time memory (verbose=true keeps persistence.detail) | PASS/FAIL |
+| 14 | remember | Create located memory (details.location lat/lon) | PASS/FAIL |
+| 15 | remember | Create pinned memory (delivery_mode="always") | PASS/FAIL |
+| 16 | remember | Create tool guardrail memory (details.tool_trigger) | PASS/FAIL |
+| 17 | remember | Reject a guardrail with a nested quantifier (validation_error) | PASS/FAIL |
+| 18 | recall | Search for memory (tags present, updated_at null) | PASS/FAIL |
+| 19 | list_tags | Unknown argument refused with invalid_argument (SKIP if the client validates first) | PASS/FAIL/SKIP |
+| 20 | recall | Search with include_explore_hints=true | PASS/FAIL |
+| 21 | recall | Search with source_uri_prefix filter | PASS/FAIL |
+| 22 | recall | Search with source_type filter | PASS/FAIL |
+| 23 | recall | Search with trust_tier="trusted" filter | PASS/FAIL |
+| 24 | reference | Get full memory | PASS/FAIL |
+| 25 | explore | Graph traversal | PASS/FAIL |
+| 26 | recall_upcoming | List upcoming time memories | PASS/FAIL |
+| 27 | recall_nearby | Spatial query around the located memory (distance_m, stored location with label) | PASS/FAIL |
+| 28 | load_pinned | Deterministic load of pinned set | PASS/FAIL |
+| 29 | load_guardrails | Deterministic load of the guardrail set (format=1, version, normalized tool_trigger) | PASS/FAIL |
+| 30 | feedback | Record helpful signal on a recall result | PASS/FAIL |
+| 31 | set_state | Set + overwrite agent run-state (TTL) | PASS/FAIL |
+| 32 | get_state | Read one key + list all live keys (has_more / next_cursor) | PASS/FAIL |
+| 33 | record_measurement | Append observation (measured_at defaults to now) | PASS/FAIL |
+| 34 | record_measurement | Append backdated observation (measured_at -48h) | PASS/FAIL |
+| 35 | recall_series | Default day/avg — one bucket per UTC day, count=2 | PASS/FAIL |
+| 36 | recall_series | period=month agg=sum — values sum to 40.0 | PASS/FAIL |
+| 37 | update_memory | Update memory (compact persistence, no detail) | PASS/FAIL |
+| 38 | update_memory | Update with verbose=true (persistence.detail) | PASS/FAIL |
+| 39 | recall (verify) | Verify update (new summary, updated_at set, version 3); list_revisions + reference(version=1) | PASS/FAIL |
+| 40 | remember | Create 2nd memory (linked_memory_ids, linked_source_uris) | PASS/FAIL |
+| 41 | list_edges (verify) | Verify declared link (origin="declared", confidence 1.0, weight >= 1.0) | PASS/FAIL |
+| 42 | create_edge | Create test edge (weight 1.0 default; created or #1321 updated) | PASS/FAIL |
+| 43 | list_edges | List edges (origin exposed) | PASS/FAIL |
+| 44 | update_edge | Update edge weight | PASS/FAIL |
+| 45 | delete_edge | Delete edge | PASS/FAIL |
+| 46 | list_tags | List tags in context | PASS/FAIL |
+| 47 | list_tags | List tags with prefix filter | PASS/FAIL |
+| 48 | list_my_bindings | List owner-scoped API-key bindings | PASS/FAIL |
+| 49 | describe_binding | Describe a binding by key_id (or fake context_id → binding_not_found) | PASS/FAIL |
+| 50 | remember_batch | 3 items with tags_normalize + dedupe="off" (tag_normalized lint) | PASS/FAIL |
+| 51 | remember_batch | Refused atomic=true batch (batch_refused, nothing written) | PASS/FAIL |
+| 52 | recall (verify) | Untagged batch item has no tags key | PASS/FAIL |
+| 53 | list | Default order (updated_at desc), total=9 | PASS/FAIL |
+| 54 | list | tags filter (normalized spelling stored) | PASS/FAIL |
+| 55 | list | Paging with limit=1 + cursor | PASS/FAIL |
+| 56 | list | Refused filter (near → validation_error) | PASS/FAIL |
+| 57 | forget | Delete batch item 3 (seeds a forgotten change) | PASS/FAIL |
+| 58 | changes_since | Created / updated / forgotten kinds, oldest first | PASS/FAIL |
+| 59 | changes_since | kinds=["forgotten"] only | PASS/FAIL |
+| 60 | changes_since | until guard (until <= since → validation_error) | PASS/FAIL |
+| 61 | changes_since | Unused session_id → count=0 | PASS/FAIL |
+| 62 | bootstrap | Default: pinned + upcoming + changes, degraded=false | PASS/FAIL |
+| 63 | bootstrap | Narrowed include=["pinned"], since="1d" | PASS/FAIL |
+| 64 | create_context | Create merge target context | PASS/FAIL |
+| 65 | merge_contexts | Merge source into target | PASS/FAIL |
+| 66 | get_usage | Get workspace usage | PASS/FAIL |
+| 67 | list_analyses | List analysis runs (or gate error) | PASS/FAIL |
+| 68 | get_active_analysis | Get latest succeeded analysis (or gate error) | PASS/FAIL |
+| 69 | get_analysis | Fake run_id (run_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
+| 70 | get_cluster | Fake run_id (cluster_not_found or gate error) + malformed id (invalid_uuid) | PASS/FAIL |
+| 71 | get_sleep_history | Get sleep maintenance history | PASS/FAIL |
+| 72 | get_sleep_report | Get sleep report (fake ID, error handling) | PASS/FAIL |
+| 73 | rollback_sleep_run | Rollback sleep run (fake ID, error handling) | PASS/FAIL |
+| 74 | rollback_session | Unused session (session_not_found) + malformed id (validation_error) + empty window (no_writes_in_window) + both modes (validation_error) + changes_since(by_me) | PASS/FAIL |
+| 75 | update_memory | Unpin pinned memory (delivery_mode="on_recall") | PASS/FAIL |
+| 76 | forget | Delete guardrail memory | PASS/FAIL |
+| 77 | forget | Delete pinned memory | PASS/FAIL |
+| 78 | delete_context | Soft-delete merge target and its memories | PASS/FAIL |
+| 79 | forget | Delete memory 2 | PASS/FAIL |
+| 80 | delete_context | Soft-delete source context (agent-state + measurement series go unreachable) | PASS/FAIL |
 | A1 | register_agent | Register temporary agent (owner/admin only) | PASS/FAIL/SKIP |
 | A2 | list_agents | List registry and find temporary agent (owner/admin only) | PASS/FAIL/SKIP |
 | A3 | get_agent | Get temporary agent (owner/admin only) | PASS/FAIL/SKIP |
@@ -985,18 +992,18 @@ Print a summary table (numbers are illustrative; the executed order follows the 
 | P6 | (REST / Web UI) | Revoke the resource token, then list again → no active token (XL only) | PASS/FAIL/MANUAL/SKIP |
 | P7 | delete_context | Delete resource context (XL only) | PASS/FAIL/SKIP |
 
-**Result: N/79 main rows passed** (+ N/10 Agent Control Plane rows and N/7 XL resource rows
+**Result: N/80 main rows passed** (+ N/10 Agent Control Plane rows and N/7 XL resource rows
 passed, or SKIP when the corresponding gate is unavailable)
 
-Note: the 79 numbered rows are test *steps*, not distinct tools — several tools (describe_tools,
+Note: the 80 numbered rows are test *steps*, not distinct tools — several tools (describe_tools,
 guide, remember, remember_batch, recall, list, changes_since, bootstrap, update_memory, forget,
 delete_context, list_contexts, create_context, list_edges, list_tags, record_measurement,
 recall_series) are exercised in multiple rows. Distinct-tool coverage is reconciled in the
-Coverage cross-check (43 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 72).
+Coverage cross-check (44 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 73).
 "Main rows" are the rows every run executes; the name is unrelated to the server's `core` profile.
 
 Test context: smoke-test-{timestamp} (cleaned up)
-Tool list: full (describe_tools: 72 listed, 0 hidden)
+Tool list: full (describe_tools: 73 listed, 0 hidden)
 Resource token: revoked | MANUAL — token_id rtok_..., resource_id smoke_test_{timestamp} still active | not created (resource rows skipped)
 
 Documented exclusions / gated-skip (see Coverage cross-check) — not counted as FAIL:
@@ -1007,7 +1014,7 @@ Documented exclusions / gated-skip (see Coverage cross-check) — not counted as
 - File tools: init_file_upload, complete_file_upload, get_file_download_url, delete_file, list_files (multipart S3/R2)
 - Secret tools: secret_register_pubkey, secret_put, secret_get, secret_list, secret_revoke_grant (zero-knowledge: age keypairs + owner approval + ciphertext)
 
-Registry reconciliation: 43 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 72 tools in _definitions.py.
+Registry reconciliation: 44 inline + 2 measurement + 10 owner/admin + 5 XL + 12 documented-skip = 73 tools in _definitions.py.
 ```
 
 If any step fails:

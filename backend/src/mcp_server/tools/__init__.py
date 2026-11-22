@@ -52,6 +52,7 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "guide",  # #1850: static manual text, no context
         "describe_tools",  # #1849: registry data, no context
         "list_contexts",
+        "list_workspaces",  # #2972: the account's workspaces
         "create_context",
         "update_context",
         "merge_contexts",
@@ -127,6 +128,7 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "describe_binding",  # Issue #629: read-only binding detail
         "get_usage",
         "list_contexts",
+        "list_workspaces",  # #2972: read-only workspace directory
         "get_context_info",  # Must remain callable so agents can inspect context even when rate-limited
         "list_edges",  # Read-only edge listing
         "get_sleep_history",  # Read-only sleep report listing
@@ -419,6 +421,7 @@ def _build_registry() -> dict[str, Any]:
     )
     from mcp_server.tools.state import handle_get_state, handle_set_state
     from mcp_server.tools.usage import handle_get_usage
+    from mcp_server.tools.workspaces import handle_list_workspaces
 
     return {
         # Issue #629: read-only API-key binding introspection
@@ -455,6 +458,7 @@ def _build_registry() -> dict[str, Any]:
         "delete_context": handle_delete_context,
         "merge_contexts": handle_merge_contexts,
         "list_contexts": handle_list_contexts,
+        "list_workspaces": handle_list_workspaces,  # #2972
         "list_tags": handle_list_tags,  # Issue #614
         "update_search_config": handle_update_search_config,
         "list_edges": handle_list_edges,

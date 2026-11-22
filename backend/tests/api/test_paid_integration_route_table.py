@@ -212,6 +212,7 @@ PAID_INTEGRATION_MCP_TOOLS: dict[str, str] = {
     "list_resource_tokens": NONE,
     "list_revisions": NONE,
     "list_tags": NONE,
+    "list_workspaces": NONE,
     "load_guardrails": NONE,
     "load_pinned": NONE,
     "merge_contexts": NONE,

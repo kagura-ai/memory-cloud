@@ -2087,9 +2087,9 @@
     "claudeCodeHint": "API キー不要 — 初回利用時に Claude Code がブラウザで OAuth ログインを開きます。",
     "copyCommand": "コマンドをコピー",
     "apiKeyHint": "Codex CLI、Python SDK、.mcp.json は代わりに API キーを使います。貼り付け用のスニペットは「APIキー」タブにあります。",
-    "followsWorkspace": "この URL での OAuth 接続は、Web UI で選択中のワークスペースに繋がります。ここでワークスペースを切り替えると、コネクタの向き先も変わります。",
+    "followsWorkspace": "この URL での OAuth 接続は、Web UI で選択中のワークスペースに繋がります。ここでワークスペースを切り替えると、コネクタの向き先も変わります。どちらの URL からでも、アカウントの他のワークスペースを一覧（list_workspaces）し、ID で使えます。",
     "pinToggle": "このワークスペースに固定する URL",
-    "pinHint": "Web UI で選択中のワークスペースに関係なく、コネクタをこのワークスペースだけに向けたい場合はこの URL を使います。",
+    "pinHint": "Web UI で選択中のワークスペースに関係なく、コネクタをこのワークスペースだけに向けたい場合はこの URL を使います。どちらの URL からでも、アカウントの他のワークスペースを一覧（list_workspaces）し、ID で使えます。",
     "copyPinnedUrl": "固定 URL をコピー",
     "links": {
       "mcpClients": "MCP クライアント設定ガイド",
@@ -2111,7 +2111,8 @@
         "exploration": "関連メモリーの探索",
         "ingestion": "データ取り込み",
         "analysis": "メモリー分析",
-        "secrets": "シークレット共有"
+        "secrets": "シークレット共有",
+      "workspaces": "他のワークスペース"
       }
     },
     "help": {
@@ -5362,6 +5363,10 @@
     "list_contexts": {
       "title": "コンテキスト一覧",
       "description": "利用できるコンテキストを探します。"
+    },
+    "list_workspaces": {
+      "title": "ワークスペース一覧",
+      "description": "アカウントの他のワークスペースを探し、ID で使います。"
     },
     "list_tags": {
       "title": "タグ一覧",

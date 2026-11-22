@@ -22,6 +22,8 @@ A default context can come from three places, so a client that cannot edit its U
 
 An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Gemini, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
 
+From either URL, an OAuth connection can reach the account's other workspaces by id ([#2972](https://github.com/kagura-ai/memory-cloud/issues/2972)): `list_workspaces` (in the full profile; callable from a core URL too, or add `?add_tools=list_workspaces`) names every workspace the account is a member of, with the account's role and which one is the connection's, and `list_contexts(workspace_id=<id>)` lists that workspace's contexts under the account's role there. A context id from it works in the other tools, as it always has for a member. When the account is in more than one workspace, `list_contexts` says how many others there are (`other_workspaces`) and points at both. A workspace-scoped API key stays in its workspace: `list_workspaces` returns that one only and `list_contexts` refuses any other `workspace_id`.
+
 The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out `explore`, Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.7 times larger). The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has an **All tools** switch that writes `?profile=full` into its snippets for you.
 
 ## Claude Code (Recommended)
@@ -393,12 +395,12 @@ Which revision a client negotiates is the client's choice; a quick check is the 
 
 ## List fewer tools
 
-By default `tools/list` returns the 21 core tools (≈ 40k characters of JSON); the whole registry is 72 tools (≈ 108k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
+By default `tools/list` returns the 21 core tools (≈ 40k characters of JSON); the whole registry is 73 tools (≈ 108k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
 
 | URL suffix | `tools/list` returns |
 |---|---|
 | *(none)* or `?profile=core` | The 21 core memory and context tools (incl. `create_edge`, `create_context`, `update_context`, `delete_context`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap`; `explore` is opt-in) — the default, ≈ 40k characters |
-| `?profile=full` | Everything — 72 tools, ≈ 108k characters |
+| `?profile=full` | Everything — 73 tools, ≈ 108k characters |
 | `?profile=google` | For Google's connected apps: the core tools without `describe_tools` and `guide`, descriptions that name no other tool, a read-only `recall` (no learning writes) and server instructions without a guardrail digest — see [Google Connected Apps](google-connected-apps.md) |
 | `?profile=microsoft` | For Microsoft 365 Copilot: an alias of `?profile=google` (the same list, text and read-only `recall`) — see [Microsoft 365 Copilot](microsoft-365-copilot.md) |
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |

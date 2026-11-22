@@ -592,6 +592,7 @@ def test_definition_declares_the_new_parameters():
         "include_details",
         "limit",
         "cursor",
+        "workspace_id",  # #2972
     }
     for flag in ("include_stats", "include_summary", "include_details"):
         assert props[flag]["type"] == "boolean"
