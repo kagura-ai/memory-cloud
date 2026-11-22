@@ -374,6 +374,11 @@ export default function ConnectorsPage() {
   // the full-replacement save must never resend a stale list over another
   // admin's change (that could drop a "Do not ingest" on a private channel).
   const routeBaseRef = useRef("");
+  // #2971: the stored PII config the PII draft was built from (its JSON, and
+  // the draft it gave). A re-sync that brings a different one resets an
+  // untouched draft to it, so a retry never resends the stale config over
+  // another admin's change; an edited draft is a deliberate change and stays.
+  const piiBaseRef = useRef<{ key: string; draft: PiiDraft } | null>(null);
   const [routesReloaded, setRoutesReloaded] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   // #1388: deleting the stored LLM bundle is an explicit destructive action
@@ -565,7 +570,12 @@ export default function ConnectorsPage() {
       setLlmProvider("");
       setLlmModel("");
       setLlmApiKey("");
-      setSettingsPii(piiDraftFromStored(c.pii_guardrail_config, locale));
+      const piiBase = piiDraftFromStored(c.pii_guardrail_config, locale);
+      piiBaseRef.current = {
+        key: JSON.stringify(c.pii_guardrail_config ?? null),
+        draft: piiBase,
+      };
+      setSettingsPii(piiBase);
       setSettingsError(null);
       setRouteDraft(routeDraftFromStored(c.channel_routes));
       setRouteUnrouted(c.unrouted_private_channels ?? "default");
@@ -586,6 +596,18 @@ export default function ConnectorsPage() {
     setRouteRowErrors({});
     setRoutesReloaded(true);
   }, [settingsFor]);
+
+  useEffect(() => {
+    if (!settingsFor) return;
+    const key = JSON.stringify(settingsFor.pii_guardrail_config ?? null);
+    const previous = piiBaseRef.current;
+    if (previous && key === previous.key) return;
+    const draft = piiDraftFromStored(settingsFor.pii_guardrail_config, locale);
+    piiBaseRef.current = { key, draft };
+    setSettingsPii((current) =>
+      !previous || piiDraftsEqual(current, previous.draft) ? draft : current,
+    );
+  }, [settingsFor, locale]);
 
   // #1388: after a PATCH failure (usually a 409 from a stale snapshot),
   // re-sync the dialog snapshot from the server so a retry rides the fresh
@@ -655,14 +677,16 @@ export default function ConnectorsPage() {
         ...(llmApiKey.trim() ? { api_key: llmApiKey.trim() } : {}),
       };
     }
-    // #2971: the PII config is sent whole, and only when the section differs
-    // from what is stored. Nothing stored compares against the defaults the
-    // dialog shows, so an untouched section sends nothing.
+    // #2971: the PII config is sent whole, when the section differs from what
+    // is stored. Nothing stored (null) is an unconfigured guardrail the worker
+    // ingests nothing under, so Save stores the shown config (the section
+    // says so). A server that does not report the field shows no section and
+    // gets nothing.
+    const storedPii = settingsFor.pii_guardrail_config;
     if (
-      !piiDraftsEqual(
-        settingsPii,
-        piiDraftFromStored(settingsFor.pii_guardrail_config, locale),
-      )
+      storedPii === null ||
+      (storedPii !== undefined &&
+        !piiDraftsEqual(settingsPii, piiDraftFromStored(storedPii, locale)))
     ) {
       if (piiDraftInvalid(settingsPii)) {
         setSettingsError(t("piiDetectorsRequired"));
@@ -1680,16 +1704,21 @@ export default function ConnectorsPage() {
               </div>
             </section>
             {/* #2971: PII masking, the same controls as the create dialog. */}
-            {settingsFor && (
+            {settingsFor && settingsFor.pii_guardrail_config !== undefined && (
               <section className="space-y-2 border-t pt-4">
                 <PiiGuardrailFields
                   value={settingsPii}
                   onChange={setSettingsPii}
                   idPrefix="conn-settings"
                   disabled={settingsSaving || llmDeleting}
+                  storedDetectors={
+                    Array.isArray(settingsFor.pii_guardrail_config?.detectors)
+                      ? settingsFor.pii_guardrail_config.detectors
+                      : []
+                  }
                   notice={
                     <>
-                      {!settingsFor.pii_guardrail_config && (
+                      {settingsFor.pii_guardrail_config === null && (
                         <p className="mt-1 text-xs text-muted-foreground">
                           {t("piiNotStored")}
                         </p>
@@ -1818,7 +1847,10 @@ export default function ConnectorsPage() {
             <Button
               onClick={() => void handleSettingsSave()}
               disabled={
-                settingsSaving || llmDeleting || piiDraftInvalid(settingsPii)
+                settingsSaving ||
+                llmDeleting ||
+                (settingsFor?.pii_guardrail_config !== undefined &&
+                  piiDraftInvalid(settingsPii))
               }
             >
               {settingsSaving && <InlineSpinner aria-hidden="true" />}

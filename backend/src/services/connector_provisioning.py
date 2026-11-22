@@ -1575,8 +1575,12 @@ class ConnectorProvisioningService:
                 ("litellm_virtual_key_id", litellm_virtual_key_id),
                 ("locale", locale),
                 ("context_id", context_id),
-                ("pii_guardrail_config", pii_guardrail_config),
             )
+        )
+        # #2971: recorded under its own field name, not folded into settings.
+        pii_changed = (
+            pii_guardrail_config is not _UNSET
+            and connector.pii_guardrail_config != pii_guardrail_config
         )
         routes_changed = False
         if new_routes is not None:
@@ -1620,8 +1624,10 @@ class ConnectorProvisioningService:
                 )
         if history_context_id is None:
             history_context_id = connector.context_id
-        history_fields = (["channel_routes"] if routes_changed else []) + (
-            ["settings"] if settings_changed else []
+        history_fields = (
+            (["channel_routes"] if routes_changed else [])
+            + (["settings"] if settings_changed else [])
+            + (["pii_guardrail_config"] if pii_changed else [])
         )
         if history_fields:
             record_operation(

@@ -66,26 +66,37 @@ export function piiDefaultDraft(locale: string): PiiDraft {
 /**
  * The draft for a stored config. Nothing stored (a connector created before
  * PII masking existed) gives the create form's defaults.
+ *
+ * The column is untyped JSONB and a config written before validation (#866)
+ * may lack a field or carry a wrong type, so every field is read on its own and
+ * falls back to its default; this never throws.
  */
 export function piiDraftFromStored(
   stored: PiiGuardrailConfig | null | undefined,
   uiLocale: string,
 ): PiiDraft {
-  if (!stored) return piiDefaultDraft(uiLocale);
-  const redaction = PII_REDACTION_MODES.includes(stored.redaction)
-    ? stored.redaction
-    : "mask";
+  const defaults = piiDefaultDraft(uiLocale);
+  if (!stored || typeof stored !== "object") return defaults;
+  const raw = stored as Partial<Record<keyof PiiGuardrailConfig, unknown>>;
+  const detectors = Array.isArray(raw.detectors)
+    ? raw.detectors.filter(
+        (d): d is string => typeof d === "string" && d.trim() !== "",
+      )
+    : [];
   return {
-    enabled: stored.enabled,
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : defaults.enabled,
     // A switched-off config is stored with no detectors; turning it back on
     // starts from the defaults rather than from an empty, unsavable list.
-    detectors:
-      stored.detectors.length > 0
-        ? [...stored.detectors]
-        : [...PII_DEFAULT_DETECTORS],
-    redaction,
-    failClosed: stored.fail_closed,
-    locale: stored.locale || uiLocale,
+    detectors: detectors.length > 0 ? detectors : defaults.detectors,
+    redaction: PII_REDACTION_MODES.find((m) => m === raw.redaction) ?? "mask",
+    failClosed:
+      typeof raw.fail_closed === "boolean"
+        ? raw.fail_closed
+        : defaults.failClosed,
+    locale:
+      typeof raw.locale === "string" && raw.locale.trim()
+        ? raw.locale
+        : uiLocale,
   };
 }
 
@@ -123,18 +134,31 @@ export function PiiGuardrailFields({
   idPrefix,
   disabled = false,
   notice,
+  storedDetectors = [],
 }: {
   value: PiiDraft;
   onChange: (next: PiiDraft) => void;
   // Keeps the redaction select's id unique per dialog.
   idPrefix: string;
   disabled?: boolean;
+  // Stored detectors the form does not offer: shown as extra choices (and
+  // kept after being unchecked) so no selection is ever hidden.
+  storedDetectors?: readonly string[];
   // Extra line under the description (the settings dialog's "nothing stored
   // yet" note).
   notice?: ReactNode;
 }) {
   const t = useTranslations("connectors");
   const redactionId = `${idPrefix}-pii-redaction`;
+  const offered: readonly string[] = PII_DETECTORS;
+  const choices = [
+    ...offered,
+    ...new Set(
+      [...storedDetectors, ...value.detectors].filter(
+        (d) => !offered.includes(d),
+      ),
+    ),
+  ];
   return (
     <div>
       <div className="flex items-center justify-between gap-4">
@@ -159,7 +183,7 @@ export function PiiGuardrailFields({
           <div>
             <p className="mb-1 text-xs font-medium">{t("piiDetectors")}</p>
             <div className="grid grid-cols-2 gap-1">
-              {PII_DETECTORS.map((d) => (
+              {choices.map((d) => (
                 <label key={d} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"

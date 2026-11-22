@@ -21,12 +21,13 @@ on the way in.
 | Concern | Owner | Where |
 |---|---|---|
 | **Storage** of `pii_guardrail_config` | memory-cloud | `workspace_connectors.pii_guardrail_config` JSONB column (`models/resource.py:499`) |
-| **Setting** the config | memory-cloud | `POST /api/v1/workspace-connectors` (`api/routes/workspace_connectors.py`) and the MCP `setup_connector` tool |
+| **Setting** the config | memory-cloud | `POST /api/v1/workspace-connectors` (`api/routes/workspace_connectors.py`), the MCP `setup_connector` tool, and afterwards the connector settings update `PATCH /api/v1/workspace-connectors/{connector_id}` (#2971) |
 | **Interpreting + enforcing** the config (actual scrubbing) | **ai-worker** | pre-compile stage (ai-worker#91) |
 
-**memory-cloud validates the config shape at provision, then stores it as JSONB.**
+**memory-cloud validates the config shape on every write, then stores it as JSONB.**
 Since #866, both provision call-sites — the REST `POST /api/v1/workspace-connectors`
-endpoint and the MCP `setup_connector` tool — validate `pii_guardrail_config`
+endpoint and the MCP `setup_connector` tool — and, since #2971, the settings update
+`PATCH /api/v1/workspace-connectors/{connector_id}` validate `pii_guardrail_config`
 against the `PiiGuardrailConfig` schema (`models/schemas.py`,
 `validate_pii_guardrail_config`) before storing it. A malformed config (unknown
 key such as `detector` vs `detectors`, or `enabled: true` with empty `detectors`)
@@ -46,7 +47,10 @@ or via a future unguarded path, is not guaranteed to match).
   `{"enabled": false}`. Every settings update bumps `config_version`, which changes
   the `config_revision` / `ETag` of `GET /api/v1/workers/config`, so a running
   worker gets the new config on its next config poll and applies it to content it
-  ingests after that. Content already ingested is not rewritten.
+  ingests after that. Content already ingested is not rewritten. The Web UI's
+  connector settings show a connector with no stored config (null) as such, with
+  the create form's defaults, and Save stores them, so the
+  [null config](#null-config-fail-closed) ends there.
 - **`null` is allowed at provision.** The column is nullable and the field
   defaults to `None`; provision-time validation (#866) accepts `null` and only
   validates a non-null object. A connector can therefore be provisioned with no
@@ -131,6 +135,9 @@ cannot enforce it (it stores `null` happily), so the worker owns it.
 
 ```
 operator → POST /api/v1/workspace-connectors { pii_guardrail_config: {...} }
+         → PATCH /api/v1/workspace-connectors/{connector_id} { pii_guardrail_config: {...} }
+             (#2971: later changes; bumps config_version, so the worker's next
+              config poll returns the new config)
              └─ stored opaquely in workspace_connectors.pii_guardrail_config (JSONB)
 
 worker (pre-compile stage, ai-worker#91)
