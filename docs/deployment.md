@@ -4533,19 +4533,24 @@ and to every caller: MCP and REST recall, public search and the public MCP tools
   scores are compressed (a memory first in one leg only scores about 0.5), so
   the bounded reinforce and graph-boost factors move the order more than they
   do under `weighted`.
-- `keyword_floor`: the `weighted` list with the keyword leg interleaved 1:1,
-  `weighted` first and each memory once, so the keyword leg's hit *j* sits at
-  position *j*·2 or better. A promoted memory's score is raised to tie with the
-  one after it (nothing is lowered), so the later re-sorts keep the order.
+- `keyword_floor`: the `weighted` scores, with the keyword leg interleaved 1:1
+  into the order, `weighted` first and each memory once, so the keyword leg's
+  hit *j* sits at position *j*·2 or better on the returned page. The floor
+  only orders: **no score changes**, so a promoted keyword hit is reported with
+  its own `weighted` score. Recall applies it as its last ordering step, after
+  the reinforce and graph-boost re-sorts. When a reranker scored the list, the
+  reranker's order is final and no floor is applied.
 
-With `rrf` or `keyword_floor` and a reranker that runs, the rerank pool is the
-top half of the candidate window from the semantic leg and the top half from
-the keyword leg (filled from the fused order when they overlap), so a keyword
-hit the fusion ranks low still reaches the reranker; the reranker still scores
-at most the window. With `weighted` the pool is the fused list cut to the
-window, as before. A recall whose semantic leg fails still answers from the
-keyword leg alone (#1515), and the recall `confidence` (computed from the raw
-semantic similarity) is the same in every mode.
+With `rrf` or `keyword_floor` and a reranker that runs, the rerank pool holds
+the head of the fused list (its first half of the candidate window), then the
+keyword leg's top hits not yet in it, then more of the fused list, so both the
+memories the fusion ranks first and keyword hits it ranks low reach the
+reranker; the reranker still scores at most the window. With `weighted` the
+pool is the fused list cut to the window, as before. A recall whose semantic
+leg fails still answers from the keyword leg alone (#1515). The recall
+`confidence` is computed from the raw semantic similarity and is the same in
+every mode whenever the semantic leg returns rows; without them it falls back
+to the fused scores.
 
 The `recall_completed` log line carries `fusion` (this setting) and
 `leg_ranks`: for each result of the page, in page order, its rank in the

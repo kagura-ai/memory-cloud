@@ -4,9 +4,10 @@
   by its top score, ``hybrid_score = sem * w_s + kw * w_k``.
 - ``rrf``: plain reciprocal rank fusion (k=60), scaled into (0, 1] so a row
   first in both legs scores 1.0; the context's weights are not used.
-- ``keyword_floor``: the weighted order with the keyword leg interleaved 1:1
-  (weighted first, each memory once), so keyword hit j sits at position <= 2j;
-  the scores are made non-increasing so a later stable re-sort keeps it.
+- ``keyword_floor``: the weighted scores, with the keyword leg interleaved 1:1
+  into the order (weighted first, each memory once), so keyword hit j sits at
+  position <= 2j. No score changes; recall re-applies the floor after its
+  re-sorts unless a reranker scored the list.
 
 With ``rrf`` / ``keyword_floor`` and the reranker on, the rerank pool is drawn
 from both legs; with ``weighted`` it is the merged list cut to ``fetch_size``.
@@ -28,7 +29,7 @@ import pytest
 from pydantic import ValidationError
 
 from config.settings import Settings
-from services.search_service import SearchService
+from services.search_service import KEYWORD_FLOOR_KEY, SearchService, keyword_floor_order
 from utils.exceptions import ExternalServiceError
 
 pytestmark = pytest.mark.usefixtures("no_identity_links")
@@ -316,17 +317,58 @@ class TestKeywordFloor:
         rows = await _search(_service(), k=3)
         assert _ids(rows) == ["A", "K", "B"]
 
-    async def test_keyword_floor_scores_non_increasing(self, use_fusion):
+    async def test_keyword_floor_changes_no_score(self, use_fusion):
+        """The floor is an ordering step only: every row keeps the weighted fused
+        score, so the API score, the Hebbian activation, the related-index seeds
+        and the supersede fold read a keyword hit's real strength."""
+        use_fusion("weighted")
+        weighted = {r["id"]: r["hybrid_score"] for r in await _search(_service(), k=8)}
         use_fusion("keyword_floor")
         rows = await _search(_service(), k=8)
-        scores = [r["hybrid_score"] for r in rows]
-        assert scores == sorted(scores, reverse=True)
+        assert {r["id"]: r["hybrid_score"] for r in rows} == weighted
         by_id = {r["id"]: r for r in rows}
-        # Promoted rows are lifted to a tie with the row after them; nothing is lowered.
-        assert by_id["K"]["hybrid_score"] == pytest.approx(by_id["B"]["hybrid_score"])
-        assert by_id["Z"]["hybrid_score"] == pytest.approx(by_id["D"]["hybrid_score"])
-        assert by_id["A"]["hybrid_score"] == pytest.approx(0.6 + 0.4 * 0.5)
-        assert by_id["B"]["hybrid_score"] == pytest.approx(0.6 * 0.88 / 0.90)
+        # K is promoted to position 2 and still scores what the weighted fusion gives it.
+        assert _ids(rows)[1] == "K"
+        assert by_id["K"]["hybrid_score"] == pytest.approx(0.4)
+        assert by_id["Z"]["hybrid_score"] == pytest.approx(0.4 * 0.4)
+
+    async def test_keyword_floor_marks_the_rows_for_the_recall_step(self, use_fusion):
+        use_fusion("keyword_floor")
+        rows = await _search(_service(), k=8)
+        assert all(r[KEYWORD_FLOOR_KEY] is True for r in rows)
+
+    @pytest.mark.parametrize("fusion", ["weighted", "rrf"])
+    async def test_other_modes_leave_no_floor_mark(self, use_fusion, fusion):
+        use_fusion(fusion)
+        rows = await _search(_service(), k=8)
+        assert not any(KEYWORD_FLOOR_KEY in r for r in rows)
+
+    async def test_no_floor_mark_on_a_degraded_search(self, use_fusion):
+        use_fusion("keyword_floor")
+        rows = await _search(_service(), k=8, semantic_error=ExternalServiceError("down"))
+        assert not any(KEYWORD_FLOOR_KEY in r for r in rows)
+
+    async def test_a_scored_rerank_is_final_and_leaves_no_floor_mark(self, use_fusion):
+        use_fusion("keyword_floor")
+        service = _service()
+
+        async def _scored(*, candidates, outcome=None, k, **_kwargs):
+            if outcome is not None:
+                outcome["scored"] = True
+            for i, c in enumerate(candidates):
+                c["hybrid_score"] = c["rerank_score"] = 1.0 - i / 100
+            return list(candidates)[:k]
+
+        service.reranker_service.rerank = AsyncMock(side_effect=_scored)
+        rows = await _search(service, k=4, config=_config(True), use_rerank=None)
+        assert rows and not any(KEYWORD_FLOOR_KEY in r for r in rows)
+
+    async def test_a_failed_rerank_keeps_the_floor_mark(self, use_fusion):
+        use_fusion("keyword_floor")
+        service = _service()
+        service.reranker_service.rerank = AsyncMock(side_effect=RuntimeError("down"))
+        rows = await _search(service, k=8, config=_config(True), use_rerank=None)
+        assert all(r[KEYWORD_FLOOR_KEY] is True for r in rows)
 
     async def test_keyword_floor_each_memory_once(self, use_fusion):
         use_fusion("keyword_floor")
@@ -336,13 +378,14 @@ class TestKeywordFloor:
         assert set(_ids(rows)) == {"A", "B", "C", "D", "E", "F", "K"}
 
     async def test_reinforce_resort_keeps_keyword_floor(self, use_fusion):
-        """MemoryService's reinforce re-sort (on by default since #1207) sorts by
-        ``hybrid_score * factor``; with equal factors the floor must survive it."""
+        """Unequal reinforce factors: B (heavily adopted, helpful) is boosted
+        past the promoted keyword-only K. The recall's floor step, after the
+        re-sorts, puts keyword hit j back at position <= 2j."""
+        from services.feedback_service import FeedbackAggregate
         from services.memory_service import MemoryService
 
         use_fusion("keyword_floor")
         rows = await _search(_service(), k=8)
-        floor_order = _ids(rows)
 
         svc = MemoryService(MagicMock())
         cfg = MagicMock(
@@ -353,26 +396,74 @@ class TestKeywordFloor:
         created = datetime(2020, 1, 1)
         memories = {
             mid: MagicMock(id=uuid4(), reference_count=0, importance=0.5, created_at=created)
-            for mid in floor_order
+            for mid in _ids(rows)
         }
+        memories["B"].reference_count = 10
+        memories["B"].importance = 0.9
+        boosted = str(memories["B"].id)
         with (
             patch("repositories.config_repository.ContextSearchConfigRepository") as repo,
             patch("services.feedback_service.FeedbackService") as feedback,
         ):
             repo.return_value.get_by_context = AsyncMock(return_value=cfg)
-            feedback.return_value.aggregate_for_memories = AsyncMock(return_value={})
+            feedback.return_value.aggregate_for_memories = AsyncMock(
+                return_value={
+                    boosted: FeedbackAggregate(
+                        memory_id=boosted, helpful_count=5, not_helpful_count=0
+                    )
+                }
+            )
             await svc._maybe_reinforce_rerank(rows, memories, uuid4(), top_k=8)
-        assert _ids(rows) == floor_order
+        # The re-sort alone buries K again (score x factor).
+        assert _ids(rows).index("K") > 1
+        rows[:] = keyword_floor_order(rows)
+        position = {r["id"]: i + 1 for i, r in enumerate(rows)}
+        for j, hit in enumerate(_KEYWORD, start=1):
+            assert position[hit["id"]] <= 2 * j, hit["id"]
+        # The reinforce order is the base the keyword hits are interleaved into.
+        assert _ids(rows)[:3] == ["A", "K", "B"]
+        assert rows[1]["hybrid_score"] == pytest.approx(0.4)
+
+    async def test_floor_step_is_idempotent_without_a_re_sort(self, use_fusion):
+        use_fusion("keyword_floor")
+        rows = await _search(_service(), k=8)
+        before = _ids(rows)
+        assert _ids(keyword_floor_order(rows)) == before
+
+    def test_recall_applies_the_floor_after_the_re_sorts(self):
+        """The floor is the last ordering step of recall before the selection
+        plan and the page cut: after reinforce and graph boost."""
+        import inspect
+
+        from services.memory_service import MemoryService
+
+        src = inspect.getsource(MemoryService.recall)
+        graph_boost = src.index("await self._maybe_graph_boost(")
+        floor = src.index("keyword_floor_order(search_results)")
+        selection = src.index("await self._recall_apply_selection_plan(")
+        build = src.index("await self._recall_build_responses(")
+        assert src.index("await self._maybe_reinforce_rerank(") < graph_boost < floor
+        assert floor < selection < build
 
 
 # --- the rerank pool ---------------------------------------------------------------
 
 
 class TestRerankPool:
+    async def test_an_unknown_fusion_value_takes_the_weighted_pool(self, monkeypatch):
+        """A settings object without a real HYBRID_FUSION (a MagicMock in older
+        tests) must not take the both-legs pool: only rrf / keyword_floor do."""
+        settings = MagicMock(enable_reranking=True)
+        monkeypatch.setattr("services.search_service.get_settings", lambda: settings)
+        service = _service()
+        await _search(service, k=1, config=_config(True), use_rerank=None)
+        candidates = service.reranker_service.rerank.await_args.kwargs["candidates"]
+        assert _ids(candidates) == ["A", "B", "C", "D", "E", "F"]
+
     @pytest.mark.parametrize("fusion", ["rrf", "keyword_floor"])
     async def test_rerank_pool_draws_both_legs_when_not_weighted(self, use_fusion, fusion):
-        """fetch_size 6: the top 3 of each leg (A B C ∪ K A Z) in fused order,
-        filled up to 6 from the fused order."""
+        """fetch_size 6: the fused head (A K B), the keyword leg's top 3 not yet
+        in (Z), filled up to 6 from the fused order (C D), in fused order."""
         use_fusion(fusion)
         service = _service()
         await _search(service, k=1, config=_config(True), use_rerank=None)
@@ -401,6 +492,46 @@ class TestRerankPool:
         ids = _ids(candidates)
         assert len(ids) == 6
         assert set(ids) == {"s0", "s1", "s2", "k0", "k1", "k2"}
+
+    @pytest.mark.parametrize("fusion", ["rrf", "keyword_floor"])
+    async def test_rerank_pool_holds_the_fused_head_small(self, use_fusion, fusion):
+        """k=1, fetch_size 4: x is third in both legs, so in neither leg's top 2,
+        yet first in the fused order. The pool holds the fused head."""
+        use_fusion(fusion)
+        service = _service()
+        await _search(
+            service,
+            k=1,
+            config=_config(True, fetch_factor=2),
+            semantic=[_sem("a", 0.9), _sem("b", 0.8), _sem("x", 0.7)],
+            keyword=[_sem("c", 10.0), _sem("d", 9.0), _sem("x", 8.0)],
+            use_rerank=None,
+        )
+        ids = _ids(service.reranker_service.rerank.await_args.kwargs["candidates"])
+        assert len(ids) == 4
+        assert "x" in ids
+        assert {"c", "d"} <= set(ids)
+
+    @pytest.mark.parametrize("fusion", ["rrf", "keyword_floor"])
+    async def test_rerank_pool_holds_the_fused_head_large(self, use_fusion, fusion):
+        """k=5, fetch_size 40: M is rank 21 in both legs (outside the top 20 of
+        each) and first in the fused order."""
+        use_fusion(fusion)
+        service = _service()
+        semantic = [_sem("M" if i == 21 else f"s{i}", 1.0 - i / 100) for i in range(1, 41)]
+        keyword = [_sem("M" if i == 21 else f"k{i}", 100.0 - i) for i in range(1, 41)]
+        await _search(
+            service,
+            k=5,
+            config=_config(True, fetch_factor=4),
+            semantic=semantic,
+            keyword=keyword,
+            use_rerank=None,
+        )
+        ids = _ids(service.reranker_service.rerank.await_args.kwargs["candidates"])
+        assert len(ids) == 40
+        assert "M" in ids
+        assert {f"k{i}" for i in range(1, 21)} <= set(ids)
 
     @pytest.mark.parametrize("fusion", ["rrf", "keyword_floor"])
     async def test_rerank_failure_answers_from_the_full_fused_list(self, use_fusion, fusion):

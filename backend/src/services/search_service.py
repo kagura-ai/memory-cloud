@@ -27,7 +27,7 @@ from services.embedding_service import EmbeddingService
 from services.identity_link_service import linked_user_ids, opens_contexts_as_self
 from services.llm_call_log_writer import LLMCallLogWriter
 from services.recall_timings import RecallTimings
-from services.reranker_service import RerankerService
+from services.reranker_service import RERANK_UNSCORED_KEY, RerankerService
 from utils.content_chunks import (
     CONTENT_CHUNK_DENSE_MAX_FETCH,
     CONTENT_CHUNK_DENSE_OVERSAMPLE,
@@ -46,6 +46,54 @@ SearchMode = Literal["hybrid", "semantic", "keyword"]
 # the response score and the Hebbian clamp keep their meaning.
 RRF_K = 60
 _RRF_TOP = 2 / (RRF_K + 1)
+
+# #2958: ``HYBRID_FUSION=keyword_floor`` — stamped (True) on every row of a
+# hybrid search whose order the keyword floor set and no reranker scored. The
+# recall pipeline re-applies the floor (``keyword_floor_order``) after its
+# re-sorts when the rows carry it. The floor never changes a score.
+KEYWORD_FLOOR_KEY = "_keyword_floor"
+
+
+def _floor_base_score(row: dict) -> float:
+    """The score the recall re-sorts order by: hybrid (or raw) x _rerank_factor."""
+    base = row.get("hybrid_score")
+    if base is None:
+        base = row.get("score") or 0.0
+    return float(base) * float(row.get("_rerank_factor", 1.0))
+
+
+def keyword_floor_order(rows: list[dict]) -> list[dict]:
+    """#2958 ``HYBRID_FUSION=keyword_floor``: interleave the keyword leg 1:1.
+
+    The base order is the rows sorted (stably) by their score times the
+    ``_rerank_factor`` the reinforce / graph-boost re-sorts stamp: the weighted
+    fused order inside ``hybrid_search``, the re-sorted order in recall. The
+    rows with a ``keyword_rank``, in that rank's order, are interleaved into it
+    1:1, the base first and each memory once, so the j-th of them sits at
+    position <= 2j. Only the order changes; no score is touched. Applying it to
+    its own output without a re-sort in between gives the same order.
+
+    Args:
+        rows: Candidate rows carrying ``keyword_rank`` (None when the keyword
+            leg did not return the memory).
+
+    Returns:
+        A new list holding the same row dicts in floor order.
+    """
+    base = sorted(rows, key=_floor_base_score, reverse=True)
+    keyword = sorted(
+        (row for row in rows if row.get("keyword_rank") is not None),
+        key=lambda row: row["keyword_rank"],
+    )
+    floored: list[dict] = []
+    placed: set[int] = set()
+    for i in range(max(len(base), len(keyword))):
+        for ordered in (base, keyword):
+            if i < len(ordered) and id(ordered[i]) not in placed:
+                placed.add(id(ordered[i]))
+                floored.append(ordered[i])
+    return floored
+
 
 # #475 PR-3: pinned literal values for the llm_call_log row this module emits.
 # Module-level singletons with import-time tuple-membership assertions match
@@ -516,15 +564,18 @@ class SearchService:
                 keyword_weight=float(config.bm25_weight),
             )
             # #2958: HYBRID_FUSION. ``weighted`` (the default) keeps the list
-            # above as it is; the other two re-fuse it from the legs' ranks.
+            # above as it is; ``rrf`` re-scores it from the legs' ranks.
             if fusion == "rrf":
                 merged_results = self._fuse_rrf(merged_results, semantic_results, fulltext_results)
-            elif fusion == "keyword_floor":
-                merged_results = self._apply_keyword_floor(merged_results, fulltext_results)
         # #2958: every row carries its 1-based rank in each leg (None when that
         # leg did not return it), whatever the mode, so recall_completed can
-        # log where the page came from.
+        # log where the page came from (and the keyword floor can order by it).
         self._stamp_leg_ranks(merged_results, semantic_results, fulltext_results)
+        # #2958: ``keyword_floor`` orders the weighted list with the keyword
+        # leg interleaved 1:1; the weighted scores stay as they are.
+        keyword_floor = effective_search_mode == "hybrid" and fusion == "keyword_floor"
+        if keyword_floor:
+            merged_results = keyword_floor_order(merged_results)
 
         # 4. Reranking (optional) - Issue #105: Multi-provider support (Voyage AI, Cohere)
         # Issue #130 / #1572: effective flag resolved above (caller vs context
@@ -556,11 +607,14 @@ class SearchService:
                 # #2958: with rrf / keyword_floor the pool is drawn from both
                 # legs, so a keyword hit the fusion ranks low still reaches the
                 # reranker; ``weighted`` keeps today's cut of the merged list.
-                both_legs_pool = effective_search_mode == "hybrid" and fusion != "weighted"
+                # Only the two named modes: any other value (a test double's
+                # settings, say) keeps today's pool.
+                both_legs_pool = effective_search_mode == "hybrid" and fusion in (
+                    "rrf",
+                    "keyword_floor",
+                )
                 candidates = (
-                    self._rerank_pool(
-                        merged_results, semantic_results, fulltext_results, fetch_size
-                    )
+                    self._rerank_pool(merged_results, fulltext_results, fetch_size)
                     if both_legs_pool
                     else merged_results[:fetch_size]  # Dynamic fetch size (#130)
                 )
@@ -606,6 +660,14 @@ class SearchService:
                     )
         elif not config.use_rerank:
             logger.debug("reranking_disabled_by_config", context_id=primary_context_id)
+
+        # #2958: a reranker that scored the list sets the final order; without
+        # one the rows tell recall to re-apply the floor after its re-sorts.
+        if keyword_floor and not any(
+            "rerank_score" in row or row.get(RERANK_UNSCORED_KEY) for row in merged_results
+        ):
+            for row in merged_results:
+                row[KEYWORD_FLOOR_KEY] = True
 
         # Return top k results
         return merged_results[:k]
@@ -744,52 +806,26 @@ class SearchService:
         return sorted(merged, key=lambda r: r["hybrid_score"], reverse=True)
 
     @classmethod
-    def _apply_keyword_floor(cls, merged: list[dict], keyword_results: list[dict]) -> list[dict]:
-        """#2958 ``HYBRID_FUSION=keyword_floor``: interleave the keyword leg 1:1.
-
-        The weighted order of ``merged`` and the keyword leg's order are taken
-        in turn, weighted first, each memory once, so keyword hit j sits at
-        position <= 2j. The order is then carried by the scores: walking
-        backwards, each row's ``hybrid_score`` is raised to the next row's
-        when lower. A promoted row is lifted to a tie and nothing is lowered,
-        so the later stable re-sorts by ``hybrid_score`` (reinforce, graph
-        boost) keep the floor.
-        """
-        by_id = {row["id"]: row for row in merged}
-        weighted_ids = list(by_id)
-        keyword_ids = [mid for mid in cls._leg_ranks(keyword_results) if mid in by_id]
-        floored: list[dict] = []
-        placed: set[str] = set()
-        for i in range(max(len(weighted_ids), len(keyword_ids))):
-            for ids in (weighted_ids, keyword_ids):
-                if i < len(ids) and ids[i] not in placed:
-                    placed.add(ids[i])
-                    floored.append(by_id[ids[i]])
-        for i in range(len(floored) - 2, -1, -1):
-            if floored[i]["hybrid_score"] < floored[i + 1]["hybrid_score"]:
-                floored[i]["hybrid_score"] = floored[i + 1]["hybrid_score"]
-        return floored
-
-    @classmethod
     def _rerank_pool(
         cls,
         fused: list[dict],
-        semantic_results: list[dict],
         keyword_results: list[dict],
         fetch_size: int,
     ) -> list[dict]:
-        """#2958: the rerank pool of ``rrf`` / ``keyword_floor``, from both legs.
+        """#2958: the rerank pool of ``rrf`` / ``keyword_floor``.
 
-        The top half of ``fetch_size`` of the semantic leg (rounded up) and
-        the top rest of the keyword leg, filled from the fused order up to
-        ``fetch_size`` when they overlap, returned in the fused order. The
-        reranker therefore scores at most ``fetch_size`` rows, as it does
-        under ``weighted``.
+        The head of the fused order (its first half of ``fetch_size``, rounded
+        up), then the keyword leg's top rows not yet in (the rest of
+        ``fetch_size``), then filled from the fused order, returned in the
+        fused order. The head keeps a memory the fusion ranks first even when
+        it sits outside the top of each leg; the keyword rows let a keyword hit
+        the fusion ranks low reach the reranker. Never more than
+        ``fetch_size`` rows, as under ``weighted``.
         """
-        semantic_share = (fetch_size + 1) // 2
-        wanted = set(list(cls._leg_ranks(semantic_results))[:semantic_share])
-        wanted |= set(list(cls._leg_ranks(keyword_results))[: fetch_size - semantic_share])
-        chosen = {row["id"] for row in fused if row["id"] in wanted}
+        head = (fetch_size + 1) // 2
+        chosen = {row["id"] for row in fused[:head]}
+        for memory_id in list(cls._leg_ranks(keyword_results))[: fetch_size - head]:
+            chosen.add(memory_id)
         for row in fused:
             if len(chosen) >= fetch_size:
                 break

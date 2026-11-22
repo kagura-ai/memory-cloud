@@ -747,13 +747,15 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
                 "semantic/bm25 weights (default)",
                 "rrf": "Reciprocal rank fusion (k=60), scaled into (0, 1]; the context "
                 "weights are not used",
-                "keyword_floor": "The weighted list with the keyword leg interleaved 1:1: "
-                "keyword hit j at position <= 2j",
+                "keyword_floor": "The weighted scores with the keyword leg interleaved 1:1 "
+                "into the order: keyword hit j at position <= 2j on the returned page "
+                "unless a reranker scored the list; no score changes",
             },
             requires_restart=True,
             impact=(
                 "Changes the order of hybrid recall results. With rrf or keyword_floor and "
-                "reranking on, the rerank pool is drawn from both legs."
+                "reranking on, the rerank pool holds the fused head and the keyword leg's "
+                "top hits."
             ),
             examples=["weighted", "rrf", "keyword_floor"],
             recommended="weighted",

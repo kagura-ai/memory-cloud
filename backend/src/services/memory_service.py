@@ -118,7 +118,7 @@ from services.recall_selection import (
 )
 from services.recall_timings import RecallTimings
 from services.reranker_service import RERANK_UNSCORED_KEY
-from services.search_service import SearchService
+from services.search_service import KEYWORD_FLOOR_KEY, SearchService, keyword_floor_order
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, unconditional_tombstone
 from services.supersede_fold import fold_linked_versions, fold_links, fold_nodes
 from services.write_provenance import current_provenance
@@ -7478,6 +7478,13 @@ class MemoryService:
             user_id,
             top_k=request.k,
         )
+        # #2958: HYBRID_FUSION=keyword_floor. The re-sorts above order by score
+        # x factor and so undo the keyword floor hybrid_search set; re-apply it
+        # here, after them and before the selection plan and the page cut. Only
+        # the order changes. The rows carry the mark only when no reranker
+        # scored them (a scored rerank's order is final).
+        if any(hit.get(KEYWORD_FLOOR_KEY) for hit in search_results):
+            search_results[:] = keyword_floor_order(search_results)
 
         selection_evidence: dict[str, Any] | None = None
         if selection_config is not None:

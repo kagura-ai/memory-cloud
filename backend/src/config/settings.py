@@ -1795,9 +1795,10 @@ class Settings(BaseSettings):
             "each leg divided by its top score, blended with the context's "
             "semantic/bm25 weights. 'rrf': reciprocal rank fusion (k=60), scaled "
             "into (0, 1], the context weights unused. 'keyword_floor': the weighted "
-            "list with the keyword leg interleaved 1:1, so keyword hit j sits at "
-            "position <= 2j. With 'rrf' / 'keyword_floor' the rerank pool is drawn "
-            "from both legs."
+            "scores with the keyword leg interleaved 1:1 into the order, so keyword "
+            "hit j sits at position <= 2j on the returned page unless a reranker "
+            "scored the list; no score changes. With 'rrf' / 'keyword_floor' the "
+            "rerank pool holds the fused head and the keyword leg's top hits."
         ),
     )
 
