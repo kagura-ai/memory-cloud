@@ -11,7 +11,8 @@ lock). A call that names no target works on the caller's session workspace:
 it is checked here, before the handler, and the check fails closed.
 
 The manuals (``guide``, ``describe_tools``) answer whatever the workspace's
-state: they read no workspace data.
+state: they read no workspace data. So does ``list_workspaces``, an
+account-level read.
 """
 
 from __future__ import annotations
@@ -29,8 +30,10 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Tools that never read or write workspace data: callable on a suspended
-# session workspace.
-SLOT_GATE_EXEMPT_TOOLS: frozenset[str] = frozenset({"guide", "describe_tools"})
+# session workspace. ``list_workspaces`` (#2972) reads the account's
+# memberships only, and marks a suspended workspace as not usable: it is how a
+# user finds a usable workspace when the session's one is suspended.
+SLOT_GATE_EXEMPT_TOOLS: frozenset[str] = frozenset({"guide", "describe_tools", "list_workspaces"})
 
 # Target-less tools whose handlers check membership of the session workspace
 # and then the slot gate themselves (``_check_workspace_membership``): the

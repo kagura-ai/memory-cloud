@@ -25,11 +25,11 @@ _REPLY_KEYS = {"status", "contexts", "count", "total", "limit", "can_create", "h
 _REPLY_KEYS |= {"next_cursor"}
 
 
-def _workspace(tag: str, name: str, owner_id: str) -> Workspace:
+def _workspace(tag: str, name: str, owner_id: str, plan_name: str = "pro") -> Workspace:
     return Workspace(
         id=uuid4(),
         name=f"{name}-{tag}",
-        plan_name="pro",
+        plan_name=plan_name,
         owner_user_id=owner_id,
         daily_api_limit=50000,
         weekly_api_limit=250000,
@@ -56,6 +56,8 @@ async def accounts(async_engine, db_session, monkeypatch):
     - A: ``a_shared`` (the user's), ``a_private_other`` (another member's private one)
     - B: ``b_shared``
     - C: ``c1``; ``solo`` is a member of C only
+    - D: a one-seat (free) workspace of ``other`` where ``user`` is a member
+      without a seat
     - ``other``: owner of B; in A a member with ``a_shared`` on its list, whose
       private context the user must not see
     """
@@ -72,7 +74,8 @@ async def accounts(async_engine, db_session, monkeypatch):
     wa = _workspace(tag, "lws-a", user_id)
     wb = _workspace(tag, "lws-b", other_id)
     wc = _workspace(tag, "lws-c", solo_id)
-    db_session.add_all([wa, wb, wc])
+    wd = _workspace(tag, "lws-d", other_id, plan_name="free")
+    db_session.add_all([wa, wb, wc, wd])
     await db_session.flush()
     db_session.add_all([_user(user_id, wb.id), _user(other_id, wb.id), _user(solo_id, wc.id)])
     await db_session.flush()
@@ -107,6 +110,8 @@ async def accounts(async_engine, db_session, monkeypatch):
                 allowed_context_ids=[b_shared.id],
             ),
             WorkspaceMember(workspace_id=wc.id, user_id=solo_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=wd.id, user_id=other_id, role=WorkspaceRole.OWNER),
+            WorkspaceMember(workspace_id=wd.id, user_id=user_id, role=WorkspaceRole.MEMBER),
             a_shared,
             a_private_other,
             b_shared,
@@ -122,6 +127,7 @@ async def accounts(async_engine, db_session, monkeypatch):
         "wa": wa.id,
         "wb": wb.id,
         "wc": wc.id,
+        "wd": wd.id,
         "wa_name": wa.name,
         "wb_name": wb.name,
         "a_shared": a_shared.id,
@@ -131,7 +137,7 @@ async def accounts(async_engine, db_session, monkeypatch):
     }
 
     try:
-        workspace_ids = [wa.id, wb.id, wc.id]
+        workspace_ids = [wa.id, wb.id, wc.id, wd.id]
         await db_session.execute(
             WorkspaceMember.__table__.delete().where(
                 WorkspaceMember.workspace_id.in_(workspace_ids)
@@ -202,20 +208,39 @@ async def test_list_workspaces_lists_both_and_marks_the_connection(accounts):
 
     assert payload["status"] == "success", payload
     by_id = {item["id"]: item for item in payload["workspaces"]}
-    assert set(by_id) == {str(s["wa"]), str(s["wb"])}
+    assert set(by_id) == {str(s["wa"]), str(s["wb"]), str(s["wd"])}
     assert by_id[str(s["wa"])] == {
         "id": str(s["wa"]),
         "name": s["wa_name"],
         "role": "owner",
         "current": False,
+        "usable": True,
     }
     assert by_id[str(s["wb"])] == {
         "id": str(s["wb"]),
         "name": s["wb_name"],
         "role": "member",
         "current": True,
+        "usable": True,
     }
-    assert payload["total"] == 2
+    assert payload["total"] == 3
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_workspace_without_a_seat_is_listed_as_not_usable_and_not_counted(accounts):
+    """list_workspaces, the pointer and list_contexts(workspace_id) agree: the
+    seatless member's workspace is not usable, list_contexts refuses it, and
+    the pointer counts only A (usable) besides the connection's B."""
+    s = accounts
+    workspaces = await _workspaces(s)
+    refused = await _contexts(s, {"workspace_id": str(s["wd"])})
+    plain = await _contexts(s, {})
+
+    seatless = next(i for i in workspaces["workspaces"] if i["id"] == str(s["wd"]))
+    assert seatless["usable"] is False
+    assert seatless["reason"] == "feature_not_available"
+    assert refused["error"] == "feature_not_available", refused
+    assert plain["other_workspaces"] == 1
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -226,6 +251,7 @@ async def test_list_workspaces_under_a_workspace_key_returns_that_workspace_only
 
     assert [item["id"] for item in payload["workspaces"]] == [str(s["wb"])]
     assert payload["workspaces"][0]["current"] is True
+    assert payload["workspaces"][0]["usable"] is True
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -242,7 +268,7 @@ async def test_list_workspaces_is_not_in_core_but_callable_from_a_core_url(accou
         result = await execute_tool_call("list_workspaces", {}, s["user_id"], s["wb"])
     payload = json.loads(result[0].text)
     assert payload["status"] == "success", payload
-    assert payload["total"] == 2
+    assert payload["total"] == 3
 
 
 # ------------------------------------------------- list_contexts(workspace_id=...)
@@ -258,7 +284,10 @@ async def test_list_contexts_of_another_workspace_by_argument(accounts):
     assert _ids(payload) == {str(s["a_shared"])}
     assert str(s["a_private_other"]) not in _ids(payload)
     assert payload["count"] == 1
-    assert "limit" in payload and "can_create" in payload
+    # create_context creates in the connection's workspace (B), so nothing
+    # about creating in A is offered.
+    assert "limit" not in payload and "can_create" not in payload
+    assert "hint" not in payload
     assert payload["other_workspaces"] == 1
 
 
@@ -360,3 +389,28 @@ async def test_a_workspace_key_lists_no_other_workspace_and_gets_no_pointer(acco
     assert _ids(own) == _ids(plain) == {str(s["b_shared"])}
     assert set(plain) == _REPLY_KEYS
     assert set(own) == _REPLY_KEYS
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_empty_other_workspace_gets_no_create_context_hint(accounts, db_session):
+    """A member of C who sees nothing there is told where contexts of C are
+    created (a connection to C), not to call create_context, which would
+    create in the connection's workspace."""
+    s = accounts
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=s["wc"],
+            user_id=s["user_id"],
+            role=WorkspaceRole.MEMBER,
+            allowed_context_ids=[],
+        )
+    )
+    await db_session.commit()
+
+    payload = await _contexts(s, {"workspace_id": str(s["wc"])})
+
+    assert payload["status"] == "success", payload
+    assert payload["contexts"] == []
+    assert "limit" not in payload and "can_create" not in payload
+    assert "create_context" not in payload["hint"]
+    assert f"/mcp/w/{s['wc']}" in payload["hint"]

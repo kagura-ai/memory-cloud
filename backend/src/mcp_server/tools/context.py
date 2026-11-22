@@ -872,6 +872,17 @@ def _workspaces_hint(other_workspaces: int) -> str:
     )
 
 
+# #2972: create_context creates in the connection's workspace, so a listing of
+# another workspace offers no create step there and no quota figures; an empty
+# one says where its contexts are created. Names no tool (also the google view).
+def _other_workspace_empty_hint(workspace_id: UUID) -> str:
+    return (
+        "No contexts of that workspace are visible to you. Contexts there are created "
+        f"from a connection to that workspace (/mcp/w/{workspace_id}), or ask its owner "
+        "or an admin for access."
+    )
+
+
 def _list_contexts_target(
     args: dict[str, Any], connection_workspace_id: UUID | None
 ) -> tuple[UUID | None, bool, list[TextContent] | None]:
@@ -1009,6 +1020,7 @@ async def handle_list_contexts(
     workspace_id, named_workspace, target_error = _list_contexts_target(args, workspace_id)
     if target_error:
         return target_error
+    other_workspace = named_workspace and workspace_id != connection_workspace_id
 
     include_stats = args.get("include_stats", False)
     include_details = args.get("include_details", False)
@@ -1165,7 +1177,8 @@ async def handle_list_contexts(
             quota_info: dict[str, Any] = {"count": visible_count, "total": len(context_list)}
             full_with_unseen_contexts = False
             # #2884: no quota figures for a workspace the caller could not list.
-            if workspace_id and not lookup_failed:
+            # #2972: nor for another workspace, where create_context does not create.
+            if workspace_id and not lookup_failed and not other_workspace:
                 try:
                     from sqlalchemy import func as sql_func
                     from sqlalchemy import select as sql_select
@@ -1202,7 +1215,10 @@ async def handle_list_contexts(
             # non-empty list gets no hint.
             hint = None
             if visible_count == 0 and not lookup_failed:
-                hint = _EMPTY_CONTEXTS_HINT if workspace_id else _NO_WORKSPACE_HINT
+                if other_workspace and workspace_id is not None:
+                    hint = _other_workspace_empty_hint(workspace_id)
+                else:
+                    hint = _EMPTY_CONTEXTS_HINT if workspace_id else _NO_WORKSPACE_HINT
             if full_with_unseen_contexts:
                 hint = _EMPTY_FULL_WORKSPACE_HINT if visible_count == 0 else _WORKSPACE_FULL_HINT
 

@@ -39,17 +39,40 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class AccountWorkspace:
-    """One workspace of the account: its id, name and the account's role there."""
+    """One workspace of the account: its id, name and the account's role there.
+
+    ``refusal`` is the error code ``list_contexts(workspace_id=<id>)`` answers
+    for the workspace's state (``workspace_suspended``: the workspace slot is
+    suspended; ``feature_not_available``: the account has no seat on its
+    plan), ``None`` when the workspace is usable.
+    """
 
     id: UUID
     name: str
     role: str
+    refusal: str | None = None
+
+
+async def _refusal(db: AsyncSession, workspace: Any, member: Any, user_id: str) -> str | None:
+    """The gates ``_get_workspace_member_role`` runs after membership, as an error code."""
+    from services import plan_seats
+    from services.workspace_slot_gate import ensure_slot_active
+    from utils.exceptions import FeatureNotAvailableError, WorkspaceSlotSuspendedError
+
+    try:
+        await ensure_slot_active(db, workspace.id, user_id=user_id)
+        await plan_seats.ensure_member_seated(db, workspace, member)
+    except WorkspaceSlotSuspendedError:
+        return "workspace_suspended"
+    except FeatureNotAvailableError:
+        return "feature_not_available"
+    return None
 
 
 async def account_workspaces(
     db: AsyncSession, user_id: str, *, only: UUID | None = None
 ) -> list[AccountWorkspace]:
-    """The workspaces ``user_id`` is a member of, by name.
+    """The workspaces ``user_id`` is a member of, by name, each with its usability.
 
     A workspace that is soft-deleted is left out. ``only`` narrows the list to
     one workspace (a workspace-scoped key's).
@@ -59,7 +82,7 @@ async def account_workspaces(
     from models.auth import Workspace, WorkspaceMember
 
     query = (
-        select(Workspace.id, Workspace.name, WorkspaceMember.role)
+        select(Workspace, WorkspaceMember)
         .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
         .where(WorkspaceMember.user_id == user_id, Workspace.deleted_at.is_(None))
         .order_by(Workspace.name, Workspace.id)
@@ -67,23 +90,32 @@ async def account_workspaces(
     if only is not None:
         query = query.where(Workspace.id == only)
     rows = (await db.execute(query)).all()
-    return [AccountWorkspace(id=row[0], name=row[1], role=str(row[2])) for row in rows]
+    return [
+        AccountWorkspace(
+            id=workspace.id,
+            name=workspace.name,
+            role=str(member.role),
+            refusal=await _refusal(db, workspace, member, user_id),
+        )
+        for workspace, member in rows
+    ]
 
 
 async def other_workspace_count(db: AsyncSession, user_id: str, listed: UUID | None) -> int:
-    """How many of the account's workspaces are not ``listed`` (0 under a key scope).
+    """How many usable workspaces of the account are not ``listed`` (0 under a key scope).
 
-    ``list_contexts`` reports it when the account has more than one workspace,
-    so a ``core`` client learns of the others without ``list_workspaces`` in
-    its tool list. A workspace-scoped key reaches no other workspace, so it is
-    told of none.
+    ``list_contexts`` reports it when there are any, so a ``core`` client
+    learns of them without ``list_workspaces`` in its tool list. Only the
+    workspaces ``list_contexts(workspace_id=...)`` would list count (not a
+    suspended one, nor one where the account has no seat). A workspace-scoped
+    key reaches no other workspace, so it is told of none.
     """
     if get_mcp_key_workspace_scope() is not None:
         return 0
     workspaces = await account_workspaces(db, user_id)
-    if len(workspaces) < 2:
-        return 0
-    return sum(1 for workspace in workspaces if workspace.id != listed)
+    return sum(
+        1 for workspace in workspaces if workspace.id != listed and workspace.refusal is None
+    )
 
 
 async def handle_list_workspaces(
@@ -91,8 +123,12 @@ async def handle_list_workspaces(
 ) -> list[TextContent]:
     """List the workspaces the account is a member of (#2972).
 
-    Items: ``id``, ``name``, ``role`` (the account's role there) and ``current``
-    (the connection's workspace). Takes no arguments.
+    Items: ``id``, ``name``, ``role`` (the account's role there), ``current``
+    (the connection's workspace) and ``usable`` (whether
+    ``list_contexts(workspace_id=<id>)`` lists it), with ``reason`` (the error
+    code it would answer) when not. Takes no arguments, and answers whatever
+    the state of the connection's workspace: it is how an account finds a
+    usable workspace when that one is suspended.
     """
     from db.base import get_db
 
@@ -106,6 +142,8 @@ async def handle_list_workspaces(
                     "name": workspace.name,
                     "role": workspace.role,
                     "current": workspace.id == workspace_id,
+                    "usable": workspace.refusal is None,
+                    **({"reason": workspace.refusal} if workspace.refusal else {}),
                 }
                 for workspace in workspaces
             ]

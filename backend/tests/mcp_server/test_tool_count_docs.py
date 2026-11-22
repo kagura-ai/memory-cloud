@@ -51,6 +51,8 @@ _CORE = re.compile(r"\b(\d{1,3})(?:-tool core\b| core (?:\w+ ){0,4}tools\b)")
 _READ_ONLY = re.compile(r"\bother (\d{1,3}) tools\b|\b(\d{1,3}) read-only tools\b")
 # "70 tools", "70 MCP tools", "70 MCP Tools" — not the "other N tools" of the class table
 _TOTAL = re.compile(r"(?<!other )(?<![\w~-])(\d{2,3}) (?:MCP )?[Tt]ools\b")
+# "`?profile=full` lists all 72" (#2972: one page kept the old number this way)
+_LISTS_ALL = re.compile(r"\blists all (\d{2,3})\b")
 
 
 def _registry() -> list[dict]:
@@ -70,7 +72,12 @@ def counts_in(text: str) -> list[tuple[str, int, int]]:
     """Every tool count ``text`` states, as ``(kind, number, line_number)``."""
     found: list[tuple[str, int, int]] = []
     for number, line in enumerate(text.splitlines(), start=1):
-        for kind, pattern in (("core", _CORE), ("read-only", _READ_ONLY), ("total", _TOTAL)):
+        for kind, pattern in (
+            ("core", _CORE),
+            ("read-only", _READ_ONLY),
+            ("total", _TOTAL),
+            ("total", _LISTS_ALL),
+        ):
             for match in pattern.finditer(line):
                 found.append((kind, int(next(g for g in match.groups() if g)), number))
     return found
@@ -97,6 +104,7 @@ def test_the_patterns_read_every_phrasing_the_docs_use():
     ]
     assert counts_in("provides 68 MCP tools for AI assistants") == [("total", 68, 1)]
     assert counts_in("│  - 60 MCP Tools      │") == [("total", 60, 1)]
+    assert counts_in("`?profile=full` lists all 72, `?add_tools=` adds") == [("total", 72, 1)]
     assert counts_in("lists the 16-tool core profile") == [("core", 16, 1)]
     assert counts_in("the 16 core memory and context tools (see Tool Profiles)") == [
         ("core", 16, 1)
@@ -152,3 +160,24 @@ def test_the_annotation_class_table_covers_every_tool_that_is_not_read_only():
     writing = {tool["name"] for tool in registry if not tool["annotations"]["readOnlyHint"]}
     assert writing - named == set(), "a writing tool is missing from the class table"
     assert named & {tool["name"] for tool in registry} == writing
+
+
+@needs_docs
+def test_the_concepts_category_table_adds_up_to_the_registry():
+    """Each category row names as many tools as it states, every registered
+    tool is in exactly one row, and the rows add up to the registry (#2972)."""
+    rows = [
+        line
+        for line in _read("docs/concepts.md").splitlines()
+        if re.match(r"^\| [^|]+ \| \d+ \| ", line)
+    ]
+    named: list[str] = []
+    for row in rows:
+        cells = row.split("|")
+        stated = int(cells[2])
+        # The tool names lead the cell; prose after " — " may mention others.
+        names = re.findall(r"`([a-z_]+)`", cells[3].split(" — ", 1)[0])
+        assert stated == len(names), row
+        named.extend(names)
+    registry = sorted(tool["name"] for tool in _registry())
+    assert sorted(named) == registry

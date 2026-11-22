@@ -96,10 +96,12 @@ list_contexts()
    the context quota is exhausted: stop here and report it instead of failing step 1 halfway
 
 list_workspaces()
--> Verify: status=success; `total` equals the length of `workspaces`, each item has id, name, role
-   and current, and exactly one has current=true (this connection's workspace)
+-> Verify: status=success; `total` equals the length of `workspaces`, each item has id, name, role,
+   current and usable (reason when usable=false), and exactly one has current=true (this
+   connection's workspace)
 -> Verify: with more than one workspace, the list_contexts() reply above carries
-   other_workspaces == total - 1 and a `workspaces_hint`; with one workspace it carries neither
+   other_workspaces == the number of other items with usable=true and a `workspaces_hint`; with
+   no other usable workspace it carries neither
 
 create_context(name="smoke-test-{unix_timestamp}", description="Temporary context for MCP smoke test. Safe to delete.")
 -> Verify: status=success with a top-level `context_id` (UUID format) — there is no nested context

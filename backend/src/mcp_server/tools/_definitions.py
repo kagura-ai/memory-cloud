@@ -917,8 +917,8 @@ Manual: guide(["list_contexts"]).""",
         {
             "name": "list_workspaces",
             "readOnly": True,
-            "description": """List the workspaces your account is a member of, with your role in each; current marks this connection's workspace. Pass an id as list_contexts(workspace_id=...) to list that workspace's contexts; a context_id from it works in the other tools. With a workspace-scoped API key only the key's workspace is listed.
-Returns: {status, workspaces: [{id, name, role, current}], total}.""",
+            "description": """List the workspaces your account is a member of, with your role in each; current marks this connection's workspace. Pass an id as list_contexts(workspace_id=...) to list that workspace's contexts; a context_id from it works in the other tools. usable=false (reason: workspace_suspended or feature_not_available, no seat on its plan) means list_contexts refuses it. Works while this connection's workspace is suspended. With a workspace-scoped API key only the key's workspace is listed.
+Returns: {status, workspaces: [{id, name, role, current, usable, reason?}], total}.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
