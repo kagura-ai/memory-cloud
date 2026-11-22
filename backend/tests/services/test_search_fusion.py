@@ -431,8 +431,9 @@ class TestKeywordFloor:
         assert _ids(keyword_floor_order(rows)) == before
 
     def test_recall_applies_the_floor_after_the_re_sorts(self):
-        """The floor is the last ordering step of recall before the selection
-        plan and the page cut: after reinforce and graph boost."""
+        """The floor is the last ordering step before the page is cut, after
+        reinforce and graph boost; only a selection plan, when set, orders
+        after it."""
         import inspect
 
         from services.memory_service import MemoryService

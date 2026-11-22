@@ -50,7 +50,9 @@ _RRF_TOP = 2 / (RRF_K + 1)
 # #2958: ``HYBRID_FUSION=keyword_floor`` — stamped (True) on every row of a
 # hybrid search whose order the keyword floor set and no reranker scored. The
 # recall pipeline re-applies the floor (``keyword_floor_order``) after its
-# re-sorts when the rows carry it. The floor never changes a score.
+# re-sorts when the rows carry it: the last ordering step before the page is
+# cut, unless a selection plan is set (it orders after the floor). The floor
+# never changes a score.
 KEYWORD_FLOOR_KEY = "_keyword_floor"
 
 

@@ -253,3 +253,79 @@ class TestFoldLinkedVersions:
 
         assert fold_map == {v3.id: [v1.id]}
         assert [r["id"] for r in search_results] == [str(v3.id)]
+
+
+class TestFoldUnderKeywordFloor:
+    """#2958: under HYBRID_FUSION=keyword_floor the pool is not in score order.
+
+    The fold head keeps the best values of its group: the highest
+    ``hybrid_score`` (with the other FOLD_RANK_KEYS of that row) and the
+    lowest ``keyword_rank`` / ``semantic_rank``, so the reinforce re-sort and
+    the floor step still place it where its group deserves.
+    """
+
+    def _page(self):
+        from services.search_service import KEYWORD_FLOOR_KEY
+
+        a, k, c, b, d = _mem(5), _mem(9), _mem(5), _mem(1), _mem(5)
+        rows = [
+            (a, 0.90, 1, None),
+            # K: an older version, promoted by the floor (keyword rank 1).
+            (k, 0.30, None, 1),
+            (c, 0.88, 2, None),
+            # B: the newer version, supersedes K; no keyword rank of its own.
+            (b, 0.85, 3, None),
+            (d, 0.80, 4, None),
+        ]
+        search_results = [
+            {
+                "id": str(m.id),
+                "score": score,
+                "hybrid_score": score,
+                "semantic_rank": sem,
+                "keyword_rank": kw,
+                KEYWORD_FLOOR_KEY: True,
+            }
+            for m, score, sem, kw in rows
+        ]
+        memories = {str(m.id): m for m, *_ in rows}
+        pool = {m.id: m for m, *_ in rows}
+        return search_results, memories, pool, {"a": a, "k": k, "c": c, "b": b, "d": d}
+
+    def test_the_head_keeps_the_best_score_and_ranks_of_its_group(self):
+        search_results, memories, pool, m = self._page()
+        fold_linked_versions(search_results, memories, pool, {m["b"].id: {m["k"].id}})
+        assert [r["id"] for r in search_results] == [
+            str(m["a"].id),
+            str(m["b"].id),
+            str(m["c"].id),
+            str(m["d"].id),
+        ]
+        head = search_results[1]
+        assert head["hybrid_score"] == pytest.approx(0.85)
+        assert head["score"] == pytest.approx(0.85)
+        assert head["keyword_rank"] == 1
+        assert head["semantic_rank"] == 3
+
+    def test_the_head_stays_on_the_page_at_the_floor_position(self):
+        from services.search_service import keyword_floor_order
+
+        search_results, memories, pool, m = self._page()
+        fold_linked_versions(search_results, memories, pool, {m["b"].id: {m["k"].id}})
+        page = keyword_floor_order(search_results)[:2]
+        assert [r["id"] for r in page] == [str(m["a"].id), str(m["b"].id)]
+        assert page[1]["hybrid_score"] == pytest.approx(0.85)
+
+    def test_a_score_ordered_pool_folds_as_before(self):
+        """In score order the first group row is the group maximum: same result."""
+        newer, older = _mem(1), _mem(9)
+        search_results, memories = _pool((older, 0.9), (newer, 0.5))
+        search_results[0]["keyword_rank"] = 2
+        search_results[1]["keyword_rank"] = 1
+        pool = {newer.id: newer, older.id: older}
+        fold_linked_versions(search_results, memories, pool, {newer.id: {older.id}})
+        (head,) = search_results
+        assert head["id"] == str(newer.id)
+        assert head["hybrid_score"] == pytest.approx(0.9)
+        assert head["score"] == pytest.approx(0.9)
+        assert head["keyword_rank"] == 1

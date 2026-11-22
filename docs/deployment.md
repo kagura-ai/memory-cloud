@@ -4537,9 +4537,12 @@ and to every caller: MCP and REST recall, public search and the public MCP tools
   into the order, `weighted` first and each memory once, so the keyword leg's
   hit *j* sits at position *j*·2 or better on the returned page. The floor
   only orders: **no score changes**, so a promoted keyword hit is reported with
-  its own `weighted` score. Recall applies it as its last ordering step, after
-  the reinforce and graph-boost re-sorts. When a reranker scored the list, the
-  reranker's order is final and no floor is applied.
+  its own `weighted` score. Recall applies it as the last ordering step before
+  the page is cut, after the reinforce and graph-boost re-sorts; only a
+  selection plan, when one is set, orders after it. When a reranker scored the
+  list, the reranker's order is final and no floor is applied. A memory folded
+  under a newer version passes its best score and leg ranks to the version
+  shown.
 
 With `rrf` or `keyword_floor` and a reranker that runs, the rerank pool holds
 the head of the fused list (its first half of the candidate window), then the

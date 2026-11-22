@@ -1797,7 +1797,8 @@ class Settings(BaseSettings):
             "into (0, 1], the context weights unused. 'keyword_floor': the weighted "
             "scores with the keyword leg interleaved 1:1 into the order, so keyword "
             "hit j sits at position <= 2j on the returned page unless a reranker "
-            "scored the list; no score changes. With 'rrf' / 'keyword_floor' the "
+            "scored the list (the last ordering step before the page is cut; only a "
+            "selection plan orders after it); no score changes. With 'rrf' / 'keyword_floor' the "
             "rerank pool holds the fused head and the keyword leg's top hits."
         ),
     )

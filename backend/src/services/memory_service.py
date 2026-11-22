@@ -7480,8 +7480,9 @@ class MemoryService:
         )
         # #2958: HYBRID_FUSION=keyword_floor. The re-sorts above order by score
         # x factor and so undo the keyword floor hybrid_search set; re-apply it
-        # here, after them and before the selection plan and the page cut. Only
-        # the order changes. The rows carry the mark only when no reranker
+        # here, after them: the last ordering step before the page is cut,
+        # unless a selection plan is set (it orders after the floor). Only the
+        # order changes. The rows carry the mark only when no reranker
         # scored them (a scored rerank's order is final).
         if any(hit.get(KEYWORD_FLOOR_KEY) for hit in search_results):
             search_results[:] = keyword_floor_order(search_results)

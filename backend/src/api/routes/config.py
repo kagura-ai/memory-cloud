@@ -749,7 +749,8 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
                 "weights are not used",
                 "keyword_floor": "The weighted scores with the keyword leg interleaved 1:1 "
                 "into the order: keyword hit j at position <= 2j on the returned page "
-                "unless a reranker scored the list; no score changes",
+                "unless a reranker scored the list (the last ordering step before the "
+                "page is cut; only a selection plan orders after it); no score changes",
             },
             requires_restart=True,
             impact=(
