@@ -893,6 +893,7 @@ async def test_calibration_task_starts_for_the_self_hosted_default(monkeypatch):
 
 _RERANK_ENV = [
     "ENABLE_RERANKING",
+    "HYBRID_FUSION",
     "RERANK_BASE_URL",
     "RERANK_MODEL",
     "RERANK_PROMPT_FORMAT",

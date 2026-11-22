@@ -4498,6 +4498,7 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ENABLE_RERANKING` | `true` | Deployment kill switch. `false` ⇒ no context reranks; `/system/info` reports `features.reranking=false` and the web UI hides the reranker card from the context search settings. |
+| `HYBRID_FUSION` | `weighted` | How a hybrid recall fuses its semantic and keyword legs, for the whole deployment: `weighted` \| `rrf` \| `keyword_floor` (case-insensitive; empty ⇒ `weighted`; any other value refuses start-up). See [Hybrid fusion](#hybrid-fusion--issue-2958). |
 | `DEFAULT_RERANKER_PROVIDER` | `voyage` | `voyage` \| `cohere` \| `self_hosted`. Written to **new** context search configs. |
 | `DEFAULT_USE_RERANK` | `false` | `use_rerank` written to new context search configs. `true` with `self_hosted` requires `RERANK_BASE_URL` or `SELF_HOSTED_BASE_URL`, else the API refuses to start. |
 | `DEFAULT_RERANKER_MODEL` | — | Model written to new configs. Empty ⇒ the provider's default (`rerank-2`, `rerank-multilingual-v3.0`, or for `self_hosted` `RERANK_MODEL` when `RERANK_BASE_URL` is set, else `SELF_HOSTED_RERANK_MODEL`). For voyage/cohere it must be a model the UI offers. |
@@ -4516,6 +4517,47 @@ Unset, they reproduce the previous behaviour (`false` / `voyage` / `rerank-2`).
 (`ENABLE_RERANKING` and, for a `self_hosted` default, an endpoint is configured)
 and `search_defaults: {use_rerank, reranker_provider, reranker_model,
 content_chunks_enabled}` — names only, never URLs or keys.
+
+### Hybrid fusion — Issue #2958
+
+`HYBRID_FUSION` picks how a hybrid recall (`search_mode="hybrid"`) combines its
+two legs. It applies to the whole deployment (there is no per-context setting)
+and to every caller: MCP and REST recall, public search and the public MCP tools.
+
+- `weighted` (default, the fusion of every earlier release): each leg's scores
+  are divided by that leg's top score and summed with the context's
+  `semantic_weight` / `bm25_weight`.
+- `rrf`: reciprocal rank fusion, `sum(1 / (60 + rank))` over the legs that
+  returned the memory, scaled into (0, 1] (a memory first in both legs scores
+  1.0). **The context's `semantic_weight` / `bm25_weight` are not used.** The
+  scores are compressed (a memory first in one leg only scores about 0.5), so
+  the bounded reinforce and graph-boost factors move the order more than they
+  do under `weighted`.
+- `keyword_floor`: the `weighted` scores, with the keyword leg interleaved 1:1
+  into the order, `weighted` first and each memory once, so the keyword leg's
+  hit *j* sits at position *j*·2 or better on the returned page. The floor
+  only orders: **no score changes**, so a promoted keyword hit is reported with
+  its own `weighted` score. Recall applies it as the last ordering step before
+  the page is cut, after the reinforce and graph-boost re-sorts; only a
+  selection plan, when one is set, orders after it. When a reranker scored the
+  list, the reranker's order is final and no floor is applied. A memory folded
+  under a newer version passes its best score and leg ranks to the version
+  shown.
+
+With `rrf` or `keyword_floor` and a reranker that runs, the rerank pool holds
+the head of the fused list (its first half of the candidate window), then the
+keyword leg's top hits not yet in it, then more of the fused list, so both the
+memories the fusion ranks first and keyword hits it ranks low reach the
+reranker; the reranker still scores at most the window. With `weighted` the
+pool is the fused list cut to the window, as before. A recall whose semantic
+leg fails still answers from the keyword leg alone (#1515). The recall
+`confidence` is computed from the raw semantic similarity and is the same in
+every mode whenever the semantic leg returns rows; without them it falls back
+to the fused scores.
+
+The `recall_completed` log line carries `fusion` (this setting) and
+`leg_ranks`: for each result of the page, in page order, its rank in the
+semantic and in the keyword leg (`null` where that leg did not return it).
 
 ### Self-hosted recipe (keyless reranking as standard equipment)
 
@@ -5659,9 +5701,11 @@ credential comes from is decided per feature:
   (`EMBEDDING_PROVIDER=openai`, or a live context of the workspace on an OpenAI
   embedding model) — see
   [Protected keys](api-reference.md#protected-keys-is_protected-issue-1613).
-  With BYOK off the External Keys nav entry shows for the owner only while the
-  workspace still stores a key (#1616); the page itself is always reachable at
-  `/workspace/integrations/external-keys`.
+  With BYOK off the External Keys entry of the Integrations menus shows for the
+  owner only while the workspace still stores a key (#1616, #2968). The page at
+  `/workspace/integrations/external-keys` is then a delete-only list of those
+  keys (an enabled key can still be disabled; nothing can be added, edited or
+  enabled), and with no key stored it answers that the feature is unavailable.
 - **Memory Analysis** was strict-BYOK: an enabled workspace OpenAI key had to
   exist, and the labelling calls refused the platform credential. Since
   #1569 the run resolves a *lane* instead (table below).

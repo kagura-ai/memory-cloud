@@ -46,6 +46,7 @@ ANSWERED_KEYS: frozenset[str] = frozenset(
         "EMBEDDING_DIMENSIONS",
         # search
         "ENABLE_RERANKING",
+        "HYBRID_FUSION",
         # system
         "ENVIRONMENT",
         "LOG_LEVEL",

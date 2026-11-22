@@ -8,6 +8,8 @@
  * Issue #115 - Added OpenAI required alert
  * Issue #223 - i18n support
  * Issue #1613 - "Required" follows the API's is_protected, not the provider
+ * Issue #2968 - BYOK off: a delete-only list of stored keys, or, with none
+ *   stored, the page answers as a feature that is off
  * Fix: Added permission check and redirect on workspace change
  */
 
@@ -18,6 +20,8 @@ import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/Worksp
 import { PageContainer } from "@/components/common/PageContainer";
 import { FeatureGuide } from "@/components/common/FeatureGuide";
 import { LoadingState } from "@/components/common/LoadingState";
+import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { EmptyState } from "@/components/ui/empty-state";
 import {
   Card,
   CardContent,
@@ -83,10 +87,12 @@ import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { recordWorkspaceObjectPresence } from "@/hooks/useWorkspaceObjectPresence";
 
 export default function ExternalKeysPage() {
   const t = useTranslations("externalKeys");
   const tCommon = useTranslations("common");
+  const tAccess = useTranslations("featureAccess");
   const router = useRouter();
 
   // Provider definitions with auto-generated key names
@@ -153,6 +159,9 @@ export default function ExternalKeysPage() {
   const byokEnabled = systemFeatures?.byok === true;
   const [keys, setKeys] = useState<ExternalAPIKey[]>([]);
   const [loading, setLoading] = useState(true);
+  // #2968: whether the last list request failed (the "feature is off" answer
+  // needs a list that actually loaded empty).
+  const [loadFailed, setLoadFailed] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -248,15 +257,23 @@ export default function ExternalKeysPage() {
       setLoading(true);
       const response = await listExternalAPIKeys();
       // API returns { keys: [], total: 0 } structure
-      setKeys(
-        Array.isArray(response) ? response : (response as any).keys || [],
-      );
-    } catch (error) {
-      toast({
-        title: tCommon("error"),
-        description: t("errorLoadKeys"),
-        variant: "destructive",
-      });
+      const loaded: ExternalAPIKey[] = Array.isArray(response)
+        ? response
+        : (response as any).keys || [];
+      setKeys(loaded);
+      setLoadFailed(false);
+      // #2968: tell the Integrations menus what the list holds now, so the
+      // entry they show with BYOK off goes once the last key is deleted.
+      if (currentWorkspaceId) {
+        recordWorkspaceObjectPresence(
+          "externalKeys",
+          currentWorkspaceId,
+          loaded.length > 0,
+        );
+      }
+    } catch {
+      // A page-level load failure: the ErrorBanner below, no toast.
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -337,11 +354,16 @@ export default function ExternalKeysPage() {
         apiErr?.details?.detail ||
         (error instanceof Error ? error.message : t("errorDeleteKey"));
       setDeleteError(errorMessage);
+    } finally {
+      // Also after a success: the next delete must not start out busy.
       setDeleteLoading(false);
     }
   };
 
   const handleToggle = async (key: ExternalAPIKey) => {
+    // #2968: with BYOK off a stored key can be disabled, not enabled again,
+    // except a protected one (#1613: re-enabling it stays possible).
+    if (!byokEnabled && !key.enabled && key.is_protected !== true) return;
     try {
       await toggleExternalAPIKey(key.key_name, !key.enabled);
       const action = key.enabled ? t("disabled") : t("enabled");
@@ -411,6 +433,22 @@ export default function ExternalKeysPage() {
     );
   }
 
+  // #2968: BYOK off and nothing stored — nothing to manage and nothing can be
+  // added, so the page answers as a feature that is off (the wording the route
+  // boundary uses for this page) and offers no control at all.
+  if (!byokEnabled && !loading && !loadFailed && keys.length === 0) {
+    return (
+      <PageContainer className="space-y-4">
+        <PageHeader title={t("title")} />
+        <EmptyState
+          icon={Key}
+          title={tAccess("currentlyUnavailable")}
+          description={tAccess("about.externalKeys")}
+        />
+      </PageContainer>
+    );
+  }
+
   const addKeyControl = byokEnabled ? (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -458,6 +496,8 @@ export default function ExternalKeysPage() {
       {byokEnabled && keys.length > 0 && (
         <div className="mb-4 flex justify-end">{addKeyControl}</div>
       )}
+
+      <ErrorBanner error={loadFailed ? t("errorLoadKeys") : null} />
 
       {!byokEnabled && (
         <Alert>
@@ -579,10 +619,18 @@ export default function ExternalKeysPage() {
                         {/* #1613: the server decides what is protected (an
                             OpenAI key is only while OpenAI embeddings are in
                             use). Re-enabling a protected key stays possible. */}
+                        {/* #2968: with BYOK off an enabled key can still be
+                            disabled; a disabled one is not offered for enabling,
+                            except a protected one (#1613). */}
                         <Switch
                           checked={key.enabled}
                           onCheckedChange={() => handleToggle(key)}
-                          disabled={key.is_protected === true && key.enabled}
+                          disabled={
+                            (key.is_protected === true && key.enabled) ||
+                            (!byokEnabled &&
+                              !key.enabled &&
+                              key.is_protected !== true)
+                          }
                           title={
                             key.is_protected === true
                               ? t("protectedHint")
@@ -595,6 +643,7 @@ export default function ExternalKeysPage() {
                           <Button
                             variant="ghost"
                             size="sm"
+                            aria-label={t("updateApiKey")}
                             onClick={() => openEditDialog(key)}
                           >
                             <Edit className="h-4 w-4" />

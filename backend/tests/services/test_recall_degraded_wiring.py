@@ -457,6 +457,87 @@ class TestRecallTimingsWiring:
         # the log is the last thing finalize does: the audit row was already written
         emitted.assert_awaited_once()
 
+    @pytest.mark.parametrize("fusion", ["weighted", "rrf", "keyword_floor"])
+    async def test_recall_completed_carries_fusion_and_leg_ranks(self, monkeypatch, fusion):
+        """#2958: the line names the deployment's HYBRID_FUSION and, per row of
+        the page in page order, [semantic_rank, keyword_rank]. No memory id."""
+        from config.settings import get_settings
+        from services import memory_service as ms
+        from services.memory_service import MemoryService
+        from services.recall_timings import RecallTimings
+
+        monkeypatch.setattr(get_settings(), "hybrid_fusion", fusion)
+        log = MagicMock()
+        monkeypatch.setattr(ms, "logger", log)
+        service = MemoryService(db=AsyncMock())
+        service._recall_finalize_response = AsyncMock(return_value=SimpleNamespace(results=[]))
+        request = SimpleNamespace(k=5)
+        mem_a, mem_b, mem_c = (SimpleNamespace(id=uuid4()) for _ in range(3))
+        search_results = [
+            {"id": "a", "hybrid_score": 0.9, "semantic_rank": 1, "keyword_rank": None},
+            {"id": "b", "hybrid_score": 0.8, "semantic_rank": None, "keyword_rank": 1},
+            {"id": "c", "hybrid_score": 0.7, "semantic_rank": 2, "keyword_rank": 3},
+            # a candidate that did not make the page
+            {"id": "d", "hybrid_score": 0.6, "semantic_rank": 3, "keyword_rank": None},
+        ]
+        # The page order differs from the pool order (e.g. after a reinforce re-sort).
+        responses = [
+            SimpleNamespace(memory_id=mem_c.id),
+            SimpleNamespace(memory_id=mem_a.id),
+            SimpleNamespace(memory_id=mem_b.id),
+        ]
+        await service._recall_finalize(
+            request,
+            search_results,
+            responses,
+            user_id="u1",
+            memories={"a": mem_a, "b": mem_b, "c": mem_c},
+            current_context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+            neural_enabled=False,
+            binding_row_filtered=0,
+            selection_evidence=None,
+            timings=RecallTimings(),
+        )
+        (line,) = [c for c in log.info.call_args_list if c.args and c.args[0] == "recall_completed"]
+        kw = line.kwargs
+        assert kw["fusion"] == fusion
+        assert kw["leg_ranks"] == [[2, 3], [1, None], [None, 1]]
+        assert not any(str(m.id) in repr(kw) for m in (mem_a, mem_b, mem_c))
+        # The per-stage keys stay as they are (RecallTimings is not extended).
+        assert not [key for key in kw if key.startswith(("fusion", "leg_")) and key.endswith("_ms")]
+
+    async def test_empty_exit_logs_fusion_and_empty_leg_ranks(self, monkeypatch):
+        from config.settings import get_settings
+        from services import memory_service as ms
+        from services.memory_service import MemoryService
+        from services.recall_timings import RecallTimings
+
+        monkeypatch.setattr(get_settings(), "hybrid_fusion", "keyword_floor")
+        log = MagicMock()
+        monkeypatch.setattr(ms, "logger", log)
+        service = MemoryService(db=AsyncMock())
+        request = SimpleNamespace(
+            query="q",
+            k=5,
+            use_rerank=False,
+            filters=None,
+            search_mode="hybrid",
+            include_explore_hints=False,
+        )
+        await service._empty_recall_response(
+            request=request,
+            selection_config=None,
+            search_config=None,
+            context_id=uuid4(),
+            timings=RecallTimings(),
+            user_id="u1",
+            context_count=1,
+        )
+        (line,) = [c for c in log.info.call_args_list if c.args and c.args[0] == "recall_completed"]
+        assert line.kwargs["fusion"] == "keyword_floor"
+        assert line.kwargs["leg_ranks"] == []
+
 
 # ---------------------------------------------------------------------------
 # #2960: a recall the query router sent to the semantic lane degrades.

@@ -543,3 +543,23 @@ def test_no_new_key_is_sensitive_or_answered_masked(admin, monkeypatch) -> None:
     for key in new_keys:
         assert items[key]["value"] != MARKER, key
     assert MARKER not in response.text
+
+
+# --- #2958: HYBRID_FUSION ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fusion", ["weighted", "rrf", "keyword_floor"])
+def test_hybrid_fusion_is_answered_in_the_search_category(admin, monkeypatch, fusion) -> None:
+    from api.routes.admin_environment import ANSWERED_KEYS
+
+    monkeypatch.setattr(get_settings(), "hybrid_fusion", fusion)
+    item = _items(admin.get(URL))["HYBRID_FUSION"]
+    assert item["category"] == "search"
+    assert item["value"] == fusion
+    assert item["type"] == "enum"
+    assert item["requires_restart"] is True
+    assert "HYBRID_FUSION" in ANSWERED_KEYS
+    schema = config_routes.get_config_schema()["HYBRID_FUSION"]
+    assert schema.enum_values == ["weighted", "rrf", "keyword_floor"]
+    assert schema.default_value == "weighted"
+    assert schema.is_sensitive is False

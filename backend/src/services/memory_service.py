@@ -118,7 +118,7 @@ from services.recall_selection import (
 )
 from services.recall_timings import RecallTimings
 from services.reranker_service import RERANK_UNSCORED_KEY
-from services.search_service import SearchService
+from services.search_service import KEYWORD_FLOOR_KEY, SearchService, keyword_floor_order
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, unconditional_tombstone
 from services.supersede_fold import fold_linked_versions, fold_links, fold_nodes
 from services.write_provenance import current_provenance
@@ -5659,6 +5659,7 @@ class MemoryService:
                 candidates=0,
                 k=request.k,
                 context_count=context_count,
+                leg_ranks=[],
             )
         return response
 
@@ -5672,13 +5673,23 @@ class MemoryService:
         candidates: int,
         k: int,
         context_count: int,
+        leg_ranks: list[list[int | None]],
     ) -> None:
         """The one ``recall_completed`` line (#1989), shared by both exits so
-        the empty page and the full page log the same shape."""
+        the empty page and the full page log the same shape.
+
+        #2958: ``fusion`` is the deployment's ``HYBRID_FUSION`` and
+        ``leg_ranks`` holds ``[semantic_rank, keyword_rank]`` per row of the
+        page, in page order (no memory id: a replay aligns by position).
+        """
+        from config.settings import get_settings
+
         logger.info(
             "recall_completed",
             user_id=user_id,
             degraded=(degradation or {}).get("degraded"),
+            fusion=get_settings().hybrid_fusion,
+            leg_ranks=leg_ranks,
             **timings.log_fields(
                 results=results, candidates=candidates, k=k, context_count=context_count
             ),
@@ -6781,6 +6792,15 @@ class MemoryService:
             )
         # #1989: one line per recall, after everything the caller waits for.
         if timings is not None:
+            # #2958: each page row's rank in the two legs, in page order.
+            hit_by_memory: dict[Any, dict] = {}
+            for hit in search_results:
+                if hit["id"] in memories:
+                    hit_by_memory.setdefault(memories[hit["id"]].id, hit)
+            leg_ranks: list[list[int | None]] = []
+            for item in responses:
+                hit = hit_by_memory.get(getattr(item, "memory_id", None), {})
+                leg_ranks.append([hit.get("semantic_rank"), hit.get("keyword_rank")])
             self._log_recall_completed(
                 timings,
                 user_id=user_id,
@@ -6789,6 +6809,7 @@ class MemoryService:
                 candidates=len(search_results),
                 k=request.k,
                 context_count=context_count,
+                leg_ranks=leg_ranks,
             )
         return response
 
@@ -7457,6 +7478,14 @@ class MemoryService:
             user_id,
             top_k=request.k,
         )
+        # #2958: HYBRID_FUSION=keyword_floor. The re-sorts above order by score
+        # x factor and so undo the keyword floor hybrid_search set; re-apply it
+        # here, after them: the last ordering step before the page is cut,
+        # unless a selection plan is set (it orders after the floor). Only the
+        # order changes. The rows carry the mark only when no reranker
+        # scored them (a scored rerank's order is final).
+        if any(hit.get(KEYWORD_FLOOR_KEY) for hit in search_results):
+            search_results[:] = keyword_floor_order(search_results)
 
         selection_evidence: dict[str, Any] | None = None
         if selection_config is not None:

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useExternalKeysEntry } from "@/hooks/useExternalKeysEntry";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 
 export function WorkspaceSectionNavigation() {
@@ -20,6 +21,8 @@ export function WorkspaceSectionNavigation() {
     "/workspace/secrets",
   ].some(prefix => path === prefix || path.startsWith(prefix + "/"));
   const settings = path === "/workspace/settings" || path.startsWith("/workspace/settings/");
+  // #2968: with BYOK off the entry stays only while the owner has stored keys.
+  const externalKeysEntry = useExternalKeysEntry(integrations);
 
   if ((!integrations && !settings) || (settings && params.get("create") === "true")) {
     return null;
@@ -61,11 +64,11 @@ export function WorkspaceSectionNavigation() {
       href: "/workspace/integrations/connectors",
       active: path.includes("/integrations/connectors"),
     },
-    {
+    ...(externalKeysEntry ? [{
       label: "providerKeys",
       href: "/workspace/integrations/external-keys",
       active: path.endsWith("/external-keys"),
-    },
+    }] : []),
   ] : [
     ...(features?.plan_page === true ? [{
       label: "plan",

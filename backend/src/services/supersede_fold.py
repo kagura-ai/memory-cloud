@@ -27,8 +27,20 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # #2123: the keys that place a row in the recall pool. A folded group's head
-# takes them from the group's best-ranked row, whose place it takes.
+# takes them from the group's highest-scoring row and takes the place of the
+# group's first row.
 FOLD_RANK_KEYS = ("score", "hybrid_score", "rerank_score", RERANK_UNSCORED_KEY)
+# #2958: per-leg ranks (1 = best). A folded group's head keeps the best (lowest)
+# of its group, so the keyword floor still places the group by its best hit.
+FOLD_LEG_RANK_KEYS = ("semantic_rank", "keyword_rank")
+
+
+def _rank_value(row: dict) -> float:
+    """The score a row is ranked by: ``hybrid_score``, else the raw ``score``."""
+    value = row.get("hybrid_score")
+    if value is None:
+        value = row.get("score")
+    return float(value) if isinstance(value, (int, float)) else float("-inf")
 
 
 def judged_supersedes(memory: Memory) -> bool:
@@ -165,16 +177,25 @@ def fold_linked_versions(
             continue
         emitted.add(head)
         rows = rows_of[head]
-        # The head takes the place — and the ranking scores — of the
-        # group's best-ranked row (this one): in a ranked pool that is
-        # the group maximum, on the same scale as its neighbours (a
-        # reranked pool can mix scored and unscored rows).
+        # The head takes the place of the group's first row (this one) and
+        # the ranking scores of its highest-scoring row. In a score-ordered
+        # pool those are the same row, on the same scale as its neighbours
+        # (a reranked pool can mix scored and unscored rows; the first of
+        # equal maxima wins). Under HYBRID_FUSION=keyword_floor (#2958) the
+        # pool is not in score order, so the first row can be a weak keyword
+        # hit the floor promoted.
+        best = max(rows, key=_rank_value)
         head_row = dict(next(r for r in rows if memories[r["id"]].id == head))
         for key in FOLD_RANK_KEYS:
-            if key in search_result:
-                head_row[key] = search_result[key]
+            if key in best:
+                head_row[key] = best[key]
             else:
                 head_row.pop(key, None)
+        # #2958: and the best (lowest) rank of the group in each leg.
+        for key in FOLD_LEG_RANK_KEYS:
+            ranks = [r[key] for r in rows if isinstance(r.get(key), int)]
+            if ranks:
+                head_row[key] = min(ranks)
         # The raw cosine is not a ranking key; confidence reads its
         # maximum for absence detection, which must not drop with a fold.
         raw = [

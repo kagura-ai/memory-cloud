@@ -7,6 +7,7 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { WorkspacePageHeader as PageHeader } from "@/components/dashboard/WorkspacePageHeader";
 import { McpConnectionCard } from "@/components/credentials/McpConnectionCard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useExternalKeysEntry } from "@/hooks/useExternalKeysEntry";
 
 const credentials = "/workspace/integrations/credentials";
 const tasks = [
@@ -23,6 +24,9 @@ export default function IntegrationsPage() {
   const t = useTranslations("integrationEntry");
   const navigation = useTranslations("sectionNavigation");
   const { currentWorkspace } = useWorkspace();
+  // #2968: with BYOK off the provider-key task stays only while the owner has stored keys.
+  const externalKeysEntry = useExternalKeysEntry();
+  const shown = tasks.filter(({ key }) => key !== "provider" || externalKeysEntry);
   return (
     <PageContainer>
       <PageHeader title={t("title")} />
@@ -35,7 +39,7 @@ export default function IntegrationsPage() {
       <section aria-labelledby="start" className="mb-6 space-y-3">
         <h2 id="start" className="text-lg font-semibold">{t("start")}</h2>
         <ul className="grid gap-3 sm:grid-cols-2">
-          {tasks.map(({ key, section, href }) => (
+          {shown.map(({ key, section, href }) => (
             <li key={key}>
               <Link
                 href={href}

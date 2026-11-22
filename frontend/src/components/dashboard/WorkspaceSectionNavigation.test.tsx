@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
   features: { byok: true, plan_page: true } as Record<string, boolean | undefined> | null,
   listKeys: vi.fn(),
   role: "owner" as string | undefined,
+  workspaceId: "ws-0",
+  seq: 0,
 }));
 vi.mock("next/navigation", () => ({
   usePathname: () => state.path,
@@ -15,7 +17,12 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("next-intl", () => ({ useTranslations: () => (key: string) => key }));
 vi.mock("@/hooks/useSystemFeatures", () => ({ useSystemFeatures: () => state.features }));
-vi.mock("@/contexts/WorkspaceContext", () => ({ useWorkspace: () => ({ currentWorkspace: { current_user_role: state.role } }) }));
+vi.mock("@/contexts/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: state.workspaceId, current_user_role: state.role },
+    currentWorkspaceId: state.workspaceId,
+  }),
+}));
 vi.mock("@/lib/api/external-keys", () => ({ listExternalAPIKeys: () => state.listKeys() }));
 
 beforeEach(() => {
@@ -23,6 +30,9 @@ beforeEach(() => {
   state.query = "tab=api-keys";
   state.features = { byok: true, plan_page: true };
   state.role = "owner";
+  // The stored-key probe is cached per workspace for the session: a fresh id per test.
+  state.seq += 1;
+  state.workspaceId = `ws-${state.seq}`;
   state.listKeys.mockReset().mockResolvedValue([{ key_name: "stored" }]);
 });
 
@@ -80,37 +90,71 @@ describe("workspace section navigation", () => {
     expect(state.listKeys).not.toHaveBeenCalled();
   });
 
-  it.each([null, { byok: false }, {}])(
-    "keeps the external API key entry regardless of BYOK (%j)",
-    async features => {
-      state.features = features;
-      render(<WorkspaceSectionNavigation />);
-      await act(async () => {});
-      expect(screen.getByRole("link", { name: "providerKeys" })).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "apiKeys" })).toBeInTheDocument();
-      expect(state.listKeys).not.toHaveBeenCalled();
-    },
-  );
-
-  it("keeps the external-key tab selected when BYOK is disabled", async () => {
-    state.path = "/workspace/integrations/external-keys";
-    state.features = { byok: false };
+  it("keeps the entry while the deployment flags are still loading", async () => {
+    // A momentary /system/info outage is retried and reads as loading (null),
+    // not as BYOK off: the entry does not blink away.
+    state.features = null;
     render(<WorkspaceSectionNavigation />);
     await act(async () => {});
     expect(screen.getByRole("link", { name: "providerKeys" })).toBeInTheDocument();
     expect(state.listKeys).not.toHaveBeenCalled();
   });
 
-  it("keeps the entry stable when the deployment flag changes", () => {
-    state.features = null;
-    const page = render(<WorkspaceSectionNavigation />);
-    expect(screen.getByRole("link", { name: "providerKeys" })).toBeInTheDocument();
-    state.features = { byok: true };
-    page.rerender(<WorkspaceSectionNavigation />);
-    expect(screen.getByRole("link", { name: "providerKeys" })).toBeInTheDocument();
+  // #2968: with BYOK off the entry stays only for an owner whose workspace
+  // still stores keys (a delete-only list of them).
+  it.each([{ byok: false }, {}])(
+    "keeps the entry for an owner with stored keys while BYOK is off (%j)",
+    async features => {
+      state.features = features;
+      render(<WorkspaceSectionNavigation />);
+      expect(await screen.findByRole("link", { name: "providerKeys" })).toHaveAttribute(
+        "href", "/workspace/integrations/external-keys",
+      );
+      expect(state.listKeys).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([{ byok: false }, {}])(
+    "hides the entry when BYOK is off and no key is stored (%j)",
+    async features => {
+      state.features = features;
+      state.listKeys.mockResolvedValue([]);
+      render(<WorkspaceSectionNavigation />);
+      await act(async () => {});
+      expect(state.listKeys).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("link", { name: "providerKeys" })).toBeNull();
+      expect(screen.getByRole("link", { name: "apiKeys" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "connectors" })).toBeInTheDocument();
+    },
+  );
+
+  it.each(["admin", "member", "viewer", undefined])(
+    "hides the entry from a %s while BYOK is off, without probing the owner-only list",
+    async role => {
+      state.features = { byok: false };
+      state.role = role;
+      render(<WorkspaceSectionNavigation />);
+      await act(async () => {});
+      expect(screen.queryByRole("link", { name: "providerKeys" })).toBeNull();
+      expect(state.listKeys).not.toHaveBeenCalled();
+    },
+  );
+
+  it("hides the entry when the stored-key probe fails while BYOK is off", async () => {
     state.features = { byok: false };
-    page.rerender(<WorkspaceSectionNavigation />);
-    expect(screen.getByRole("link", { name: "providerKeys" })).toBeInTheDocument();
+    state.listKeys.mockRejectedValue(new Error("down"));
+    render(<WorkspaceSectionNavigation />);
+    await act(async () => {});
+    expect(screen.queryByRole("link", { name: "providerKeys" })).toBeNull();
+  });
+
+  it("keeps the external-key tab selected when BYOK is off and keys are stored", async () => {
+    state.path = "/workspace/integrations/external-keys";
+    state.features = { byok: false };
+    render(<WorkspaceSectionNavigation />);
+    expect(await screen.findByRole("link", { name: "providerKeys" })).toHaveAttribute(
+      "aria-current", "page",
+    );
   });
 
   it.each(["/workspace/resources", "/workspace/resources/item", "/workspace/secrets"])(
