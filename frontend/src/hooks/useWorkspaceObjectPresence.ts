@@ -39,6 +39,25 @@ const PROBES: Record<WorkspaceObjectKind, () => Promise<boolean>> = {
 
 const cache = new Map<string, boolean>();
 
+type PresenceListener = (key: string, has: boolean) => void;
+const listeners = new Set<PresenceListener>();
+
+/**
+ * Record what a page that just listed the objects learned (#2968): the
+ * external-keys page calls it after each successful list, so when the owner
+ * deletes the last stored key while BYOK is off, every mounted menu entry
+ * that reads this answer drops at once, without a reload.
+ */
+export function recordWorkspaceObjectPresence(
+  kind: WorkspaceObjectKind,
+  workspaceId: string,
+  has: boolean,
+): void {
+  const key = `${workspaceId}:${kind}`;
+  cache.set(key, has);
+  listeners.forEach((listener) => listener(key, has));
+}
+
 export function useWorkspaceObjectPresence(
   kind: WorkspaceObjectKind,
   workspaceId: string | null | undefined,
@@ -55,6 +74,17 @@ export function useWorkspaceObjectPresence(
     key: string;
     has: boolean;
   } | null>(null);
+
+  useEffect(() => {
+    if (key === null) return;
+    const listener: PresenceListener = (changed, has) => {
+      if (changed === key) setResolved({ key, has });
+    };
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  }, [key]);
 
   useEffect(() => {
     if (!enabled || key === null || cache.has(key)) return;

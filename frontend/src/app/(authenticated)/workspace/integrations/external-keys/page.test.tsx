@@ -63,6 +63,12 @@ vi.mock("@/lib/api/external-keys", () => ({
 }));
 
 import ExternalKeysPage from "./page";
+import { useExternalKeysEntry } from "@/hooks/useExternalKeysEntry";
+
+/** The Integrations menus' entry, driven by the same hook they use. */
+function MenuEntry() {
+  return useExternalKeysEntry() ? <a href="/workspace/integrations/external-keys">menu-entry</a> : null;
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -102,7 +108,22 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
     expect(screen.queryByRole("button", { name: "addApiKey" })).toBeNull();
     expect(screen.queryByRole("switch")).toBeNull();
     for (const write of Object.values(writes)) expect(write).not.toHaveBeenCalled();
+    // The EmptyState primitive carries the notice (frontend rules).
+    expect(screen.getByRole("heading", { level: 3, name: "currentlyUnavailable" })).toBeInTheDocument();
   });
+
+  it.each([{ byok: true }, { byok: false }])(
+    "shows a failed list load as a page banner, without a toast (%j)",
+    async (features) => {
+      mockFeatures = features;
+      mockListKeys.mockRejectedValue(new Error("down"));
+      render(<ExternalKeysPage />);
+      expect(await screen.findByText("errorLoadKeys")).toBeInTheDocument();
+      expect(mockToast).not.toHaveBeenCalled();
+      // A failed read is not "the feature is off".
+      expect(screen.queryByText("currentlyUnavailable")).toBeNull();
+    },
+  );
 
   it("shows a loading skeleton (no notice) while feature flags load", () => {
     // v0.42 review #32: the key list (GET) is byok-independent, so it may fetch
@@ -260,5 +281,85 @@ describe("ExternalKeysPage with BYOK off and stored keys (#2968)", () => {
     expect(await screen.findByText("currentlyUnavailable")).toBeInTheDocument();
     expect(writes.create).not.toHaveBeenCalled();
     expect(writes.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("ExternalKeysPage delete-only list keeps working (#2968 review)", () => {
+  const stored = (overrides: Record<string, unknown> = {}) => ({
+    key_name: "OPENAI_API_KEY",
+    provider: "openai",
+    masked_value: "sk-...abcd",
+    enabled: true,
+    is_protected: false,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    updated_by: null,
+    ...overrides,
+  });
+
+  let rows: ReturnType<typeof stored>[] = [];
+
+  beforeEach(() => {
+    mockFeatures = { byok: false };
+    rows = [];
+    mockListKeys.mockImplementation(async () => rows.map((row) => ({ ...row })));
+    writes.remove.mockImplementation(async (name: string) => {
+      rows = rows.filter((row) => row.key_name !== name);
+    });
+  });
+
+  async function deleteRow(name: string) {
+    const row = (await screen.findByText(name)).closest("tr");
+    if (!row) throw new Error(`no row for ${name}`);
+    fireEvent.click(within(row).getByRole("button", { name: "deleteApiKey" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "delete" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  }
+
+  it("deletes two stored keys one after the other", async () => {
+    rows = [stored(), stored({ key_name: "VOYAGE_API_KEY", provider: "voyage" })];
+    render(<ExternalKeysPage />);
+    await deleteRow("OPENAI_API_KEY");
+    await waitFor(() => expect(screen.queryByText("OPENAI_API_KEY")).toBeNull());
+    await deleteRow("VOYAGE_API_KEY");
+    expect(writes.remove).toHaveBeenCalledTimes(2);
+    expect(writes.remove).toHaveBeenNthCalledWith(2, "VOYAGE_API_KEY");
+    expect(await screen.findByText("currentlyUnavailable")).toBeInTheDocument();
+  });
+
+  it("lets a disabled protected key be enabled again (#1613), and no other", async () => {
+    rows = [
+      stored({ is_protected: true, enabled: false }),
+      stored({ key_name: "VOYAGE_API_KEY", provider: "voyage", enabled: false }),
+    ];
+    writes.toggle.mockResolvedValue({});
+    render(<ExternalKeysPage />);
+    const table = await screen.findByRole("table");
+    const [protectedRow, otherRow] = within(table).getAllByRole("row").slice(1);
+    expect(within(otherRow).getByRole("switch")).toBeDisabled();
+    const protectedSwitch = within(protectedRow).getByRole("switch");
+    expect(protectedSwitch).not.toBeDisabled();
+    fireEvent.click(protectedSwitch);
+    await waitFor(() => expect(writes.toggle).toHaveBeenCalledWith("OPENAI_API_KEY", true));
+    expect(writes.toggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the Integrations menu entry once the last key is deleted", async () => {
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: { id: "ws-presence", current_user_role: "owner" },
+      currentWorkspaceId: "ws-presence",
+    });
+    rows = [stored()];
+    render(
+      <>
+        <MenuEntry />
+        <ExternalKeysPage />
+      </>,
+    );
+    expect(await screen.findByText("menu-entry")).toBeInTheDocument();
+    await deleteRow("OPENAI_API_KEY");
+    expect(await screen.findByText("currentlyUnavailable")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("menu-entry")).toBeNull());
   });
 });

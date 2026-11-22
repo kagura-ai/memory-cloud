@@ -164,3 +164,29 @@ describe("useWorkspaceObjectPresence (#1571)", () => {
     await waitFor(() => expect(second.result.current).toBe(true));
   });
 });
+
+describe("recordWorkspaceObjectPresence (#2968)", () => {
+  it("updates a mounted answer and the cache for that workspace only", async () => {
+    vi.doMock("@/lib/api/resources", () => ({ listResources: vi.fn() }));
+    vi.doMock("@/lib/api/workspace-connectors", () => ({ listConnectors: vi.fn() }));
+    const listExternalAPIKeys = vi.fn().mockResolvedValue([{ key_name: "stored" }]);
+    vi.doMock("@/lib/api/external-keys", () => ({ listExternalAPIKeys }));
+    const { useWorkspaceObjectPresence, recordWorkspaceObjectPresence } =
+      await import("./useWorkspaceObjectPresence");
+
+    const w1 = renderHook(() => useWorkspaceObjectPresence("externalKeys", "w1", true));
+    const w2 = renderHook(() => useWorkspaceObjectPresence("externalKeys", "w2", true));
+    await waitFor(() => expect(w1.result.current).toBe(true));
+    await waitFor(() => expect(w2.result.current).toBe(true));
+
+    // The owner deleted the last key of w1: the menus drop the entry at once.
+    act(() => recordWorkspaceObjectPresence("externalKeys", "w1", false));
+    expect(w1.result.current).toBe(false);
+    expect(w2.result.current).toBe(true);
+
+    // A later mount reads the recorded answer without probing again.
+    const again = renderHook(() => useWorkspaceObjectPresence("externalKeys", "w1", true));
+    expect(again.result.current).toBe(false);
+    expect(listExternalAPIKeys).toHaveBeenCalledTimes(2);
+  });
+});
