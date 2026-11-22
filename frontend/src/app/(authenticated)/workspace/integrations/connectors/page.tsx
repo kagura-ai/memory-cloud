@@ -99,6 +99,7 @@ import {
   piiDraftFromStored,
   piiDraftInvalid,
   piiDraftsEqual,
+  storedPiiDetectors,
   type PiiDraft,
 } from "./PiiGuardrailFields";
 import {
@@ -1711,11 +1712,9 @@ export default function ConnectorsPage() {
                   onChange={setSettingsPii}
                   idPrefix="conn-settings"
                   disabled={settingsSaving || llmDeleting}
-                  storedDetectors={
-                    Array.isArray(settingsFor.pii_guardrail_config?.detectors)
-                      ? settingsFor.pii_guardrail_config.detectors
-                      : []
-                  }
+                  storedDetectors={storedPiiDetectors(
+                    settingsFor.pii_guardrail_config,
+                  )}
                   notice={
                     <>
                       {settingsFor.pii_guardrail_config === null && (

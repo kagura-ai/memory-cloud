@@ -64,6 +64,22 @@ export function piiDefaultDraft(locale: string): PiiDraft {
 }
 
 /**
+ * The detector names of a stored config: its non-blank string entries only.
+ * The column is untyped JSONB, so an old config may hold objects, nulls or
+ * numbers there; the draft and the form's extra choices both read this, so
+ * neither ever shows or sends anything else.
+ */
+export function storedPiiDetectors(
+  stored: PiiGuardrailConfig | null | undefined,
+): string[] {
+  if (!stored || typeof stored !== "object") return [];
+  const raw: unknown = (stored as { detectors?: unknown }).detectors;
+  return Array.isArray(raw)
+    ? raw.filter((d): d is string => typeof d === "string" && d.trim() !== "")
+    : [];
+}
+
+/**
  * The draft for a stored config. Nothing stored (a connector created before
  * PII masking existed) gives the create form's defaults.
  *
@@ -78,11 +94,7 @@ export function piiDraftFromStored(
   const defaults = piiDefaultDraft(uiLocale);
   if (!stored || typeof stored !== "object") return defaults;
   const raw = stored as Partial<Record<keyof PiiGuardrailConfig, unknown>>;
-  const detectors = Array.isArray(raw.detectors)
-    ? raw.detectors.filter(
-        (d): d is string => typeof d === "string" && d.trim() !== "",
-      )
-    : [];
+  const detectors = storedPiiDetectors(stored);
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : defaults.enabled,
     // A switched-off config is stored with no detectors; turning it back on

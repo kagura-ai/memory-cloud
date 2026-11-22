@@ -2867,6 +2867,28 @@ describe("ConnectorsPage settings: PII masking after creation (#2971)", () => {
     }
   });
 
+  it.each([
+    ["an object entry", [{ name: "EMAIL_ADDRESS" }, "PERSON"]],
+    ["a null and a number entry", ["PERSON", null, 7]],
+  ])("ignores non-string stored detectors (%s)", async (_name, detectors) => {
+    const dialog = await openSettingsFor({
+      pii_guardrail_config: { ...storedPii, detectors },
+    });
+
+    expect(checkbox(dialog, "PERSON").checked).toBe(true);
+    expect(checkbox(dialog, "EMAIL_ADDRESS").checked).toBe(false);
+    const boxes = within(dialog).getAllByRole("checkbox");
+    // piiEnabled + the six offered detectors + piiFailClosed: nothing extra.
+    expect(boxes).toHaveLength(8);
+
+    fireEvent.click(checkbox(dialog, "IP_ADDRESS"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() => expect(mockUpdateConnectorSettings).toHaveBeenCalledTimes(1));
+    const sent = mockUpdateConnectorSettings.mock.calls[0][1].pii_guardrail_config;
+    expect(sent.detectors).toEqual(["PERSON", "IP_ADDRESS"]);
+    expect(sent.detectors.every((d: unknown) => typeof d === "string")).toBe(true);
+  });
+
   it("shows a stored detector the form does not offer and counts it", async () => {
     const dialog = await openSettingsFor({
       pii_guardrail_config: { ...storedPii, detectors: ["EMAIL_ADDRESS", "ZIP_CODE"] },
