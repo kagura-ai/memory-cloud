@@ -4,6 +4,19 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.176.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.176.0) — 2026-11-22
+
+A setting that chooses how hybrid recall fuses its two legs, and the External keys page hidden while bring-your-own keys are off. No migration.
+
+### Added
+- **`HYBRID_FUSION` selects the fusion of hybrid recall** ([#2958](https://github.com/kagura-ai/memory-cloud/issues/2958)): `weighted` (default; results unchanged), `rrf` (reciprocal rank fusion, k = 60, scaled into (0, 1]; the context's weights are not used) or `keyword_floor` (the weighted list with keyword hit j at position 2j or better on the returned page; no score is changed, and the floor is the last ordering step before the page is cut unless a selection plan is set or a reranker scored the list). With `rrf` or `keyword_floor` and reranking on, the rerank pool holds the head of the fused list and the top of the keyword leg. The `recall_completed` log line carries `fusion` and the per-leg ranks of the returned page. An unknown value stops the API at start-up; the admin environment read answers the setting.
+
+### Changed
+- **The External keys page while BYOK is off** ([#2968](https://github.com/kagura-ai/memory-cloud/issues/2968)): with `ENABLE_BYOK=false` the Integrations menus offer it only to the owner of a workspace that still stores keys, as a list where those keys can be deleted or disabled (a disabled protected key can be enabled again). With no key stored the page says the feature is unavailable. A failed list load is shown on the page instead of a toast.
+
+### Fixed
+- **A second delete on the External keys page stayed in its loading state** ([#2968](https://github.com/kagura-ai/memory-cloud/issues/2968)).
+
 ## [v0.175.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.175.0) — 2026-11-21
 
 A link back to a linking application on the plan page, an id hint when the MCP `reference` tool finds nothing, and a routed recall that keeps answering when the embedding is unavailable. One new setting, off by default. No migration.
