@@ -4498,6 +4498,7 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ENABLE_RERANKING` | `true` | Deployment kill switch. `false` ⇒ no context reranks; `/system/info` reports `features.reranking=false` and the web UI hides the reranker card from the context search settings. |
+| `HYBRID_FUSION` | `weighted` | How a hybrid recall fuses its semantic and keyword legs, for the whole deployment: `weighted` \| `rrf` \| `keyword_floor` (case-insensitive; empty ⇒ `weighted`; any other value refuses start-up). See [Hybrid fusion](#hybrid-fusion--issue-2958). |
 | `DEFAULT_RERANKER_PROVIDER` | `voyage` | `voyage` \| `cohere` \| `self_hosted`. Written to **new** context search configs. |
 | `DEFAULT_USE_RERANK` | `false` | `use_rerank` written to new context search configs. `true` with `self_hosted` requires `RERANK_BASE_URL` or `SELF_HOSTED_BASE_URL`, else the API refuses to start. |
 | `DEFAULT_RERANKER_MODEL` | — | Model written to new configs. Empty ⇒ the provider's default (`rerank-2`, `rerank-multilingual-v3.0`, or for `self_hosted` `RERANK_MODEL` when `RERANK_BASE_URL` is set, else `SELF_HOSTED_RERANK_MODEL`). For voyage/cohere it must be a model the UI offers. |
@@ -4516,6 +4517,39 @@ Unset, they reproduce the previous behaviour (`false` / `voyage` / `rerank-2`).
 (`ENABLE_RERANKING` and, for a `self_hosted` default, an endpoint is configured)
 and `search_defaults: {use_rerank, reranker_provider, reranker_model,
 content_chunks_enabled}` — names only, never URLs or keys.
+
+### Hybrid fusion — Issue #2958
+
+`HYBRID_FUSION` picks how a hybrid recall (`search_mode="hybrid"`) combines its
+two legs. It applies to the whole deployment (there is no per-context setting)
+and to every caller: MCP and REST recall, public search and the public MCP tools.
+
+- `weighted` (default, the fusion of every earlier release): each leg's scores
+  are divided by that leg's top score and summed with the context's
+  `semantic_weight` / `bm25_weight`.
+- `rrf`: reciprocal rank fusion, `sum(1 / (60 + rank))` over the legs that
+  returned the memory, scaled into (0, 1] (a memory first in both legs scores
+  1.0). **The context's `semantic_weight` / `bm25_weight` are not used.** The
+  scores are compressed (a memory first in one leg only scores about 0.5), so
+  the bounded reinforce and graph-boost factors move the order more than they
+  do under `weighted`.
+- `keyword_floor`: the `weighted` list with the keyword leg interleaved 1:1,
+  `weighted` first and each memory once, so the keyword leg's hit *j* sits at
+  position *j*·2 or better. A promoted memory's score is raised to tie with the
+  one after it (nothing is lowered), so the later re-sorts keep the order.
+
+With `rrf` or `keyword_floor` and a reranker that runs, the rerank pool is the
+top half of the candidate window from the semantic leg and the top half from
+the keyword leg (filled from the fused order when they overlap), so a keyword
+hit the fusion ranks low still reaches the reranker; the reranker still scores
+at most the window. With `weighted` the pool is the fused list cut to the
+window, as before. A recall whose semantic leg fails still answers from the
+keyword leg alone (#1515), and the recall `confidence` (computed from the raw
+semantic similarity) is the same in every mode.
+
+The `recall_completed` log line carries `fusion` (this setting) and
+`leg_ranks`: for each result of the page, in page order, its rank in the
+semantic and in the keyword leg (`null` where that leg did not return it).
 
 ### Self-hosted recipe (keyless reranking as standard equipment)
 

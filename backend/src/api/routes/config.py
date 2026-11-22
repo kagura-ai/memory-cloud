@@ -109,6 +109,7 @@ def get_config_categories() -> dict[str, list[str]]:
         ],
         "search": [
             "ENABLE_RERANKING",
+            "HYBRID_FUSION",
         ],
         "system": [
             "ENVIRONMENT",
@@ -730,6 +731,32 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             impact="Improves search accuracy with AI reranking. Adds latency and cost per query.",
             examples=["true", "false"],
             recommended="true (if reranker API key is configured)",
+        ),
+        "HYBRID_FUSION": ConfigKeySchema(
+            key="HYBRID_FUSION",
+            type="enum",
+            category="search",
+            description=(
+                "How a hybrid search fuses its semantic and keyword legs, for the whole "
+                "deployment (#2958)"
+            ),
+            default_value="weighted",
+            enum_values=["weighted", "rrf", "keyword_floor"],
+            enum_descriptions={
+                "weighted": "Each leg divided by its top score, blended with the context's "
+                "semantic/bm25 weights (default)",
+                "rrf": "Reciprocal rank fusion (k=60), scaled into (0, 1]; the context "
+                "weights are not used",
+                "keyword_floor": "The weighted list with the keyword leg interleaved 1:1: "
+                "keyword hit j at position <= 2j",
+            },
+            requires_restart=True,
+            impact=(
+                "Changes the order of hybrid recall results. With rrf or keyword_floor and "
+                "reranking on, the rerank pool is drawn from both legs."
+            ),
+            examples=["weighted", "rrf", "keyword_floor"],
+            recommended="weighted",
         ),
         # Embedding Configuration
         "EMBEDDING_PROVIDER": ConfigKeySchema(

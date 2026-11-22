@@ -122,7 +122,7 @@ When you search with `recall()`, Kagura uses **Hybrid Search** combining two app
             └─────────────────────┘
 ```
 
-The 60 / 40 weights are per-context defaults (`update_search_config`). Each lane's scores are normalised by its maximum and then summed with the weights; there is no RRF. Embeddings come from the configured provider (OpenAI by default, or a self-hosted model). Vectors live in Qdrant, or in an embedded LanceDB store for the single-process "lite" setup (`vector_backend=lance`). Reranking is off by default (`use_rerank`), uses Voyage, Cohere or a self-hosted reranker when enabled, and is plan-gated.
+The 60 / 40 weights are per-context defaults (`update_search_config`). Each lane's scores are normalised by its maximum and then summed with the weights; there is no RRF unless the deployment sets `HYBRID_FUSION` to `rrf` (reciprocal rank fusion, the weights unused) or `keyword_floor` (the weighted list with the keyword lane interleaved 1:1), see [deployment](deployment.md#hybrid-fusion--issue-2958). Embeddings come from the configured provider (OpenAI by default, or a self-hosted model). Vectors live in Qdrant, or in an embedded LanceDB store for the single-process "lite" setup (`vector_backend=lance`). Reranking is off by default (`use_rerank`), uses Voyage, Cohere or a self-hosted reranker when enabled, and is plan-gated.
 
 **Tips for better search:**
 - Use the **HyDE technique**: generate a hypothetical answer, then search with it

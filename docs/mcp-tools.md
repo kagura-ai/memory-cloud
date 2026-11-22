@@ -776,7 +776,7 @@ filters={"within": {"polygon": [{"lat": 35.6, "lon": 139.7}, ...]}}  # geofence,
 
 **Few or no results.** Shorten the query, remove filters, try related terms, lower the importance threshold, or switch to `search_mode="keyword"`.
 
-**Search modes.** `hybrid` (default) combines semantic understanding with keyword matching (60% semantic + 40% BM25 unless the context's search config says otherwise) and applies Neural Memory boosting. `semantic` is vector similarity only — best when you know the concept but not the words; Neural Memory is skipped. `keyword` is BM25 only, with no embeddings — best for exact terms and for Japanese hiragana-only queries, where embedding models struggle.
+**Search modes.** `hybrid` (default) combines semantic understanding with keyword matching (60% semantic + 40% BM25 unless the context's search config says otherwise; a deployment can choose rank fusion or a keyword floor instead with `HYBRID_FUSION`) and applies Neural Memory boosting. `semantic` is vector similarity only — best when you know the concept but not the words; Neural Memory is skipped. `keyword` is BM25 only, with no embeddings — best for exact terms and for Japanese hiragana-only queries, where embedding models struggle.
 
 **`confidence`.** A cheap triage hint for "is anything relevant here, or should I go external?" — not a correctness verdict. `level` (`high` / `moderate` / `low` / `none`) is driven by `top_score`, the best hit's absolute semantic cosine, and `prominence`, `(top_score − mean background cosine) / mean background cosine` — a ratio, so it is robust to an embedding model's cosine scale rather than a global cutoff.
 
