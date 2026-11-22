@@ -1,11 +1,16 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import en from "@/messages/en.json";
 import ja from "@/messages/ja.json";
 import IntegrationsPage from "./page";
 
-let byok = true;
+let byok: boolean | undefined = true;
+let role = "viewer";
+let workspaceSeq = 0;
+let workspaceId = "studio-0";
+const listKeys = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/api/external-keys", () => ({ listExternalAPIKeys: () => listKeys() }));
 let currentLocale = "en";
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: currentLocale }) }));
 let chatgptAppUrl: string | null = null;
@@ -14,17 +19,44 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemInfo: () => ({ chatgpt_app_url: chatgptAppUrl }),
 }));
 vi.mock("@/contexts/WorkspaceContext", () => ({
-  useWorkspace: () => ({ currentWorkspace: { name: "Studio", current_user_role: "viewer" }, currentWorkspaceId: "studio", workspaces: [{ id: "studio" }] }),
+  useWorkspace: () => ({ currentWorkspace: { id: workspaceId, name: "Studio", current_user_role: role }, currentWorkspaceId: workspaceId, workspaces: [{ id: workspaceId }] }),
 }));
 afterEach(cleanup);
-beforeEach(() => { byok = true; currentLocale = "en"; chatgptAppUrl = null; });
+beforeEach(() => {
+  byok = true; role = "viewer"; currentLocale = "en"; chatgptAppUrl = null;
+  // The stored-key probe is cached per workspace for the session: a fresh id per test.
+  workspaceSeq += 1; workspaceId = `studio-${workspaceSeq}`;
+  listKeys.mockReset().mockResolvedValue([{ key_name: "OPENAI_API_KEY" }]);
+});
 
 describe("first click from Integrations", () => {
-  it("keeps the provider-key entry when the deployment disables BYOK", () => {
-    byok = false;
+  // #2968: with BYOK off the provider-key entry stays only for an owner whose
+  // workspace still stores keys.
+  it.each([false, undefined])("drops the provider-key entry when BYOK is off (%s) and no key is stored", async off => {
+    byok = off; role = "owner";
+    listKeys.mockResolvedValue([]);
+    render(<NextIntlClientProvider locale="en" messages={en}><IntegrationsPage /></NextIntlClientProvider>);
+    await act(async () => {});
+    expect(listKeys).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("link", { name: en.integrationEntry.tasks.provider.title })).toBeNull();
+    expect(screen.getByRole("link", { name: en.integrationEntry.tasks.script.title })).toBeInTheDocument();
+  });
+  it("keeps the provider-key entry for an owner with stored keys while BYOK is off", async () => {
+    byok = false; role = "owner";
+    render(<NextIntlClientProvider locale="en" messages={en}><IntegrationsPage /></NextIntlClientProvider>);
+    expect(await screen.findByRole("link", { name: en.integrationEntry.tasks.provider.title })).toHaveAttribute("href", "/workspace/integrations/external-keys");
+  });
+  it.each(["admin", "member", "viewer"])("drops the provider-key entry for a %s while BYOK is off, without probing", async who => {
+    byok = false; role = who;
+    render(<NextIntlClientProvider locale="en" messages={en}><IntegrationsPage /></NextIntlClientProvider>);
+    await act(async () => {});
+    expect(screen.queryByRole("link", { name: en.integrationEntry.tasks.provider.title })).toBeNull();
+    expect(listKeys).not.toHaveBeenCalled();
+  });
+  it("keeps the provider-key entry with BYOK on, without probing", () => {
     render(<NextIntlClientProvider locale="en" messages={en}><IntegrationsPage /></NextIntlClientProvider>);
     expect(screen.getByRole("link", { name: en.integrationEntry.tasks.provider.title })).toHaveAttribute("href", "/workspace/integrations/external-keys");
-    expect(screen.getByRole("link", { name: en.integrationEntry.tasks.script.title })).toBeInTheDocument();
+    expect(listKeys).not.toHaveBeenCalled();
   });
   it.each([["en", en, /MCP client setup guide/i, /connect from a script/i, /bring in external data/i],
     ["ja", ja, /MCP クライアント設定ガイド/, /スクリプトから接続/, /外部データを取り込む/]] as const)(

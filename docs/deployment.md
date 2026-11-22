@@ -5693,9 +5693,11 @@ credential comes from is decided per feature:
   (`EMBEDDING_PROVIDER=openai`, or a live context of the workspace on an OpenAI
   embedding model) — see
   [Protected keys](api-reference.md#protected-keys-is_protected-issue-1613).
-  With BYOK off the External Keys nav entry shows for the owner only while the
-  workspace still stores a key (#1616); the page itself is always reachable at
-  `/workspace/integrations/external-keys`.
+  With BYOK off the External Keys entry of the Integrations menus shows for the
+  owner only while the workspace still stores a key (#1616, #2968). The page at
+  `/workspace/integrations/external-keys` is then a delete-only list of those
+  keys (an enabled key can still be disabled; nothing can be added, edited or
+  enabled), and with no key stored it answers that the feature is unavailable.
 - **Memory Analysis** was strict-BYOK: an enabled workspace OpenAI key had to
   exist, and the labelling calls refused the platform credential. Since
   #1569 the run resolves a *lane* instead (table below).

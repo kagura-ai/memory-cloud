@@ -8,6 +8,8 @@
  * Issue #115 - Added OpenAI required alert
  * Issue #223 - i18n support
  * Issue #1613 - "Required" follows the API's is_protected, not the provider
+ * Issue #2968 - BYOK off: a delete-only list of stored keys, or, with none
+ *   stored, the page answers as a feature that is off
  * Fix: Added permission check and redirect on workspace change
  */
 
@@ -87,6 +89,7 @@ import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 export default function ExternalKeysPage() {
   const t = useTranslations("externalKeys");
   const tCommon = useTranslations("common");
+  const tAccess = useTranslations("featureAccess");
   const router = useRouter();
 
   // Provider definitions with auto-generated key names
@@ -153,6 +156,9 @@ export default function ExternalKeysPage() {
   const byokEnabled = systemFeatures?.byok === true;
   const [keys, setKeys] = useState<ExternalAPIKey[]>([]);
   const [loading, setLoading] = useState(true);
+  // #2968: whether the last list request failed (the "feature is off" answer
+  // needs a list that actually loaded empty).
+  const [loadFailed, setLoadFailed] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -251,7 +257,9 @@ export default function ExternalKeysPage() {
       setKeys(
         Array.isArray(response) ? response : (response as any).keys || [],
       );
+      setLoadFailed(false);
     } catch (error) {
+      setLoadFailed(true);
       toast({
         title: tCommon("error"),
         description: t("errorLoadKeys"),
@@ -342,6 +350,8 @@ export default function ExternalKeysPage() {
   };
 
   const handleToggle = async (key: ExternalAPIKey) => {
+    // #2968: with BYOK off a stored key can be disabled, not enabled again.
+    if (!byokEnabled && !key.enabled) return;
     try {
       await toggleExternalAPIKey(key.key_name, !key.enabled);
       const action = key.enabled ? t("disabled") : t("enabled");
@@ -407,6 +417,21 @@ export default function ExternalKeysPage() {
       <PageContainer className="space-y-4">
         <PageHeader title={t("title")} description={t("description")} />
         <LoadingState lines={3} />
+      </PageContainer>
+    );
+  }
+
+  // #2968: BYOK off and nothing stored — nothing to manage and nothing can be
+  // added, so the page answers as a feature that is off (the wording the route
+  // boundary uses for this page) and offers no control at all.
+  if (!byokEnabled && !loading && !loadFailed && keys.length === 0) {
+    return (
+      <PageContainer className="space-y-4">
+        <PageHeader title={t("title")} />
+        <p className="text-muted-foreground">{tAccess("about.externalKeys")}</p>
+        <Alert>
+          <AlertDescription>{tAccess("currentlyUnavailable")}</AlertDescription>
+        </Alert>
       </PageContainer>
     );
   }
@@ -579,10 +604,15 @@ export default function ExternalKeysPage() {
                         {/* #1613: the server decides what is protected (an
                             OpenAI key is only while OpenAI embeddings are in
                             use). Re-enabling a protected key stays possible. */}
+                        {/* #2968: with BYOK off an enabled key can still be
+                            disabled; a disabled one is not offered for enabling. */}
                         <Switch
                           checked={key.enabled}
                           onCheckedChange={() => handleToggle(key)}
-                          disabled={key.is_protected === true && key.enabled}
+                          disabled={
+                            (key.is_protected === true && key.enabled) ||
+                            (!byokEnabled && !key.enabled)
+                          }
                           title={
                             key.is_protected === true
                               ? t("protectedHint")
@@ -595,6 +625,7 @@ export default function ExternalKeysPage() {
                           <Button
                             variant="ghost"
                             size="sm"
+                            aria-label={t("updateApiKey")}
                             onClick={() => openEditDialog(key)}
                           >
                             <Edit className="h-4 w-4" />
