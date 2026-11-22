@@ -4815,6 +4815,8 @@
     "piiRedaction_hash": "ハッシュ（ハッシュ値で置換）",
     "piiRedaction_remove": "削除（該当箇所を除去）",
     "piiFailClosed": "マスキング失敗時はイベントを破棄（フェイルクローズ）",
+    "piiNotStored": "このコネクタには PII 設定がまだ保存されていません。表示は新しいコネクタの既定値で、変更したときだけ保存されます。",
+    "piiSettingsHelp": "変更は、ワーカーが新しい設定を読み込んだ後に取り込むメッセージから適用されます。",
     "visionEnabled": "画像処理",
     "visionEnabledFor": "コネクタ {id} の画像処理",
     "runtimeUpdated": "コネクタのランタイム設定を更新しました",

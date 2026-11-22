@@ -93,6 +93,15 @@ import {
 } from "./ChannelRoutesEditor";
 import { MissingScopesNotice } from "./MissingScopesNotice";
 import {
+  PiiGuardrailFields,
+  piiConfigFromDraft,
+  piiDefaultDraft,
+  piiDraftFromStored,
+  piiDraftInvalid,
+  piiDraftsEqual,
+  type PiiDraft,
+} from "./PiiGuardrailFields";
+import {
   TeamConflictAlert,
   teamConflictOf,
   useTeamConflictMessage,
@@ -125,27 +134,6 @@ import {
 // so the derived value also satisfies the backend's auto_create_context_name
 // limit (100); resource_id allows up to 255 so 100 is safe for both uses.
 const CONNECTOR_NAME_MAX = 100;
-
-// #890: Presidio recognizer names offered in the PII config UI. Kept in sync
-// with the worker's recognizer set; the backend validates the full
-// PiiGuardrailConfig shape (extra keys forbidden, redaction enum, non-blank locale,
-// and requires detectors when enabled).
-const PII_DETECTORS = [
-  "EMAIL_ADDRESS",
-  "PHONE_NUMBER",
-  "CREDIT_CARD",
-  "PERSON",
-  "IP_ADDRESS",
-  "IBAN_CODE",
-] as const;
-const PII_DEFAULT_DETECTORS = [
-  "EMAIL_ADDRESS",
-  "PHONE_NUMBER",
-  "CREDIT_CARD",
-  "PERSON",
-];
-const PII_REDACTION_MODES = ["mask", "hash", "remove"] as const;
-type PiiRedaction = (typeof PII_REDACTION_MODES)[number];
 
 // #1388: one status chip shape for the settings-dialog sections and the
 // list-row aggregate badge — set/unset color language defined once.
@@ -320,12 +308,9 @@ export default function ConnectorsPage() {
 
   // #890: PII guardrail config for the create form. Defaults scrub on by
   // default so an admin who touches nothing still ships a safe config.
-  const [piiEnabled, setPiiEnabled] = useState(true);
-  const [piiDetectors, setPiiDetectors] = useState<string[]>(
-    PII_DEFAULT_DETECTORS,
+  const [piiDraft, setPiiDraft] = useState<PiiDraft>(() =>
+    piiDefaultDraft(locale),
   );
-  const [piiRedaction, setPiiRedaction] = useState<PiiRedaction>("mask");
-  const [piiFailClosed, setPiiFailClosed] = useState(true);
 
   // One-time credentials reveal after a successful create
   const [created, setCreated] = useState<CreateConnectorResponse | null>(null);
@@ -370,6 +355,11 @@ export default function ConnectorsPage() {
   const [llmModel, setLlmModel] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
   const [settingsSaving, setSettingsSaving] = useState(false);
+  // #2971: PII masking draft. Built from the stored config (or the create
+  // form's defaults when nothing is stored) and sent only when it differs.
+  const [settingsPii, setSettingsPii] = useState<PiiDraft>(() =>
+    piiDefaultDraft(locale),
+  );
   // #1759: per-channel destinations draft, the unrouted-private switch, and
   // the server's per-row refusals (ChannelRoutesEditor).
   const [routeDraft, setRouteDraft] = useState<RouteDraft>({});
@@ -503,10 +493,7 @@ export default function ConnectorsPage() {
         setContextName(toResourceId(seed));
         // Reset PII config to safe defaults for each new install session so a
         // prior session's choices don't leak into a fresh connector dialog.
-        setPiiEnabled(true);
-        setPiiDetectors(PII_DEFAULT_DETECTORS);
-        setPiiRedaction("mask");
-        setPiiFailClosed(true);
+        setPiiDraft(piiDefaultDraft(locale));
       } catch {
         if (!cancelled) {
           toast({
@@ -578,6 +565,7 @@ export default function ConnectorsPage() {
       setLlmProvider("");
       setLlmModel("");
       setLlmApiKey("");
+      setSettingsPii(piiDraftFromStored(c.pii_guardrail_config, locale));
       setSettingsError(null);
       setRouteDraft(routeDraftFromStored(c.channel_routes));
       setRouteUnrouted(c.unrouted_private_channels ?? "default");
@@ -585,7 +573,7 @@ export default function ConnectorsPage() {
       routeBaseRef.current = routeBaseKey(c);
       setRoutesReloaded(false);
     },
-    [],
+    [locale],
   );
 
   useEffect(() => {
@@ -667,6 +655,21 @@ export default function ConnectorsPage() {
         ...(llmApiKey.trim() ? { api_key: llmApiKey.trim() } : {}),
       };
     }
+    // #2971: the PII config is sent whole, and only when the section differs
+    // from what is stored. Nothing stored compares against the defaults the
+    // dialog shows, so an untouched section sends nothing.
+    if (
+      !piiDraftsEqual(
+        settingsPii,
+        piiDraftFromStored(settingsFor.pii_guardrail_config, locale),
+      )
+    ) {
+      if (piiDraftInvalid(settingsPii)) {
+        setSettingsError(t("piiDetectorsRequired"));
+        return;
+      }
+      patch.pii_guardrail_config = piiConfigFromDraft(settingsPii);
+    }
     // #1759: routes and the switch ride the same PATCH, only when changed.
     setRouteRowErrors({});
     if (channelRoutingEnabled) {
@@ -744,6 +747,8 @@ export default function ConnectorsPage() {
     llmProvider,
     llmModel,
     llmApiKey,
+    settingsPii,
+    locale,
     channelRoutingEnabled,
     routeDraft,
     routeUnrouted,
@@ -847,15 +852,9 @@ export default function ConnectorsPage() {
           ? { context_id: selectedContextId }
           : { auto_create_context_name: contextName || undefined }),
         slack_install_handle: installHandle,
-        pii_guardrail_config: {
-          enabled: piiEnabled,
-          detectors: piiEnabled ? piiDetectors : [],
-          redaction: piiRedaction,
-          // Derive the recognizer locale from the UI locale so a ja workspace
-          // gets ja-aware PII detection instead of English-only.
-          locale,
-          fail_closed: piiFailClosed,
-        },
+        // Derive the recognizer locale from the UI locale so a ja workspace
+        // gets ja-aware PII detection instead of English-only.
+        pii_guardrail_config: piiConfigFromDraft({ ...piiDraft, locale }),
       });
       setPending(null);
       setCreated(result);
@@ -889,10 +888,7 @@ export default function ConnectorsPage() {
     contextName,
     contextMode,
     selectedContextId,
-    piiEnabled,
-    piiDetectors,
-    piiRedaction,
-    piiFailClosed,
+    piiDraft,
     locale,
     router,
     reload,
@@ -995,13 +991,7 @@ export default function ConnectorsPage() {
           auto_create_context_name: resourceId,
           external_team_id: teamId,
           oauth_tokens: { bot_token: manualBotToken },
-          pii_guardrail_config: {
-            enabled: true,
-            detectors: PII_DEFAULT_DETECTORS,
-            redaction: "mask",
-            locale,
-            fail_closed: true,
-          },
+          pii_guardrail_config: piiConfigFromDraft(piiDefaultDraft(locale)),
         });
         setManualTeamId("");
         setManualBotToken("");
@@ -1689,6 +1679,29 @@ export default function ConnectorsPage() {
                 </p>
               </div>
             </section>
+            {/* #2971: PII masking, the same controls as the create dialog. */}
+            {settingsFor && (
+              <section className="space-y-2 border-t pt-4">
+                <PiiGuardrailFields
+                  value={settingsPii}
+                  onChange={setSettingsPii}
+                  idPrefix="conn-settings"
+                  disabled={settingsSaving || llmDeleting}
+                  notice={
+                    <>
+                      {!settingsFor.pii_guardrail_config && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {t("piiNotStored")}
+                        </p>
+                      )}
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t("piiSettingsHelp")}
+                      </p>
+                    </>
+                  }
+                />
+              </section>
+            )}
             {/* Section 3 — LLM used for summarization. #1426: on managed
                 (hosted SaaS) the shared worker/bridge provides the pre-compile
                 LLM, so per-connector LLM config is neither required nor shown —
@@ -1804,7 +1817,9 @@ export default function ConnectorsPage() {
             </Button>
             <Button
               onClick={() => void handleSettingsSave()}
-              disabled={settingsSaving || llmDeleting}
+              disabled={
+                settingsSaving || llmDeleting || piiDraftInvalid(settingsPii)
+              }
             >
               {settingsSaving && <InlineSpinner aria-hidden="true" />}
               {t("settingsSave")}
@@ -1982,89 +1997,11 @@ export default function ConnectorsPage() {
 
             {/* #890: PII guardrail configuration */}
             <div className="border-t pt-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">{t("piiTitle")}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {t("piiDesc")}
-                  </p>
-                </div>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={piiEnabled}
-                    onChange={(e) => setPiiEnabled(e.target.checked)}
-                  />
-                  {t("piiEnabled")}
-                </label>
-              </div>
-
-              {piiEnabled && (
-                <div className="mt-3 space-y-3">
-                  <div>
-                    <p className="mb-1 text-xs font-medium">
-                      {t("piiDetectors")}
-                    </p>
-                    <div className="grid grid-cols-2 gap-1">
-                      {PII_DETECTORS.map((d) => (
-                        <label
-                          key={d}
-                          className="flex items-center gap-2 text-sm"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={piiDetectors.includes(d)}
-                            onChange={(e) =>
-                              setPiiDetectors((prev) =>
-                                e.target.checked
-                                  ? [...prev, d]
-                                  : prev.filter((x) => x !== d),
-                              )
-                            }
-                          />
-                          <span className="font-mono text-xs">{d}</span>
-                        </label>
-                      ))}
-                    </div>
-                    {piiDetectors.length === 0 && (
-                      <p className="mt-1 text-xs text-destructive">
-                        {t("piiDetectorsRequired")}
-                      </p>
-                    )}
-                  </div>
-                  <div>
-                    <label
-                      htmlFor="conn-pii-redaction"
-                      className="mb-1 block text-xs font-medium"
-                    >
-                      {t("piiRedaction")}
-                    </label>
-                    <Select
-                      value={piiRedaction}
-                      onValueChange={(v) => setPiiRedaction(v as PiiRedaction)}
-                    >
-                      <SelectTrigger id="conn-pii-redaction" className="h-9">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {PII_REDACTION_MODES.map((m) => (
-                          <SelectItem key={m} value={m}>
-                            {t(`piiRedaction_${m}`)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={piiFailClosed}
-                      onChange={(e) => setPiiFailClosed(e.target.checked)}
-                    />
-                    {t("piiFailClosed")}
-                  </label>
-                </div>
-              )}
+              <PiiGuardrailFields
+                value={piiDraft}
+                onChange={setPiiDraft}
+                idPrefix="conn"
+              />
             </div>
           </div>
           <DialogFooter>
@@ -2081,7 +2018,7 @@ export default function ConnectorsPage() {
                 submitting ||
                 !canCreate ||
                 !createBindingReady ||
-                (piiEnabled && piiDetectors.length === 0)
+                piiDraftInvalid(piiDraft)
               }
             >
               {submitting && <InlineSpinner aria-hidden="true" />}

@@ -292,3 +292,44 @@ async def test_capacity_chunks_keep_context_counts_separate_and_system_attribute
     assert {row.context_id: row.count for row in committed} == {first: 2, second: 1, None: 1}
     assert all(row.surface == "system" and row.actor_user_id is None for row in committed)
     assert all(row.workspace_id == workspace for row in committed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [False, True])
+async def test_connector_pii_config_change_is_a_settings_history_row(changed):
+    """#2971: a PII masking change is recorded like the other settings; saving
+    the stored config again adds no row."""
+    db = _db()
+    stored = {
+        "enabled": True,
+        "detectors": ["PERSON"],
+        "redaction": "mask",
+        "locale": "en",
+        "fail_closed": True,
+    }
+    conn = SimpleNamespace(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        context_id=None,
+        config_version=1,
+        channel_ids=None,
+        litellm_virtual_key_id=None,
+        locale=None,
+        llm_config_encrypted=None,
+        unrouted_private_channels="default",
+        pii_guardrail_config=dict(stored),
+    )
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = conn
+    db.execute.return_value = result
+    await ConnectorProvisioningService(db).update_connector_settings(
+        workspace_id=conn.workspace_id,
+        connector_id=conn.id,
+        user_id="admin",
+        pii_guardrail_config={**stored, "enabled": not changed},
+    )
+    if changed:
+        (event,) = _rows(db)
+        assert event.changed_fields == ["settings"]
+    else:
+        assert _rows(db) == []

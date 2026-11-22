@@ -1674,6 +1674,7 @@ Notes:
 - `created_by: str | None` — optional
 - `channel_routes: list[ConnectorChannelRoute]` — optional (default `[]`, #1759)
 - `unrouted_private_channels: "default" | "skip"` — optional (default `"default"`, #1759)
+- `pii_guardrail_config: dict[str, Any] | None` — optional (#2971): the stored PII masking config; null when nothing is stored (a connector created before PII masking existed)
 
 ### ConnectorChannelRoute (BaseModel) (#1759)
 > One stored channel destination as the admin reads it. Shared by the connector list and the settings PATCH response.
@@ -1683,6 +1684,10 @@ Notes:
 - `context_name: str | None` — optional (set only while the destination is live)
 - `context_is_private: bool | None` — optional (same)
 - `status: "ok" | "destination_missing"` — required (`destination_missing`: the channel is not ingested until an admin picks a new destination)
+
+### WorkspaceConnectorSettingsUpdateRequest (BaseModel) (request model)
+> PATCH body (`PATCH /workspace-connectors/{connector_id}`). Absent fields are untouched.
+- `pii_guardrail_config: dict[str, Any]` — optional (#2971): validated as on create and replaces the stored config; null is a 422 (turn masking off with `enabled: false`)
 
 ### WorkspaceConnectorSettingsUpdateResponse (BaseModel)
 > Post-update connector settings (`PATCH /workspace-connectors/{connector_id}`). The LLM bundle is never echoed.

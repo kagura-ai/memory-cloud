@@ -1513,3 +1513,98 @@ async def test_resolve_context_refuses_a_soft_deleted_context_like_an_unknown_on
     statement = str(db.execute.await_args.args[0])
     assert "contexts.workspace_id" in statement
     assert "contexts.deleted_at IS NULL" in statement
+
+
+# ---------------------------------------------------------------------------
+# #2971: PII masking edited after creation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_settings_stores_the_normalized_pii_config_and_bumps():
+    conn = _settings_conn(pii_guardrail_config=None)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    with patch("services.connector_provisioning.logger.info") as log_info:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=conn.workspace_id,
+            connector_id=conn.id,
+            user_id="admin-1",
+            pii_guardrail_config={"enabled": True, "detectors": ["EMAIL_ADDRESS"]},
+        )
+
+    assert conn.pii_guardrail_config == {
+        "enabled": True,
+        "detectors": ["EMAIL_ADDRESS"],
+        "redaction": "mask",
+        "locale": "en",
+        "fail_closed": True,
+    }
+    # The bump changes the worker's config revision, so its next poll refetches.
+    assert conn.config_version == 4
+    assert conn.channel_ids == ["C-old"]  # untouched
+    assert log_info.call_args.kwargs["changed_fields"] == ["pii_guardrail_config"]
+
+
+@pytest.mark.asyncio
+async def test_update_settings_turns_pii_masking_off_with_enabled_false():
+    stored = {
+        "enabled": True,
+        "detectors": ["PERSON"],
+        "redaction": "mask",
+        "locale": "ja",
+        "fail_closed": True,
+    }
+    conn = _settings_conn(pii_guardrail_config=stored)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_result(one=conn))
+    db.flush = AsyncMock()
+
+    await ConnectorProvisioningService(db).update_connector_settings(
+        workspace_id=conn.workspace_id,
+        connector_id=conn.id,
+        user_id="admin-1",
+        pii_guardrail_config={"enabled": False, "detectors": [], "locale": "ja"},
+    )
+
+    assert conn.pii_guardrail_config["enabled"] is False
+    assert conn.pii_guardrail_config["locale"] == "ja"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param({"enabled": True, "detectors": []}, id="enabled-without-detectors"),
+        pytest.param({"enabled": True, "detector": ["PERSON"]}, id="unknown-key"),
+        pytest.param({"enabled": True, "detectors": ["PERSON"], "redaction": "x"}, id="redaction"),
+        pytest.param(None, id="null"),
+    ],
+)
+async def test_update_settings_refuses_an_invalid_pii_config_before_any_db_work(bad):
+    db = MagicMock()
+    db.execute = AsyncMock()
+
+    with pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(),
+            connector_id=uuid4(),
+            user_id="admin-1",
+            pii_guardrail_config=bad,
+        )
+
+    assert exc.value.details["field"] == "pii_guardrail_config"
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_pii_config_counts_as_a_provided_field():
+    db = MagicMock()
+    db.execute = AsyncMock()
+    with pytest.raises(ValidationError) as exc:
+        await ConnectorProvisioningService(db).update_connector_settings(
+            workspace_id=uuid4(), connector_id=uuid4(), user_id="admin-1"
+        )
+    assert "pii_guardrail_config" in str(exc.value)

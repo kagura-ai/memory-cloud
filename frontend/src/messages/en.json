@@ -4815,6 +4815,8 @@
     "piiRedaction_hash": "Hash (replace with a hash)",
     "piiRedaction_remove": "Remove (drop the span)",
     "piiFailClosed": "Drop the event if scrubbing fails (fail-closed)",
+    "piiNotStored": "No PII settings are stored for this connector yet. These are the defaults a new connector gets; they are saved only if you change them.",
+    "piiSettingsHelp": "A change applies to messages the worker ingests after it picks up the new settings.",
     "visionEnabled": "Image processing",
     "visionEnabledFor": "Image processing for connector {id}",
     "runtimeUpdated": "Connector runtime updated",

@@ -38,12 +38,15 @@ or via a future unguarded path, is not guaranteed to match).
 
 ## Config lifecycle (current constraints)
 
-- **Write-once at provision time.** `pii_guardrail_config` is accepted only by
-  the connector-provisioning path. There is **no `PUT`/`PATCH` update endpoint**
-  for it today, so a connector's guardrail config is fixed at setup. The
-  `config_version` column exists (defaults to `1`) but there is no server route
-  that bumps it yet. A connector that needs a different guardrail config must be
-  re-provisioned, or an update path must be added first (track separately).
+- **Set at provision, editable afterwards (#2971).** `pii_guardrail_config` is
+  accepted by the connector-provisioning path and by the connector settings
+  update (`PATCH /api/v1/workspace-connectors/{connector_id}`, workspace admin),
+  which validates it the same way (same schema, same `422`) and replaces the
+  stored object as a whole. The update refuses `null`: masking is turned off with
+  `{"enabled": false}`. Every settings update bumps `config_version`, which changes
+  the `config_revision` / `ETag` of `GET /api/v1/workers/config`, so a running
+  worker gets the new config on its next config poll and applies it to content it
+  ingests after that. Content already ingested is not rewritten.
 - **`null` is allowed at provision.** The column is nullable and the field
   defaults to `None`; provision-time validation (#866) accepts `null` and only
   validates a non-null object. A connector can therefore be provisioned with no
@@ -146,8 +149,9 @@ worker (pre-compile stage, ai-worker#91)
   missing `detectors`; however the stored column is untyped JSONB, so a config
   written before #866 or via a future unguarded path is not guaranteed valid. The
   worker must validate the config it reads and fail loudly on an unrecognized shape.
-- **Config is write-once.** No update endpoint exists; do not assume a connector's
-  guardrail can be tightened in place without re-provisioning.
+- **Config can change while the worker runs.** An admin can edit it in the
+  connector settings; read it from each config fetch rather than caching it for the
+  life of the process.
 - **`null` ≠ `{"enabled": false}`.** See [Null config](#null-config-fail-closed).
 - **Scrub before ingest, never after.** There is no server-side PII filter; the
   ingest endpoint persists `payload` verbatim.
