@@ -2591,3 +2591,358 @@ describe("connector channel destinations (#1759)", () => {
     expect(mockUpdateConnectorSettings).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ConnectorsPage settings: PII masking after creation (#2971)", () => {
+  const DEFAULT_PII_EN = {
+    enabled: true,
+    detectors: ["EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "PERSON"],
+    redaction: "mask",
+    locale: "en",
+    fail_closed: true,
+  };
+  const storedPii = {
+    enabled: true,
+    detectors: ["EMAIL_ADDRESS", "IP_ADDRESS"],
+    redaction: "hash",
+    locale: "ja",
+    fail_closed: false,
+  };
+
+  async function openSettingsFor(overrides: Record<string, unknown>) {
+    setWorkspace("admin");
+    mockListConnectors.mockResolvedValue([makeConnector(overrides)]);
+    mockUpdateConnectorSettings.mockResolvedValue({
+      connector_id: "connector-1",
+      channel_ids: ["C1"],
+      litellm_virtual_key_id: null,
+      llm_config_present: false,
+      locale: null,
+      config_version: 4,
+      context_id: "context-1",
+    });
+    render(<ConnectorsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+    expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
+    return screen.getByRole("dialog");
+  }
+
+  function checkbox(dialog: HTMLElement, label: string) {
+    return within(dialog).getByLabelText(label) as HTMLInputElement;
+  }
+
+  it("shows the stored PII settings with the create dialog's controls", async () => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: storedPii });
+
+    expect(within(dialog).getByText("piiTitle")).toBeInTheDocument();
+    expect(checkbox(dialog, "piiEnabled").checked).toBe(true);
+    expect(checkbox(dialog, "EMAIL_ADDRESS").checked).toBe(true);
+    expect(checkbox(dialog, "IP_ADDRESS").checked).toBe(true);
+    expect(checkbox(dialog, "PERSON").checked).toBe(false);
+    expect(checkbox(dialog, "piiFailClosed").checked).toBe(false);
+    expect(within(dialog).getByLabelText("piiRedaction")).toHaveTextContent(
+      "piiRedaction_hash",
+    );
+    expect(within(dialog).queryByText("piiNotStored")).not.toBeInTheDocument();
+  });
+
+  it("saves a change as the whole config, keeping the stored locale", async () => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: storedPii });
+
+    fireEvent.click(checkbox(dialog, "PERSON"));
+    fireEvent.click(checkbox(dialog, "piiFailClosed"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        {
+          pii_guardrail_config: {
+            enabled: true,
+            detectors: ["EMAIL_ADDRESS", "IP_ADDRESS", "PERSON"],
+            redaction: "hash",
+            locale: "ja",
+            fail_closed: true,
+          },
+        },
+        3,
+      ),
+    );
+  });
+
+  it("turns masking off with enabled: false and no detectors", async () => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: storedPii });
+
+    fireEvent.click(checkbox(dialog, "piiEnabled"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        {
+          pii_guardrail_config: {
+            enabled: false,
+            detectors: [],
+            redaction: "hash",
+            locale: "ja",
+            fail_closed: false,
+          },
+        },
+        3,
+      ),
+    );
+  });
+
+  it("sends nothing for an untouched (or restored) PII section", async () => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: storedPii });
+
+    // Toggled off and on again: equal to what is stored, so not sent.
+    fireEvent.click(checkbox(dialog, "IP_ADDRESS"));
+    fireEvent.click(checkbox(dialog, "IP_ADDRESS"));
+    fireEvent.change(await screen.findByLabelText("channelsLabel"), {
+      target: { value: "C1, C2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { channel_ids: ["C1", "C2"] },
+        3,
+      ),
+    );
+  });
+
+  it("an unchanged PII section alone is not a change", async () => {
+    await openSettingsFor({ pii_guardrail_config: storedPii });
+
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    expect(await screen.findByText("noChanges")).toBeInTheDocument();
+    expect(mockUpdateConnectorSettings).not.toHaveBeenCalled();
+  });
+
+  it("a connector without stored PII settings shows the defaults and says ingestion waits", async () => {
+    // Null is an unconfigured guardrail: the worker ingests nothing until one
+    // is stored (docs/pii-guardrail-consumption-contract.md, Null config).
+    const dialog = await openSettingsFor({ pii_guardrail_config: null });
+
+    expect(within(dialog).getByText("piiNotStored")).toBeInTheDocument();
+    expect(checkbox(dialog, "piiEnabled").checked).toBe(true);
+    for (const d of ["EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "PERSON"]) {
+      expect(checkbox(dialog, d).checked).toBe(true);
+    }
+    expect(checkbox(dialog, "IP_ADDRESS").checked).toBe(false);
+    expect(checkbox(dialog, "piiFailClosed").checked).toBe(true);
+    expect(within(dialog).getByLabelText("piiRedaction")).toHaveTextContent(
+      "piiRedaction_mask",
+    );
+
+    // Save stores the shown config, as the notice says.
+    fireEvent.change(await screen.findByLabelText("channelsLabel"), {
+      target: { value: "C1, C2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { channel_ids: ["C1", "C2"], pii_guardrail_config: DEFAULT_PII_EN },
+        3,
+      ),
+    );
+  });
+
+  it("a connector without stored PII settings: Save alone stores the shown defaults", async () => {
+    await openSettingsFor({ pii_guardrail_config: null });
+
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { pii_guardrail_config: DEFAULT_PII_EN },
+        3,
+      ),
+    );
+    expect(screen.queryByText("noChanges")).not.toBeInTheDocument();
+  });
+
+  it("a server that does not report the PII config gets no PII section", async () => {
+    // makeConnector() carries no pii_guardrail_config at all.
+    const dialog = await openSettingsFor({});
+
+    expect(within(dialog).queryByText("piiTitle")).not.toBeInTheDocument();
+    fireEvent.change(await screen.findByLabelText("channelsLabel"), {
+      target: { value: "C1, C2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        { channel_ids: ["C1", "C2"] },
+        3,
+      ),
+    );
+  });
+
+  it("after a 409 an untouched PII section follows the newer stored config and is not resent", async () => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: storedPii });
+    mockUpdateConnectorSettings.mockRejectedValueOnce(
+      new ApiError({ status: 409, error: "CONFLICT-001", message: "stale" }),
+    );
+    // Meanwhile another admin switched the redaction to mask.
+    const newer = { ...storedPii, redaction: "mask" };
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ config_version: 4, pii_guardrail_config: newer }),
+    ]);
+    fireEvent.change(await screen.findByLabelText("channelsLabel"), {
+      target: { value: "C1, C2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText("piiRedaction")).toHaveTextContent(
+        "piiRedaction_mask",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() => expect(mockUpdateConnectorSettings).toHaveBeenCalledTimes(2));
+    expect(mockUpdateConnectorSettings).toHaveBeenLastCalledWith(
+      "connector-1",
+      { channel_ids: ["C1", "C2"] },
+      4,
+    );
+  });
+
+  it("after a 409 an edited PII draft survives the resync and is sent", async () => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: storedPii });
+    mockUpdateConnectorSettings.mockRejectedValueOnce(
+      new ApiError({ status: 409, error: "CONFLICT-001", message: "stale" }),
+    );
+    mockListConnectors.mockResolvedValue([
+      makeConnector({
+        config_version: 4,
+        pii_guardrail_config: { ...storedPii, redaction: "mask" },
+      }),
+    ]);
+    fireEvent.click(checkbox(dialog, "PERSON"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() => expect(mockListConnectors).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "settingsSave" })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() => expect(mockUpdateConnectorSettings).toHaveBeenCalledTimes(2));
+    expect(mockUpdateConnectorSettings).toHaveBeenLastCalledWith(
+      "connector-1",
+      {
+        pii_guardrail_config: {
+          enabled: true,
+          detectors: ["EMAIL_ADDRESS", "IP_ADDRESS", "PERSON"],
+          redaction: "hash",
+          locale: "ja",
+          fail_closed: false,
+        },
+      },
+      4,
+    );
+  });
+
+  it.each([
+    ["switched off with nothing else", { enabled: false }, false],
+    ["a misspelled detectors key", { enabled: true, detector: ["PERSON"] }, true],
+  ])("reads a stored config written before validation (%s) without failing", async (_name, stored, enabled) => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: stored });
+
+    expect(checkbox(dialog, "piiEnabled").checked).toBe(enabled);
+    if (enabled) {
+      // The missing detectors fall back to the defaults.
+      expect(checkbox(dialog, "PERSON").checked).toBe(true);
+      expect(checkbox(dialog, "EMAIL_ADDRESS").checked).toBe(true);
+      expect(within(dialog).getByLabelText("piiRedaction")).toHaveTextContent(
+        "piiRedaction_mask",
+      );
+    }
+  });
+
+  it.each([
+    ["an object entry", [{ name: "EMAIL_ADDRESS" }, "PERSON"]],
+    ["a null and a number entry", ["PERSON", null, 7]],
+  ])("ignores non-string stored detectors (%s)", async (_name, detectors) => {
+    const dialog = await openSettingsFor({
+      pii_guardrail_config: { ...storedPii, detectors },
+    });
+
+    expect(checkbox(dialog, "PERSON").checked).toBe(true);
+    expect(checkbox(dialog, "EMAIL_ADDRESS").checked).toBe(false);
+    const boxes = within(dialog).getAllByRole("checkbox");
+    // piiEnabled + the six offered detectors + piiFailClosed: nothing extra.
+    expect(boxes).toHaveLength(8);
+
+    fireEvent.click(checkbox(dialog, "IP_ADDRESS"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+    await waitFor(() => expect(mockUpdateConnectorSettings).toHaveBeenCalledTimes(1));
+    const sent = mockUpdateConnectorSettings.mock.calls[0][1].pii_guardrail_config;
+    expect(sent.detectors).toEqual(["PERSON", "IP_ADDRESS"]);
+    expect(sent.detectors.every((d: unknown) => typeof d === "string")).toBe(true);
+  });
+
+  it("shows a stored detector the form does not offer and counts it", async () => {
+    const dialog = await openSettingsFor({
+      pii_guardrail_config: { ...storedPii, detectors: ["EMAIL_ADDRESS", "ZIP_CODE"] },
+    });
+
+    expect(checkbox(dialog, "ZIP_CODE").checked).toBe(true);
+    fireEvent.click(checkbox(dialog, "EMAIL_ADDRESS"));
+    // ZIP_CODE is still selected: no warning, and the save stays possible.
+    expect(within(dialog).queryByText("piiDetectorsRequired")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "settingsSave" })).toBeEnabled();
+    fireEvent.click(checkbox(dialog, "ZIP_CODE"));
+    // Still shown after unchecking, so it can be selected again.
+    expect(checkbox(dialog, "ZIP_CODE").checked).toBe(false);
+    expect(within(dialog).getByText("piiDetectorsRequired")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "settingsSave" })).toBeDisabled();
+  });
+
+  it("a connector without stored PII settings stores the edited defaults", async () => {
+    const dialog = await openSettingsFor({ pii_guardrail_config: null });
+
+    fireEvent.click(checkbox(dialog, "IP_ADDRESS"));
+    fireEvent.click(screen.getByRole("button", { name: "settingsSave" }));
+
+    await waitFor(() =>
+      expect(mockUpdateConnectorSettings).toHaveBeenCalledWith(
+        "connector-1",
+        {
+          pii_guardrail_config: {
+            enabled: true,
+            detectors: [
+              "EMAIL_ADDRESS",
+              "PHONE_NUMBER",
+              "CREDIT_CARD",
+              "PERSON",
+              "IP_ADDRESS",
+            ],
+            redaction: "mask",
+            locale: "en",
+            fail_closed: true,
+          },
+        },
+        3,
+      ),
+    );
+  });
+
+  it("blocks the save while masking is on with no detector", async () => {
+    const dialog = await openSettingsFor({
+      pii_guardrail_config: { ...storedPii, detectors: ["EMAIL_ADDRESS"] },
+    });
+
+    fireEvent.click(checkbox(dialog, "EMAIL_ADDRESS"));
+
+    expect(within(dialog).getByText("piiDetectorsRequired")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "settingsSave" })).toBeDisabled();
+  });
+});

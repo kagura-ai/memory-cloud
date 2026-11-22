@@ -874,27 +874,27 @@ Manual: guide(["get_context_info"]).""",
             "name": "list_contexts",
             "readOnly": True,
             "description": """List the contexts you can access as a name→id directory, most recently used first. Other tools need context_id unless the URL sets ?context=. Narrow with name_contains; get_context_info(context_id) for one context's details.
-Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], total (page), count (all visible), limit/can_create (quota), has_more, next_cursor, hint?}; pass next_cursor as cursor for the next page.
+Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], total (page), count (all visible), limit/can_create (quota), has_more, next_cursor, hint?, other_workspaces?}; pass next_cursor as cursor for the next page.
 Manual: guide(["list_contexts"]).""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "include_stats": {
                         "type": "boolean",
-                        "description": "Add memory_count per context (default: false).",
+                        "description": "Add memory_count per context.",
                     },
                     "name_contains": {
                         "type": "string",
                         "maxLength": 100,
-                        "description": "Only contexts whose name or display name contains this text (case-insensitive; blank = no filter).",
+                        "description": "Name or display name filter (case-insensitive).",
                     },
                     "include_summary": {
                         "type": "boolean",
-                        "description": "Add summary, truncated to 300 characters (summary_truncated=true when cut). Default: false.",
+                        "description": "Add summary, cut to 300 characters (summary_truncated).",
                     },
                     "include_details": {
                         "type": "boolean",
-                        "description": "Add the FULL summary (up to 2,000 chars) and embedding_model; page size at most 20 without name_contains. Wins over include_summary. Default: false.",
+                        "description": "Add the full summary and embedding_model (pages of 20 without name_contains; wins over include_summary).",
                     },
                     "limit": {
                         "type": "integer",
@@ -904,7 +904,24 @@ Manual: guide(["list_contexts"]).""",
                         "type": "string",
                         "description": "next_cursor from the previous page.",
                     },
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "Another workspace of yours; default: this connection's.",
+                    },
                 },
+            },
+        },
+        # =================================================================
+        # #2972: list_workspaces — the account's workspaces (full profile)
+        # =================================================================
+        {
+            "name": "list_workspaces",
+            "readOnly": True,
+            "description": """List the workspaces your account is a member of, with your role in each; current marks this connection's workspace. Pass an id as list_contexts(workspace_id=...) to list that workspace's contexts; a context_id from it works in the other tools. usable=false (reason: workspace_suspended or feature_not_available, no seat on its plan) means list_contexts refuses it. Works while this connection's workspace is suspended. With a workspace-scoped API key only the key's workspace is listed.
+Returns: {status, workspaces: [{id, name, role, current, usable, reason?}], total}.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
             },
         },
         # =================================================================

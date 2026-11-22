@@ -556,6 +556,7 @@ async def test_list_workspace_connectors_returns_summaries():
     c.litellm_virtual_key_id = None
     c.llm_config_encrypted = "ENC:x"
     c.external_team_id = "T0123ABC"
+    c.pii_guardrail_config = None  # #2971: created before PII masking
 
     # list_connectors now returns ConnectorListItem(connector, resource_id) so the
     # summary exposes the public slug, not the internal resource_pk DB key (#991).
@@ -1139,6 +1140,7 @@ async def test_list_workspace_connectors_carries_the_routes():
     c.litellm_virtual_key_id = None
     c.llm_config_encrypted = None
     c.external_team_id = "T01"
+    c.pii_guardrail_config = None
     item = SimpleNamespace(
         connector=c,
         resource_id="slug",
@@ -1166,3 +1168,239 @@ async def test_list_workspace_connectors_carries_the_routes():
             "status": "ok",
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# #2971: PII masking shown and edited after creation
+# ---------------------------------------------------------------------------
+
+_PII_NORMALIZED = {
+    "enabled": True,
+    "detectors": ["EMAIL_ADDRESS"],
+    "redaction": "hash",
+    "locale": "en",
+    "fail_closed": False,
+}
+
+
+def _settings_result(**over):
+    from services.connector_provisioning import ConnectorSettingsUpdateResult
+
+    base = {
+        "channel_ids": None,
+        "litellm_virtual_key_id": None,
+        "llm_config_present": False,
+        "locale": None,
+        "config_version": 4,
+        "context_id": None,
+    }
+    base.update(over)
+    return ConnectorSettingsUpdateResult(**base)
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_forwards_pii_guardrail_config():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    workspace_id = uuid4()
+    admin = {"user_id": "user-1", "current_workspace_id": workspace_id}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate(
+        {
+            "pii_guardrail_config": {
+                "enabled": True,
+                "detectors": ["EMAIL_ADDRESS"],
+                "redaction": "hash",
+                "fail_closed": False,
+            }
+        }
+    )
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            return_value=_settings_result()
+        )
+        await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    kwargs = service_cls.return_value.update_connector_settings.await_args.kwargs
+    assert kwargs["pii_guardrail_config"] == {
+        "enabled": True,
+        "detectors": ["EMAIL_ADDRESS"],
+        "redaction": "hash",
+        "fail_closed": False,
+    }
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_route_omitted_pii_config_is_not_forwarded():
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+
+    db = MagicMock()
+    db.commit = AsyncMock()
+    admin = {"user_id": "user-1", "current_workspace_id": uuid4()}
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate({"locale": "ja"})
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.update_connector_settings = AsyncMock(
+            return_value=_settings_result(locale="ja")
+        )
+        await update_workspace_connector_settings(uuid4(), request, admin, db)
+
+    kwargs = service_cls.return_value.update_connector_settings.await_args.kwargs
+    assert "pii_guardrail_config" not in kwargs
+
+
+def test_update_settings_request_refuses_null_pii_config():
+    """Turning masking off is ``enabled: false``; an explicit null is a 422."""
+    from api.routes.workspace_connectors import WorkspaceConnectorSettingsUpdateRequest
+
+    with pytest.raises(PydanticValidationError):
+        WorkspaceConnectorSettingsUpdateRequest.model_validate({"pii_guardrail_config": None})
+
+
+@pytest.mark.asyncio
+async def test_update_settings_invalid_pii_config_gets_the_create_validation_error():
+    """The same malformed config is refused by the PATCH with the same error
+    (code, field, message) as by the create, before any database work."""
+    from api.routes.workspace_connectors import (
+        WorkspaceConnectorSettingsUpdateRequest,
+        update_workspace_connector_settings,
+    )
+
+    bad = {"enabled": True, "detector": ["EMAIL_ADDRESS"]}  # typo: detector
+
+    create_db = MagicMock()
+    create_db.rollback = AsyncMock()
+    with pytest.raises(MemoryCloudException) as create_exc:
+        await create_workspace_connector(
+            WorkspaceConnectorCreateRequest(
+                connector_type="slack", resource_id="slack_general", pii_guardrail_config=bad
+            ),
+            _HTTP,
+            BackgroundTasks(),
+            {"user_id": "user-1", "current_workspace_id": uuid4()},
+            create_db,
+        )
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+    request = WorkspaceConnectorSettingsUpdateRequest.model_validate({"pii_guardrail_config": bad})
+    with pytest.raises(MemoryCloudException) as exc:
+        await update_workspace_connector_settings(
+            uuid4(), request, {"user_id": "user-1", "current_workspace_id": uuid4()}, db
+        )
+
+    assert exc.value.status_code == create_exc.value.status_code == 422
+    assert exc.value.error_code == create_exc.value.error_code == "VAL-001"
+    assert exc.value.details == create_exc.value.details
+    assert exc.value.details["field"] == "pii_guardrail_config"
+    assert str(exc.value) == str(create_exc.value)
+    db.execute.assert_not_awaited()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_settings_pii_config_is_refused_for_a_member_like_other_fields():
+    """The settings PATCH keeps its one role gate (workspace admin) for the PII
+    field: a member gets the same 403 as for any other settings field."""
+    import httpx
+
+    from api.main import app
+    from auth.dependencies import get_user_from_api_key_or_session
+    from db.base import get_db
+    from utils.exceptions import AuthorizationError
+
+    workspace_id = uuid4()
+
+    async def _member() -> dict:
+        return {"user_id": "member-1", "role": "user", "current_workspace_id": workspace_id}
+
+    async def _db():
+        yield MagicMock()
+
+    app.dependency_overrides[get_user_from_api_key_or_session] = _member
+    app.dependency_overrides[get_db] = _db
+    try:
+        with (
+            patch(
+                "services.permission_service.PermissionService.check_workspace_admin",
+                AsyncMock(side_effect=AuthorizationError("Insufficient permissions")),
+            ),
+            patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls,
+        ):
+            service_cls.return_value.update_connector_settings = AsyncMock()
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                statuses = []
+                for body in (
+                    {"pii_guardrail_config": {"enabled": False}},
+                    {"locale": "ja"},
+                ):
+                    response = await client.patch(
+                        f"/api/v1/workspace-connectors/{uuid4()}", json=body
+                    )
+                    statuses.append(response.status_code)
+    finally:
+        app.dependency_overrides.pop(get_user_from_api_key_or_session, None)
+        app.dependency_overrides.pop(get_db, None)
+
+    assert statuses == [403, 403]
+    service_cls.return_value.update_connector_settings.assert_not_awaited()
+
+
+def _list_item(pii_guardrail_config):
+    from types import SimpleNamespace
+
+    c = MagicMock()
+    c.id = uuid4()
+    c.connector_type = "slack"
+    c.app_key = "default"
+    c.context_id = uuid4()
+    c.config_version = 1
+    c.runtime_config = None
+    c.created_at = datetime(2026, 6, 2, 0, 0, 0)
+    c.created_by = "user-1"
+    c.channel_ids = ["C01"]
+    c.locale = None
+    c.litellm_virtual_key_id = None
+    c.llm_config_encrypted = None
+    c.external_team_id = "T01"
+    c.pii_guardrail_config = pii_guardrail_config
+    return SimpleNamespace(
+        connector=c,
+        resource_id="slug",
+        display_name=None,
+        context_name="general",
+        last_memory_at=None,
+        memories_last_7d=0,
+        ingest_context_shared=False,
+        channel_routes=[],
+        unrouted_private_channels="default",
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_workspace_connectors_carries_the_stored_pii_config():
+    from api.routes.workspace_connectors import list_workspace_connectors
+
+    with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
+        service_cls.return_value.list_connectors = AsyncMock(
+            return_value=[_list_item(dict(_PII_NORMALIZED)), _list_item(None)]
+        )
+        result = await list_workspace_connectors(
+            {"user_id": "user-1", "current_workspace_id": uuid4()}, MagicMock()
+        )
+
+    assert result[0].pii_guardrail_config == _PII_NORMALIZED
+    # A connector created before PII masking existed has nothing stored.
+    assert result[1].pii_guardrail_config is None
+    assert result[1].model_dump(mode="json")["pii_guardrail_config"] is None

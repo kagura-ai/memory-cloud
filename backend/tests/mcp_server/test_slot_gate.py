@@ -326,6 +326,8 @@ def _target_args(w: World, side: str) -> dict[str, dict[str, Any]]:
         "complete_file_upload": {"file_id": f, "workspace_id": wid, "sha256": "a" * 64},
         "get_agent_bootstrap": {"agent_id": agent, "context_id": c},
         "describe_binding": {"context_id": c},
+        # #2972: a named workspace is gated on itself, never on the session's.
+        "list_contexts": {"workspace_id": wid},
     }
 
 
@@ -418,6 +420,8 @@ TARGETED = sorted(
         # A named context goes through the read resolver (the caller's own
         # key metadata otherwise).
         "describe_binding",
+        # #2972: list_contexts(workspace_id=...) checks that workspace.
+        "list_contexts",
     }
 )
 
@@ -455,6 +459,32 @@ async def test_a_session_scoped_tool_naming_its_target_is_refused_by_its_handler
     with _mode("enforce"):
         body = await _tool(tool, _target_args(w, "s")[tool], w.owner, w.ws["s"])
     assert _error(body) == "workspace_suspended", body
+
+
+async def test_list_workspaces_answers_on_a_suspended_session_and_marks_it(live) -> None:
+    """#2972: an account-level read, how a user finds a usable workspace when
+    the connection's one is suspended. The suspended one is listed as not usable."""
+    w: World = live
+    with _mode("enforce"):
+        body = await _tool("list_workspaces", {}, w.owner, w.ws["s"])
+    assert body.get("status") == "success", body
+    by_id = {item["id"]: item for item in body["workspaces"]}
+    assert by_id[str(w.ws["s"])]["usable"] is False
+    assert by_id[str(w.ws["s"])]["reason"] == "workspace_suspended"
+    assert by_id[str(w.ws["s"])]["current"] is True
+    assert by_id[str(w.ws["k"])]["usable"] is True
+    assert "reason" not in by_id[str(w.ws["k"])]
+
+
+async def test_list_contexts_of_an_active_workspace_from_a_suspended_session(live) -> None:
+    w: World = live
+    with _mode("enforce"):
+        body = await _tool("list_contexts", {"workspace_id": str(w.ws["k"])}, w.owner, w.ws["s"])
+        plain = await _tool("list_contexts", {}, w.owner, w.ws["s"])
+    assert body.get("status") == "success", body
+    assert {item["id"] for item in body["contexts"]} == {str(w.ctx["k"]), str(w.ctx["k2"])}
+    # Without workspace_id the session workspace is listed, and it is suspended.
+    assert _error(plain) == "workspace_suspended", plain
 
 
 # ---------------------------------------------------------------------------

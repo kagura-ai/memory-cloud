@@ -778,8 +778,20 @@
         },
         "cursor": {
           "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
         }
       },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_workspaces",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
       "additionalProperties": false
     }
   },

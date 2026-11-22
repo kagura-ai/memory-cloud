@@ -102,6 +102,8 @@ CAPACITY_LOCK_ALLOWED_TOOLS: frozenset[str] = frozenset(
         # ---- the cleanup surface -----------------------------------------
         "list",
         "list_contexts",
+        # #2972: the account's workspace names and roles, no memory content.
+        "list_workspaces",
         "get_context_info",
         "list_tags",
         "list_files",

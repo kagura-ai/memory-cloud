@@ -77,6 +77,22 @@ export interface WorkspaceConnectorSummary {
   // deploy) — treat absent as no routes / "default".
   channel_routes?: ConnectorChannelRoute[];
   unrouted_private_channels?: UnroutedPrivateChannels;
+  // #2971: the stored PII masking config. null = created before PII masking
+  // existed (nothing stored yet); absent = a server that predates the field.
+  pii_guardrail_config?: PiiGuardrailConfig | null;
+}
+
+/**
+ * #890 / #2971: PII masking config the ai-worker applies before content is
+ * stored. The backend validates the shape (unknown keys refused, detectors
+ * required while enabled).
+ */
+export interface PiiGuardrailConfig {
+  enabled: boolean;
+  detectors: string[];
+  redaction: "mask" | "hash" | "remove";
+  locale: string;
+  fail_closed: boolean;
 }
 
 // #1759: what happens to a private channel that has no route.
@@ -160,7 +176,7 @@ export interface CreateConnectorRequest {
   llm_config?: Record<string, unknown>;
   channel_ids?: unknown[];
   locale?: string;
-  pii_guardrail_config?: Record<string, unknown>;
+  pii_guardrail_config?: PiiGuardrailConfig;
   external_team_id?: string;
   slack_install_handle?: string;
   app_key?: string;
@@ -272,6 +288,9 @@ export interface UpdateConnectorSettingsRequest {
   channel_routes?: ConnectorChannelRouteInput[] | null;
   // #1759: never null; omit to leave it untouched.
   unrouted_private_channels?: UnroutedPrivateChannels;
+  // #2971: replaces the stored PII masking config. Never null (masking is
+  // turned off with enabled: false); omit to leave it untouched.
+  pii_guardrail_config?: PiiGuardrailConfig;
 }
 
 export interface UpdateConnectorSettingsResponse {

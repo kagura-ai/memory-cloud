@@ -756,6 +756,23 @@ GUIDE_TOPICS: dict[str, str] = {
         "full), and when the workspace is full while count is below limit "
         "(contexts you cannot see count toward it)."
     ),
+    "list_contexts.workspaces": (
+        "A connection works in one workspace: the one in its URL (/mcp/w/{workspace_id}) "
+        "or your account's default. When your account is a member of more than one "
+        "workspace, the reply carries other_workspaces (how many other usable "
+        "workspaces) and workspaces_hint. list_workspaces() (outside the core profile; "
+        'describe_tools(["list_workspaces"]) has its schema, and it is callable from '
+        "any URL, also while this connection's workspace is suspended) returns "
+        "{status, workspaces: [{id, name, role, current, usable, reason?}], total}; "
+        "list_contexts(workspace_id=<id>) lists that workspace's contexts under your "
+        "role there, and a context_id from it works in the other tools. Such a listing "
+        "carries no limit / can_create: contexts are created in a workspace from a "
+        "connection to it. usable=false means that call is refused (reason: "
+        "workspace_suspended, or feature_not_available when you have no seat). A "
+        "workspace you are not a member of is refused (permission_denied). With a "
+        "workspace-scoped API key only the key's workspace is listed, any other "
+        "workspace_id is refused, and no other_workspaces is sent."
+    ),
     # --------------------------------------------------------------- list
     "list.filters": (
         "list is the deterministic sibling of recall: every live memory of one "
@@ -924,7 +941,12 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
     "load_pinned": ("load_pinned.usage", "remember.delivery"),
     "recall_upcoming": ("time-memories",),
     "get_context_info": ("get_context_info.returns", "guardrails"),
-    "list_contexts": ("list_contexts.usage", "default-context", "ids"),
+    "list_contexts": (
+        "list_contexts.usage",
+        "list_contexts.workspaces",
+        "default-context",
+        "ids",
+    ),
     "list_tags": ("list_tags.usage",),
     "list": ("list.filters", "ids"),
     "changes_since": ("changes_since.usage", "ids"),

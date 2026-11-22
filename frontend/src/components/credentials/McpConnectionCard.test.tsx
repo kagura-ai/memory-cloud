@@ -30,6 +30,7 @@ vi.mock("@/lib/api/base", () => ({
   apiClient: { get: vi.fn().mockResolvedValue({ tools: [
     { name: "explore", description: "Explore related memories" },
     { name: "setup_resource", description: "Create a resource" },
+    { name: "list_workspaces", description: "List your workspaces" },
   ] }) },
 }));
 const mockCopyToTarget = vi.fn();
@@ -104,6 +105,18 @@ describe("McpConnectionCard — overview tool settings", () => {
     expect(screen.getByText("https://memory.example.test/mcp?profile=full")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "copyUrl" }));
     expect(mockCopyToTarget).toHaveBeenLastCalledWith("https://memory.example.test/mcp?profile=full", "mcp-url");
+  });
+
+  it("the Workspaces preset adds list_workspaces to the shown URL (#2972)", async () => {
+    render(<McpConnectionCard variant="summary" />);
+    fireEvent.click(screen.getByRole("button", { name: "quickStart.toolSettings" }));
+    const preset = screen.getByRole("button", { name: "preset.workspaces" });
+    await waitFor(() => expect(preset).toBeEnabled());
+    fireEvent.click(preset);
+    const url = "https://memory.example.test/mcp?add_tools=list_workspaces";
+    expect(screen.getByText(url)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "copyUrl" }));
+    expect(mockCopyToTarget).toHaveBeenLastCalledWith(url, "mcp-url");
   });
 });
 

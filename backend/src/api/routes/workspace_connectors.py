@@ -336,6 +336,9 @@ class WorkspaceConnectorSummary(TZAwareBaseModel):
     # without one.
     channel_routes: list[ConnectorChannelRoute] = Field(default_factory=list)
     unrouted_private_channels: Literal["default", "skip"] = "default"
+    # #2971: the stored PII masking config, for the settings dialog. Null for a
+    # connector created before PII masking existed (nothing stored yet).
+    pii_guardrail_config: dict[str, Any] | None = None
 
 
 class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
@@ -392,6 +395,16 @@ class WorkspaceConnectorSettingsUpdateRequest(BaseModel):
             "What happens to a private channel without a route (#1759): 'default' "
             "(written to context_id) or 'skip' (not ingested). Null is invalid. "
             "'skip' is refused where CONNECTOR_CHANNEL_ROUTING_ENABLED is off."
+        ),
+    )
+    # #2971: not Optional on purpose, like the switch above: absent = untouched,
+    # an explicit null is a 422. Masking is turned off with ``enabled: false``.
+    pii_guardrail_config: dict[str, Any] = Field(  # pyright: ignore[reportAssignmentType]
+        default=None,
+        description=(
+            "PII masking for content ingested after the save, validated as on create "
+            "(same schema and 422). Replaces the stored config as a whole; turn masking "
+            "off with enabled=false. Null is invalid."
         ),
     )
     expected_config_version: int | None = Field(default=None, ge=0)
@@ -728,6 +741,7 @@ async def list_workspace_connectors(
             ingest_context_shared=item.ingest_context_shared,
             channel_routes=_route_models(item.channel_routes),
             unrouted_private_channels=item.unrouted_private_channels,
+            pii_guardrail_config=item.connector.pii_guardrail_config,
         )
         for item in items
     ]
@@ -803,7 +817,8 @@ async def update_workspace_connector_settings(
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceConnectorSettingsUpdateResponse:
     """PATCH connector vend settings (#1376): channel_ids / LLM binding / locale,
-    the write-target context (#1428) and per-channel destinations (#1759).
+    the write-target context (#1428), per-channel destinations (#1759) and the
+    PII masking config (#2971).
 
     Repairs connectors born un-vendable (the create endpoint was previously
     the only writer of these columns). True PATCH semantics — absent fields

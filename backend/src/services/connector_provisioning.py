@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, case, delete, func, or_, select, text, update
@@ -1340,6 +1340,27 @@ class ConnectorProvisioningService:
                 field="channel_ids",
             )
 
+    @staticmethod
+    def _validate_pii_guardrail_update(raw: Any) -> dict[str, Any]:
+        """Validate a settings-PATCH ``pii_guardrail_config`` (#2971).
+
+        Same schema, message and field as the create path (#866). An explicit
+        null is refused: stored null means "never configured", and masking is
+        turned off with ``enabled: false``.
+        """
+        from models.schemas import validate_pii_guardrail_config
+
+        if raw is None:
+            raise ValidationError(
+                "pii_guardrail_config cannot be null; send enabled=false to turn masking off",
+                field="pii_guardrail_config",
+            )
+        try:
+            # Not None: ``raw`` is not None, and the validator passes only None through.
+            return cast(dict[str, Any], validate_pii_guardrail_config(raw))
+        except ValueError as ve:
+            raise ValidationError(str(ve), field="pii_guardrail_config") from ve
+
     async def update_connector_settings(
         self,
         *,
@@ -1354,6 +1375,7 @@ class ConnectorProvisioningService:
         context_id: UUID | None = _UNSET,
         channel_routes: list[Any] | None = _UNSET,
         unrouted_private_channels: str | None = _UNSET,
+        pii_guardrail_config: dict[str, Any] | None = _UNSET,
     ) -> ConnectorSettingsUpdateResult:
         """PATCH-update connector vend settings (#1376, #1428, #1759).
 
@@ -1374,6 +1396,10 @@ class ConnectorProvisioningService:
         ``channel_routes`` (#1759) replaces the connector's per-channel
         destinations as a whole (``[]`` / ``None`` removes them all);
         ``unrouted_private_channels`` is ``default`` or ``skip`` (never null).
+        ``pii_guardrail_config`` (#2971) is validated as on create and replaces
+        the stored config; it is never null (``enabled: false`` turns masking
+        off). The ``config_version`` bump makes the worker's next config poll
+        return it, so it applies to content ingested after that poll.
         Where ``CONNECTOR_CHANNEL_ROUTING_ENABLED`` is off, only clearing is
         accepted. Each ``route`` destination must be a live context of this
         workspace the CALLER can read (otherwise the uniform "Context"
@@ -1405,6 +1431,7 @@ class ConnectorProvisioningService:
                 ("context_id", context_id),
                 ("channel_routes", channel_routes),
                 ("unrouted_private_channels", unrouted_private_channels),
+                ("pii_guardrail_config", pii_guardrail_config),
             )
             if value is not _UNSET
         )
@@ -1412,7 +1439,7 @@ class ConnectorProvisioningService:
             raise ValidationError(
                 "Provide at least one of channel_ids, litellm_virtual_key_id, "
                 "llm_config, locale, context_id, channel_routes, "
-                "unrouted_private_channels",
+                "unrouted_private_channels, pii_guardrail_config",
                 field="body",
             )
 
@@ -1429,6 +1456,9 @@ class ConnectorProvisioningService:
                 locale = normalize_worker_locale(locale)
             except ValueError as ve:
                 raise ValidationError(str(ve), field="locale") from ve
+
+        if pii_guardrail_config is not _UNSET:
+            pii_guardrail_config = self._validate_pii_guardrail_update(pii_guardrail_config)
 
         new_routes: list[ChannelRouteInput] | None = None
         if channel_routes is not _UNSET:
@@ -1547,6 +1577,11 @@ class ConnectorProvisioningService:
                 ("context_id", context_id),
             )
         )
+        # #2971: recorded under its own field name, not folded into settings.
+        pii_changed = (
+            pii_guardrail_config is not _UNSET
+            and connector.pii_guardrail_config != pii_guardrail_config
+        )
         routes_changed = False
         if new_routes is not None:
             routes_changed = await self._replace_channel_routes(
@@ -1566,6 +1601,8 @@ class ConnectorProvisioningService:
             connector.set_llm_config(llm_config)
         if locale is not _UNSET:
             connector.locale = locale
+        if pii_guardrail_config is not _UNSET:
+            connector.pii_guardrail_config = pii_guardrail_config
         from services.operation_history_writer import record_operation
 
         # Keep the old boundary on a rebind/unbind; otherwise a private
@@ -1587,8 +1624,10 @@ class ConnectorProvisioningService:
                 )
         if history_context_id is None:
             history_context_id = connector.context_id
-        history_fields = (["channel_routes"] if routes_changed else []) + (
-            ["settings"] if settings_changed else []
+        history_fields = (
+            (["channel_routes"] if routes_changed else [])
+            + (["settings"] if settings_changed else [])
+            + (["pii_guardrail_config"] if pii_changed else [])
         )
         if history_fields:
             record_operation(

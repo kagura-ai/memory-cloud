@@ -141,6 +141,8 @@ SAFE_FIELDS = frozenset(
         # #1759: a connector's per-channel destinations or its unrouted-private
         # switch changed (field name only: never a channel or context name).
         "channel_routes",
+        # #2971: a connector's PII masking config changed (name only).
+        "pii_guardrail_config",
         "credential",
         "pinned",
         "expires_at",
