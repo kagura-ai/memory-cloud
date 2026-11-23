@@ -4,6 +4,32 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.179.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.179.0) — 2026-11-23
+
+Keyword recall scores like Okapi BM25 and treats Japanese spelling variants as one term, and a context's search settings offer purpose presets. One migration (`f61`): run it before starting the new code, then run the keyword rebuild once.
+
+### Added
+- **Purpose presets for a context's search settings** ([#2983](https://github.com/kagura-ai/memory-cloud/issues/2983)): the search settings have a Purpose select above the weights: Conversation and work history (semantic 0.6 / keyword 0.4, fusion `auto`) or Documents and manuals (0.8 / 0.2, fusion `auto`). Choosing one fills in the values as unsaved changes; Save and Discard work as before. The select shows the purpose that matches the current values, or Custom. The purpose itself is not stored and existing contexts are unchanged. The advanced create dialog offers the same choice, defaulting to Conversation, which sends the same create request as before; Documents is applied right after the context is created, and if that fails the context stays and a message gives the reason.
+- **Keyword vector rebuild** ([#2984](https://github.com/kagura-ai/memory-cloud/issues/2984)): `python -m src.cli.rebuild_keyword_vectors` recomputes each memory's field token counts and rewrites only the keyword vectors and token fields (no embedding call). Plan by default, `--apply --yes` to write, `--context` / `--all`, `--limit` / `--after` to resume. Rows another writer holds, sync-managed contexts and points deleted during the run are skipped and counted; a second run over unchanged rows writes nothing.
+
+### Changed
+- **Keyword recall scores like Okapi BM25** ([#2984](https://github.com/kagura-ai/memory-cloud/issues/2984)): repeated terms saturate and matches in longer-than-average fields count less, using per-context average field lengths (k1 1.2, b 0.75; field weights unchanged). A long memory no longer outranks a short one by repeating terms. Hybrid recall normalises each leg, so only the ordering changes; keyword-only recall returns the new raw scores, so its confidence level can shift. A recall over several contexts combines each context's averages with collection-wide term statistics.
+- **Japanese spelling variants are one keyword term** ([#2986](https://github.com/kagura-ai/memory-cloud/issues/2986)): documents and queries use Sudachi's normalized form for their lemma tokens (引越し / 引っ越し, 届出 / 届け出, 附属 / 付属, サーバ / サーバー), and hiragana words also match their kanji form. Readings, non-CJK text and Latin words inside Japanese text are unchanged. Synonyms are keyed by the same forms.
+- **Synonym file** ([#2985](https://github.com/kagura-ai/memory-cloud/issues/2985)): query expansion uses SudachiDict v20261015's synonym file (about 1,300 more groups).
+- **Fusion guidance**: the Web UI, the REST field description, MCP `update_search_config` and the docs say that `auto` follows the deployment's setting and the context's weights, and that `rrf` or `weighted` pins the context to that fusion.
+
+### Fixed
+- **Synonym expansion ignored SudachiDict's expansion-control flag** ([#2985](https://github.com/kagura-ai/memory-cloud/issues/2985)): entries flagged as never used are dropped, and entries flagged as not a trigger are only expansion targets.
+- **The advanced create dialog kept the previous context's embedding model** ([#2983](https://github.com/kagura-ai/memory-cloud/issues/2983)): after a successful create it resets to the deployment default.
+
+### Migration
+- **`f61_2984_keyword_lengths`** ([#2984](https://github.com/kagura-ai/memory-cloud/issues/2984)): five nullable integer columns on `memories` (field token counts). Metadata-only: no rewrite, no backfill. The first `ALTER` takes ACCESS EXCLUSIVE on `memories` until the migration commits. Run it before starting the new code, which reads the columns.
+
+### Upgrade
+1. `alembic upgrade head`.
+2. Deploy the new code (backend and frontend).
+3. `python -m src.cli.rebuild_keyword_vectors --all --apply --yes` (LanceDB installs too). Keyword ranking is mixed until it finishes, about 10 seconds per 10,000 memories on a local measurement; API processes use the new averages within 5 minutes.
+
 ## [v0.178.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.178.0) — 2026-11-23
 
 A context can choose how hybrid recall fuses its two legs, and a custom domain of a public MCP endpoint can be proved with a single CNAME record. Two migrations (`f59`, `f60`): run them before starting the new code.
