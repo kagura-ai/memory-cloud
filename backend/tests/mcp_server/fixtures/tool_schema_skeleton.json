@@ -969,6 +969,14 @@
         "bm25_weight": {
           "type": "number"
         },
+        "fusion": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "rrf",
+            "weighted"
+          ]
+        },
         "fetch_factor": {
           "type": "integer"
         },

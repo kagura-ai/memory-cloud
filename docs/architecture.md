@@ -147,7 +147,7 @@ Results A       Results B
 ### Search Weights
 - **Semantic Search**: 60% (better for meaning) — per-context default (`context_search_configs.semantic_weight`)
 - **BM25 Full-text**: 40% (better for exact keywords) — a Qdrant sparse vector with IDF (`bm25_weight`)
-- **Fusion**: each lane's scores are normalised by its maximum, then summed with the weights (`backend/src/services/search_service.py`)
+- **Fusion**: each lane's scores are normalised by its maximum, then summed with the weights, unless the context's `fusion` setting (`auto` follows `HYBRID_FUSION` while the weights are the defaults) picks reciprocal rank fusion or the keyword floor (`resolve_fusion` in `backend/src/services/search_service.py`)
 - **Modes**: `search_mode` = `hybrid` (default), `semantic` or `keyword`; a context can opt into the deterministic query router (`routing_mode`)
 - **Reranking**: off by default (`use_rerank`); when on, Voyage `rerank-2` by default, or Cohere or a self-hosted reranker (`backend/src/services/reranker_service.py`); plan-gated
 - **Embedding**: OpenAI by default; Cohere, Hugging Face and self-hosted (Ollama / vLLM) providers are supported (`EMBEDDING_PROVIDER`)
@@ -344,7 +344,7 @@ Tables are grouped by domain. The authoritative list lives in `backend/src/model
 - **workspace_addons** — Per-workspace addon entitlements
 - **contexts** — Memory namespaces scoped to a workspace
 - **context_members** — Per-context access (private / shared)
-- **context_search_configs** — Per-context hybrid search weights and reranker tuning
+- **context_search_configs** — Per-context hybrid search weights, fusion and reranker tuning
 
 **Memories & graph**
 - **memories** — 3-layer memory storage. Carries server-stamped `source_type` (provenance) and `delivery_mode` (`on_recall` / `always` / `on_trigger`)

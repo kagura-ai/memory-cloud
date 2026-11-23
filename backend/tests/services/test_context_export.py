@@ -81,6 +81,8 @@ def _cfg():
     c.content_chunks_enabled = False
     # #2144: True so the assertion below proves the value is carried.
     c.llm_selector_enabled = True
+    # #2980: a non-default fusion, so the assertion below proves it is carried.
+    c.fusion = "rrf"
     return c
 
 
@@ -131,6 +133,7 @@ async def test_export_private_context_is_creator_scoped_and_serializes():
     assert out.search_config.reinforce_max_boost == 0.15
     assert out.search_config.reinforce_require_host_arbitration is False
     assert out.search_config.llm_selector_enabled is True
+    assert out.search_config.fusion == "rrf"
 
     # Private context => the memory query MUST carry a user_id (creator) filter
     # alongside context_id + the soft-delete guard.

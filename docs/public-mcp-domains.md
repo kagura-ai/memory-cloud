@@ -2,7 +2,9 @@
 
 A workspace owner can serve a published [public MCP endpoint](deployment.md#public-mcp-endpoints--issue-2675)
 under a host name they control, as `https://<host>/mcp`, once they have proved
-control of the name with a DNS TXT record. The custom domain is an **alias**:
+control of the name with a DNS TXT record or, where the operator sets a CNAME
+proof zone ([The CNAME proof](#the-cname-proof--issue-2979)), with the one
+CNAME record that also routes the name. The custom domain is an **alias**:
 it serves the same endpoint as the fixed address `/mcp/public/<public_id>`,
 with the same sessions, limits, usage budget and usage events.
 
@@ -26,11 +28,13 @@ application applies no Host rule (see [Stopping and rolling back](#stopping-and-
    [Proxies other than the reference one](#proxies-other-than-the-reference-one)).
 2. The workspace's canonical owner adds a host name to a published endpoint
    (`POST …/public-mcp/domains`). The domain starts `pending`; the answer
-   carries the TXT record to publish.
+   carries the TXT record to publish and, where the CNAME proof is on, the
+   claim's own CNAME target.
 3. The owner publishes the TXT record and points the name at the routing
-   target (`MCP_PUBLIC_DOMAINS_ROUTING_TARGET`), then calls verify. When the
-   record is found, the workspace has the right and the name is free, the
-   domain becomes `active` and the alias answers at `https://<host>/mcp`.
+   target (`MCP_PUBLIC_DOMAINS_ROUTING_TARGET`), or publishes only a CNAME of
+   the name to the claim's CNAME target, then calls verify. When a proof is
+   found, the workspace has the right and the name is free, the domain
+   becomes `active` and the alias answers at `https://<host>/mcp`.
 4. A scheduler job re-checks every held domain about once an hour. Each
    completed check renews a 72-hour lease; a lost proof, an ended right or a
    reserved name suspends the domain.
@@ -61,7 +65,8 @@ released ──cooldown_until passed──> (row deleted)
 Rules a check applies to an `active` or `suspended` domain, in this order:
 
 1. The check is always recorded: `last_checked_at`, the proof result
-   (`ok`, `missing`, `unavailable`) and the routing status.
+   (`ok`, `missing`, `unavailable`), the routing status and, where the CNAME
+   proof is on, which record proved it (`txt`, `cname`, `both`).
 2. `ok` sets `proof_ok_at` to the check time and the count of confirmed
    absences to 0. `missing` adds one confirmed absence. `unavailable` changes
    neither.
@@ -90,7 +95,9 @@ removes it.
 
 **Tokens.** Every claim (`POST`) mints a new random token, also when the same
 workspace claims a name again. A token belongs to one row: a value once
-published proves nothing for any later row.
+published proves nothing for any later row. The CNAME target is derived from
+the token, so the same holds for it: a CNAME left in DNS by an earlier claim
+of the name proves nothing for a later one.
 
 All times are the database clock (`timezone('UTC', statement_timestamp())`).
 
@@ -102,7 +109,10 @@ All times are the database clock (`timezone('UTC', statement_timestamp())`).
 | CNAME (or A/AAAA) | `<host>` | `MCP_PUBLIC_DOMAINS_ROUTING_TARGET` (or the target's addresses) | **Routing.** Recorded for information only; never a condition of serving. |
 
 The owner API returns both: `verification.record_name` /
-`verification.record_value` and `routing.target`.
+`verification.record_value` and `routing.target`. Where the operator sets
+`MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`, a third way is open: a CNAME of
+`<host>` to the claim's own `verification.cname_target` routes the name **and**
+proves control, so one record suffices ([The CNAME proof](#the-cname-proof--issue-2979)).
 
 - Proof: the first 20 TXT values at the challenge name are read (a CNAME there
   is followed by the resolver); a value is the concatenation of its
@@ -122,6 +132,46 @@ The owner API returns both: `verification.record_name` /
   read from DNS, makes no HTTP or TLS request to the name and queries no
   authoritative server itself. It does not validate DNSSEC.
 
+### The CNAME proof — Issue #2979
+
+Off while `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` is empty (the default): no
+answer carries a new key, no target is derived and the lookups are the ones
+above. With the zone set:
+
+| Record | Name | Value | Role |
+|---|---|---|---|
+| CNAME | `<host>` | `verification.cname_target` = `<label>.<zone>` | **Routing and proof of control.** One record does both. |
+
+- The label is the first 32 lower-case hex characters of
+  SHA-256(`kagura-public-mcp-cname-v1:` + the claim's token). It belongs to
+  one claim, like the TXT value; it is never stored, never logged and not
+  printed by the operator command.
+- The proof is `ok` when the TXT record matches (as above) **or** the name's
+  CNAME chain contains the claim's target. Either one suffices; the TXT
+  record stays the way for a zone apex (which cannot carry a CNAME) and for a
+  DNS provider that flattens or proxies a CNAME (the chain is then hidden).
+- The chain is read from the name's A and AAAA answers, the ones the routing
+  check reads: no extra query when a routing target is set. The CNAME part is
+  `ok` when the chain holds the target; `missing` once one A or AAAA lookup of
+  the name answered, or ended in NXDOMAIN or no answer, without it (another
+  claim's target, a released claim's target, a CNAME elsewhere); `unavailable`
+  only when no lookup of the name settled and one was indeterminate.
+- Together: `ok` when either part is `ok`; else `unavailable` when either is
+  `unavailable`; else `missing`. States, grace, lease, cooldown and the
+  re-check job are unchanged: a CNAME that disappears is a missing proof under
+  the same grace, and a CNAME that comes back reinstates the domain.
+- The chain survives only when the end of it resolves: the zone needs a
+  wildcard record `*.<zone>` (an A/AAAA record of the TLS proxy, or a CNAME to
+  `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`, which then also makes routing read
+  `ok`). Without it every CNAME-only claim reads `missing`.
+- Names equal to or under the zone are reserved: they cannot be claimed, the
+  permission call answers `404` for them without a statement, and a name that
+  points into the zone without a claim is never served and never gets a
+  certificate.
+- The check records which record proved it; the owner API shows it as
+  `last_check.proof`. Until the first check after the zone was set or
+  changed, `proof` is `null` or still the previous check's value.
+
 ## Host names
 
 A claimed name is stored in one normalised form: surrounding whitespace and
@@ -140,6 +190,7 @@ A name is **reserved** (never claimable) when it is under a special-use suffix
 - the host of `PAYMENT_PUBLIC_BASE_URL`, of any `CORS_ORIGINS` entry or of any
   `MCP_ALLOWED_ORIGINS` entry;
 - `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`;
+- `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` (when set);
 - an entry of `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES`.
 
 Malformed and reserved names get the same answer (`422`
@@ -406,13 +457,28 @@ again (with a new token).
 | `state` | `pending`, `active` or `suspended` |
 | `suspended_reason` | `proof_lost`, `right_ended`, `reserved`, or `null` |
 | `serving` | whether the alias answers right now (the alias statement resolves this domain and the name is still claimable; a plan pause or capacity lock, answered `503`, does not change it) |
-| `verification` | the TXT record to publish |
+| `verification` | the TXT record to publish; where the CNAME proof is on also `cname_target`, the claim's own CNAME target (a CNAME of the name to it routes and proves) |
 | `routing.target` | `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`; `routing.status` is `ok`, `mismatch`, `unresolved` or `null` before the first check |
-| `last_check` | result (`ok`, `missing`, `unavailable`) and time of the last recorded check, `null` before it |
+| `last_check` | result (`ok`, `missing`, `unavailable`) and time of the last recorded check, `null` before it; where the CNAME proof is on also `proof`: the record the last check found the proof in (`txt`, `cname`, `both`), `null` when it found none, and `null` or still the previous check's value until the first check after the zone was set or changed |
 | `proof_ok_at`, `proof_missing_checks` | last time the proof was found; confirmed absences since then |
 | `serve_until` | the lease; the alias is served only before it |
 
 Times are UTC with a `Z` suffix.
+
+`verification.cname_target` and `last_check.proof` are present only while
+`MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` is set, decided from the setting: with
+it empty the object has exactly the keys shown above, whatever an earlier
+check recorded. With the zone set:
+
+```json
+"verification": {
+  "record_type": "TXT",
+  "record_name": "_kagura-public-mcp.mcp.example.org",
+  "record_value": "kagura-public-mcp-verification=3f1c…",
+  "cname_target": "9b2e…41a7.domains-proof.example.com"
+},
+"last_check": {"result": "ok", "checked_at": "2026-11-15T09:00:00Z", "proof": "cname"}
+```
 
 ### Errors
 
@@ -564,12 +630,14 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 | `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated (no leading dot). Refused on the request path from the first request after a restart, whatever the domain's row says; the next check suspends the domain (`reserved`). |
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | Hours a released name stays closed to other workspaces (0–2160). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | Domains (`pending`, `active`, `suspended`) per workspace (1–50). |
+| `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` | *(empty)* | A zone of your own for the row-specific CNAME targets ("The CNAME proof"). Empty: off, answers and lookups as without it. Set: a host name outside the special-use suffixes, at most 200 characters, not an application host nor under one; reserved for claims. Needs the wildcard record `*.<zone>`. |
 | `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ("Edge certificate reports"). Empty: every report is `404`, nothing reads or writes `public_mcp_domain_tls_reports`, every certificate is `unreported`. No blanks; under `ENVIRONMENT=production` at least 32 characters and not another service credential. Never logged. |
 | `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` | `false` | Experimental. The owner's claim, verify and remove through an installation's browser client ("Installation-bound owner operations"), advertised as `public.domains.operations.v1`. Takes effect only while `public.domains.observation.v1` is advertised (`OIDC_ENABLED`, `MCP_PUBLIC_ENDPOINTS_ENABLED`, `SYNC_INTEGRATIONS_ENABLED`, `MCP_PUBLIC_USAGE_BUDGET_ENABLED` and this file's switch); off: the three routes answer `404` before authentication and run no statement. No cross-check at start-up, so turning `MCP_PUBLIC_DOMAINS_ENABLED` off alone still closes everything. |
 
-A malformed host name in the routing target, an application host or a
-reserved suffix stops the process at start-up; the error names the variable,
-never the value. The values are normalised (lower case, one trailing dot
+A malformed host name in the routing target, an application host, a
+reserved suffix or the CNAME proof zone (also a zone over 200 characters, or
+one equal to or under an application host) stops the process at start-up;
+the error names the variable, never the value. The values are normalised (lower case, one trailing dot
 removed).
 
 Fixed values (code constants, repeated here): license id `public-mcp-domains`;
@@ -578,7 +646,9 @@ challenge label `_kagura-public-mcp`; value prefix
 absences; suspended hold 30 days; pending claims 7 days; lease 72 hours;
 re-check age 3,600 s; job interval 900 s, batch 200, concurrency 4,
 housekeeping 500 rows per statement, run budget 120 s; one check 8 s, one DNS
-query 3 s, 20 TXT values; 20 verify calls per workspace per hour; 6 activation
+query 3 s, 20 TXT values; CNAME label 32 hex characters of SHA-256 of
+`kagura-public-mcp-cname-v1:` + token, proof zone at most 200 characters; 20
+verify calls per workspace per hour; 6 activation
 attempts per workspace per day; host names 4–234 characters; permission call 4
 concurrent lookups per process and 3 s.
 
@@ -607,14 +677,23 @@ concurrent lookups per process and 3 s.
 4. **Routing target.** Create the record owners point their names at (it must
    reach the proxy directly, not through a CDN that holds no certificate for
    their names) and set `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`.
-5. **Resolver.** The API container's resolver configuration must reach a
+5. **CNAME proof (optional).** Pick a zone used for nothing else (for example
+   `domains-proof.example.com`), create the wildcard record `*.<zone>` (DNS
+   only: an A/AAAA record of the proxy, or a CNAME to the routing target), and
+   set `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`. Leave it empty to keep the TXT
+   proof only. Whatever the switches say, the release that brings it reads
+   the column `last_proof_via` of the migration `f60_2979_domain_proof_via`
+   wherever it reads domain rows: run the migrations (`alembic upgrade head`)
+   before starting the new code; the previous release keeps working against
+   the migrated schema.
+6. **Resolver.** The API container's resolver configuration must reach a
    recursive resolver you trust; the application does not validate DNSSEC.
-6. **Scheduler leader.** Confirm that a scheduler leader runs and that
+7. **Scheduler leader.** Confirm that a scheduler leader runs and that
    `public_mcp_domain_maintenance` appears in the job status: without it every
    alias stops after 72 hours.
-7. **Right.** Under `entitlement`, publish the license `public-mcp-domains`
+8. **Right.** Under `entitlement`, publish the license `public-mcp-domains`
    for the workspaces that bought it; under `operator`, nothing.
-8. Switch the feature on, **then** enable alias routing at the proxy (the
+9. Switch the feature on, **then** enable alias routing at the proxy (the
    reverse of the stop order): a new name gets no certificate while the switch
    is off, because the permission call answers `404` then, but a name whose
    certificate is still stored from an earlier run would be routed at once.
@@ -642,6 +721,14 @@ The ways to stop aliases:
 - switching the feature off or rolling back: take the alias routing out of the
   proxy first (reference proxy: restore the template, render, recreate the
   proxy), then switch off or roll back.
+
+**The CNAME proof zone.** Emptying `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`, or
+changing it, changes every CNAME target: a domain proved only by its CNAME
+reads `missing` from its next check and is suspended (`proof_lost`) after 3
+confirmed absences and 72 hours. Ask those owners to publish the TXT record
+first, or keep the old zone's wildcard and value until they have. A new zone
+reserves its names at the next restart; an existing domain under it is
+suspended (`reserved`) at its next check.
 
 While the switch is off no job runs: host names of released rows stay until
 the operator removes them with the CLI or switches the feature on again, and
@@ -677,7 +764,8 @@ These are the operator's duties:
 4. While the switch is off, and on a release without the feature, the
    application applies no Host rule. Alias routing is removed at the proxy
    before switching off or rolling back.
-5. The resolver's integrity (no DNSSEC validation by the application).
+5. The resolver's integrity (no DNSSEC validation by the application), and,
+   with the CNAME proof on, the zone's wildcard record `*.<zone>`.
 6. Re-checks, the end of a right and the renewal of the lease need a running
    scheduler leader. Without it every alias stops when its 72-hour lease
    passes, under either authority.
@@ -691,7 +779,9 @@ A proxy in front of the API serves aliases correctly when it:
 - routes only `/mcp` and `/mcp/` on alias names, to the API, and answers
   everything else on those names itself (`404`);
 - obtains a certificate for a name only when the permission call answers `200`
-  (or drives issuance from the operator CLI's `list --state active`);
+  (or drives issuance from the operator CLI's `list --state active`); with the
+  CNAME proof on, the zone's wildcard `*.<zone>` reaches the proxy, and no
+  certificate is ever issued for a name in the zone itself;
 - forwards the client's `Host` unchanged, and never derives `Host` from a
   forwarded header;
 - refuses a request whose `Host` differs from the TLS server name of the
@@ -711,7 +801,8 @@ which stays authoritative for the application.
 
 One row per claim in `public_mcp_domains`: the host name, the workspace and
 publication ids, the verification token, the state, the lease, the check
-results and times. No person column and no foreign key. The host name lives on
+results (with `last_proof_via`, which record proved it) and times. The CNAME
+target is derived from the token and never stored. No person column and no foreign key. The host name lives on
 the row and is deleted with it (a `pending` row after 7 days or on remove, a
 `released` row when its cooldown ends), and in the claim's edge certificate
 report until the maintenance pass deletes that report (below). The table is
@@ -763,7 +854,8 @@ installation-bound command also carries `client_id` (the browser client) and
 | `public_mcp_domain_tls_report_purge_failed` | error | `error_type` | the maintenance pass could not delete expired reports; the run goes on |
 
 No log line, usage event, job count or audit row carries a host name, a token,
-a DNS answer, a resolved address or the `Origin` of an alias request.
+a CNAME target, a DNS answer, a resolved address or the `Origin` of an alias
+request.
 
 ### Installation-bound owner observation
 
@@ -776,7 +868,10 @@ must match the entire binding and discard the receipt at `valid_until`.
 The maximum lifetime is 30 seconds and a positive serving observation ends
 by the lease deadline. A released row exposes only release and cooldown
 metadata during its remaining cooldown. A missing binding has no domain
-facts. DNS proof, routing, and serving are independent. TLS is
+facts. DNS proof, routing, and serving are independent. The domain carries
+`verification.cname_target` and `last_check.proof` exactly when the owner API
+does (the CNAME proof zone set); `schema_version` and the capabilities are
+unchanged. TLS is
 `{"status":"unreported"}` unless a current certificate report of the edge
 names this claim ("Edge certificate reports").
 

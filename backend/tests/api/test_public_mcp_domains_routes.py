@@ -563,3 +563,107 @@ async def test_every_route_needs_a_signed_in_owner(world: World) -> None:
         r = await w.client.request(method, w.path("a", suffix), json={"hostname": w.name()})
         assert r.status_code == 401, (method, suffix, r.text)
         assert r.headers["cache-control"] == "no-store"
+
+
+# ----------------------------------------------------------------------------
+# #2979: the CNAME proof
+# ----------------------------------------------------------------------------
+
+
+class CnameDns(Dns):
+    """``Dns`` that also answers a row's CNAME target: ``cname[host]`` is the
+    target the name's chain holds. The proof combines as the adapter does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cname: dict[str, str] = {}
+        self.cname_targets: list[str | None] = []
+
+    async def check(  # type: ignore[override]
+        self, hostname: str, token: str, routing_target: str, *, cname_target: str | None = None
+    ) -> DomainCheck:
+        self.calls.append(hostname)
+        self.cname_targets.append(cname_target)
+        txt = "ok" if token in self.txt.get(hostname, set()) else "missing"
+        if cname_target is None:
+            return DomainCheck(txt, "ok")
+        cname = "ok" if self.cname.get(hostname) == cname_target else "missing"
+        proof, via = domain_dns.combine_proof(txt, cname)
+        return DomainCheck(proof, "ok", via)
+
+
+async def test_with_the_zone_a_claim_carries_its_cname_target_and_the_proof_kind(
+    world: World, monkeypatch
+) -> None:
+    from mcp_server.public.domains import cname_proof_target
+
+    w = world
+    dns = CnameDns()
+    monkeypatch.setattr(domain_dns, "domain_resolver", lambda: dns)
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    hostname = w.name()
+    r = await w.attach("a", hostname)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    token = body["verification"]["record_value"].split("=", 1)[1]
+    target = cname_proof_target(token)
+    assert target is not None and target.endswith(".proof.example.net")
+    assert body["verification"] == {
+        "record_type": "TXT",
+        "record_name": f"_kagura-public-mcp.{hostname}",
+        "record_value": f"kagura-public-mcp-verification={token}",
+        "cname_target": target,
+    }
+    assert body["last_check"] == {"result": None, "checked_at": None, "proof": None}
+
+    # Only the CNAME is published: it proves control.
+    dns.cname[hostname] = target
+    r = await w.verify("a", body["domain_id"])
+    assert r.status_code == 200, r.text
+    active = r.json()
+    assert active["state"] == "active"
+    assert (active["last_check"]["result"], active["last_check"]["proof"]) == ("ok", "cname")
+    assert dns.cname_targets == [target]
+    listed = await w.client.get(w.path("a"), headers={"x-test-user": "a"})
+    (row,) = listed.json()["domains"]
+    assert row["verification"]["cname_target"] == target
+    assert row["last_check"]["proof"] == "cname"
+
+    # The zone emptied: the same row answers exactly as before the feature.
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "")
+    listed = await w.client.get(w.path("a"), headers={"x-test-user": "a"})
+    (row,) = listed.json()["domains"]
+    assert set(row["verification"]) == {"record_type", "record_name", "record_value"}
+    assert set(row["last_check"]) == {"result", "checked_at"}
+
+
+async def test_with_the_zone_neither_record_is_missing(world: World, monkeypatch) -> None:
+    w = world
+    dns = CnameDns()
+    monkeypatch.setattr(domain_dns, "domain_resolver", lambda: dns)
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    hostname = w.name()
+    body = (await w.attach("a", hostname)).json()
+    dns.cname[hostname] = f"{'f' * 32}.proof.example.net"  # not this row's target
+    r = await w.verify("a", body["domain_id"])
+    assert r.status_code == 200, r.text
+    pending = r.json()
+    assert pending["state"] == "pending"
+    assert pending["last_check"]["result"] == "missing"
+    assert pending["last_check"]["proof"] is None
+
+
+async def test_without_the_zone_no_new_key_and_no_cname_target(world: World, monkeypatch) -> None:
+    w = world
+    dns = CnameDns()
+    monkeypatch.setattr(domain_dns, "domain_resolver", lambda: dns)
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "")
+    hostname = w.name()
+    body = (await w.attach("a", hostname)).json()
+    assert set(body["verification"]) == {"record_type", "record_name", "record_value"}
+    assert body["last_check"] == {"result": None, "checked_at": None}
+    dns.publish(hostname, body["verification"]["record_value"].split("=", 1)[1])
+    active = (await w.verify("a", body["domain_id"])).json()
+    assert active["state"] == "active"
+    assert set(active["last_check"]) == {"result", "checked_at"}
+    assert dns.cname_targets == [None]

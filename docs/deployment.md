@@ -4308,7 +4308,9 @@ Every request re-checks the publication with one indexed query (nothing is cache
 
 A workspace owner can serve a published public MCP endpoint under a host name
 they control, as `https://<host>/mcp`, after proving control of the name with
-a DNS TXT record. The alias serves the same endpoint, sessions, limits, usage
+a DNS TXT record or, where `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` is set, with
+one CNAME record to the claim's own target that also routes the name
+([#2979](https://github.com/kagura-ai/memory-cloud/issues/2979)). The alias serves the same endpoint, sessions, limits, usage
 budget and usage events as `/mcp/public/<public_id>`. Contract (states, DNS
 records, Host rules, right and lease, cooldown, limits, owner API, permission
 call, job, CLI, data lifecycle, log events):
@@ -4325,6 +4327,7 @@ call, job, CLI, data lifecycle, log events):
 | `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated. Refused on the request path from the first request after a restart; the next check suspends a domain under them (`reserved`). |
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | `0`–`2160`. Hours a released name stays closed to other workspaces (the releasing workspace may take it back at once). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | `1`–`50`. Domains (`pending`, `active`, `suspended`) per workspace; one per publication in any case. |
+| `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` | *(empty)* | [#2979](https://github.com/kagura-ai/memory-cloud/issues/2979). A zone of your own, for example `domains-proof.example.com`, with a wildcard record `*.<zone>` that reaches the TLS proxy (DNS only). Set: every claim also gets a row-specific CNAME target `<label>.<zone>` (`verification.cname_target`), and a CNAME of the name to it proves control as the TXT record does; the check records which record proved it (`last_check.proof`); names in the zone are never claimable. Empty: off, every answer and lookup as before. A host name outside the special-use suffixes, at most 200 characters, not an application host nor under one; otherwise start-up refuses. The release that brings it reads the column of the revision `f60_2979_domain_proof_via` wherever it reads domain rows, whatever the switches say: run the migrations before starting the new code (the previous release keeps working against the migrated schema). Emptying or changing it makes every CNAME-only domain `missing` (suspended after the usual grace): have their owners publish the TXT record first. See "The CNAME proof" in [Public MCP custom domains](public-mcp-domains.md). |
 | `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ([#2941](https://github.com/kagura-ai/memory-cloud/issues/2941), "Edge certificate reports" in [Public MCP custom domains](public-mcp-domains.md)). Empty: every report is refused (`404`), no statement runs on `public_mcp_domain_tls_reports` and every certificate is `unreported`. Set (with both switches on): reports are accepted and shown. Apply the revision `f58_2941_domain_tls_reports` before setting it and empty it before downgrading the revision (with the credential set and the table missing, the report route and the owner observation of a live domain answer errors, and the domain maintenance pass logs `public_mcp_domain_tls_report_purge_failed` each run). Once it is emptied, stored reports are neither shown nor deleted; clear them with `DELETE FROM public_mcp_domain_tls_reports;`. A value with a blank refuses start-up; under `ENVIRONMENT=production` it must be at least 32 characters and differ from the system-admin, billing and worker service credentials. Never logged. |
 
 A malformed host name in the routing target, an application host or a
@@ -4375,7 +4378,10 @@ the application hosts (a warning when the list is empty).
 3. Put your own registrable domain and sibling hosts in
    `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES`.
 4. Create the routing target record (it must reach the TLS proxy directly) and
-   set `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`.
+   set `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`. Optionally (#2979) create a
+   wildcard record `*.<zone>` for a zone used for nothing else and set
+   `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`, so that one CNAME both routes and
+   proves a name.
 5. Check that the API container's resolver configuration (`/etc/resolv.conf`)
    reaches a recursive resolver you trust. The application reads DNS through
    it only, with no cache of its own, and does not validate DNSSEC. The new
@@ -4498,7 +4504,7 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ENABLE_RERANKING` | `true` | Deployment kill switch. `false` ⇒ no context reranks; `/system/info` reports `features.reranking=false` and the web UI hides the reranker card from the context search settings. |
-| `HYBRID_FUSION` | `weighted` | How a hybrid recall fuses its semantic and keyword legs, for the whole deployment: `weighted` \| `rrf` \| `keyword_floor` (case-insensitive; empty ⇒ `weighted`; any other value refuses start-up). See [Hybrid fusion](#hybrid-fusion--issue-2958). |
+| `HYBRID_FUSION` | `weighted` | How a hybrid recall fuses its semantic and keyword legs: the deployment default, which a context's `fusion` setting `auto` follows while the context's weights are 0.6 / 0.4: `weighted` \| `rrf` \| `keyword_floor` (case-insensitive; empty ⇒ `weighted`; any other value refuses start-up). See [Hybrid fusion](#hybrid-fusion--issue-2958). |
 | `DEFAULT_RERANKER_PROVIDER` | `voyage` | `voyage` \| `cohere` \| `self_hosted`. Written to **new** context search configs. |
 | `DEFAULT_USE_RERANK` | `false` | `use_rerank` written to new context search configs. `true` with `self_hosted` requires `RERANK_BASE_URL` or `SELF_HOSTED_BASE_URL`, else the API refuses to start. |
 | `DEFAULT_RERANKER_MODEL` | — | Model written to new configs. Empty ⇒ the provider's default (`rerank-2`, `rerank-multilingual-v3.0`, or for `self_hosted` `RERANK_MODEL` when `RERANK_BASE_URL` is set, else `SELF_HOSTED_RERANK_MODEL`). For voyage/cohere it must be a model the UI offers. |
@@ -4521,8 +4527,27 @@ content_chunks_enabled}` — names only, never URLs or keys.
 ### Hybrid fusion — Issue #2958
 
 `HYBRID_FUSION` picks how a hybrid recall (`search_mode="hybrid"`) combines its
-two legs. It applies to the whole deployment (there is no per-context setting)
-and to every caller: MCP and REST recall, public search and the public MCP tools.
+two legs by default, for every caller: MCP and REST recall, public search and the
+public MCP tools.
+
+Each context has its own `fusion` search setting (#2980; REST search-config
+routes, MCP `update_search_config`, the Web UI's search settings): `auto`
+(default), `rrf` or `weighted`.
+
+- `rrf` / `weighted`: that fusion for this context, whatever `HYBRID_FUSION` says.
+- `auto`: `weighted` when the context's `semantic_weight` / `bm25_weight` differ
+  from 0.6 / 0.4 (compared at two decimal places), otherwise `HYBRID_FUSION`. A
+  context whose owner tuned the weights keeps them on a deployment that runs
+  `rrf`; `keyword_floor` is reached only through `auto` with the default weights.
+
+Existing contexts read `auto`, so with `HYBRID_FUSION=weighted` (the default)
+nothing changes. The setting is the column `fusion` of the revision
+`f59_2980_context_fusion`; the release that brings it selects and inserts the
+column on every search-config read and context creation, so run the
+migrations before starting the new code (the previous release keeps working
+against the migrated schema). A recall over several contexts (`context_ids`) uses the first
+context's setting, as it does for the weights. The search-config answers carry
+`fusion_effective`, the fusion the context's hybrid recall uses now.
 
 - `weighted` (default, the fusion of every earlier release): each leg's scores
   are divided by that leg's top score and summed with the context's
@@ -4555,7 +4580,8 @@ leg fails still answers from the keyword leg alone (#1515). The recall
 every mode whenever the semantic leg returns rows; without them it falls back
 to the fused scores.
 
-The `recall_completed` log line carries `fusion` (this setting) and
+The `recall_completed` log line carries `fusion` (the fusion the recall used,
+resolved from the context's setting; `HYBRID_FUSION` when no search ran) and
 `leg_ranks`: for each result of the page, in page order, its rank in the
 semantic and in the keyword leg (`null` where that leg did not return it).
 

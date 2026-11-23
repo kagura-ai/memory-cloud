@@ -200,6 +200,20 @@ async def test_a_name_that_cannot_be_claimed_is_404_without_a_session(
     loader.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "domain", ["proof.example.net", f"{'a1' * 16}.proof.example.net", "deep.x.proof.example.net"]
+)
+async def test_a_name_in_the_cname_proof_zone_is_404_without_a_session(
+    domains_on, monkeypatch, sessions, loader, domain
+) -> None:
+    """#2979: an unclaimed name pointing into the zone, and the zone's own
+    names, never reach the alias statement: no certificate is issued."""
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    _assert_empty(await _ask(domain), 404)
+    assert sessions.opened == 0
+    loader.assert_not_awaited()
+
+
 async def test_a_missing_domain_is_404_without_a_session(domains_on, sessions, loader) -> None:
     _assert_empty(await _ask(None), 404)
     _assert_empty(await _ask(None, name=ALIAS), 404)

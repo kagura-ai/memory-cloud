@@ -538,6 +538,72 @@ class TestRecallTimingsWiring:
         assert line.kwargs["fusion"] == "keyword_floor"
         assert line.kwargs["leg_ranks"] == []
 
+    @pytest.mark.parametrize(("deployment", "used"), [("rrf", "weighted"), ("weighted", "rrf")])
+    async def test_recall_completed_logs_the_fusion_the_search_used(
+        self, monkeypatch, deployment, used
+    ):
+        """#2980: the search's resolved fusion (``timings.fusion``) is logged,
+        not the deployment setting."""
+        from config.settings import get_settings
+        from services import memory_service as ms
+        from services.memory_service import MemoryService
+        from services.recall_timings import RecallTimings
+
+        monkeypatch.setattr(get_settings(), "hybrid_fusion", deployment)
+        log = MagicMock()
+        monkeypatch.setattr(ms, "logger", log)
+        service = MemoryService(db=AsyncMock())
+        service._recall_finalize_response = AsyncMock(return_value=SimpleNamespace(results=[]))
+        timings = RecallTimings()
+        timings.fusion = used
+        await service._recall_finalize(
+            SimpleNamespace(k=5),
+            [],
+            [],
+            user_id="u1",
+            memories={},
+            current_context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+            neural_enabled=False,
+            binding_row_filtered=0,
+            selection_evidence=None,
+            timings=timings,
+        )
+        (line,) = [c for c in log.info.call_args_list if c.args and c.args[0] == "recall_completed"]
+        assert line.kwargs["fusion"] == used
+
+    async def test_empty_exit_after_a_search_logs_the_fusion_used(self, monkeypatch):
+        from config.settings import get_settings
+        from services import memory_service as ms
+        from services.memory_service import MemoryService
+        from services.recall_timings import RecallTimings
+
+        monkeypatch.setattr(get_settings(), "hybrid_fusion", "keyword_floor")
+        log = MagicMock()
+        monkeypatch.setattr(ms, "logger", log)
+        service = MemoryService(db=AsyncMock())
+        request = SimpleNamespace(
+            query="q",
+            k=5,
+            use_rerank=False,
+            filters=None,
+            search_mode="hybrid",
+            include_explore_hints=False,
+        )
+        timings = RecallTimings()
+        timings.fusion = "rrf"
+        await service._empty_recall_response(
+            request=request,
+            selection_config=None,
+            search_config=None,
+            context_id=uuid4(),
+            timings=timings,
+            user_id="u1",
+            context_count=1,
+        )
+        (line,) = [c for c in log.info.call_args_list if c.args and c.args[0] == "recall_completed"]
+        assert line.kwargs["fusion"] == "rrf"
+
 
 # ---------------------------------------------------------------------------
 # #2960: a recall the query router sent to the semantic lane degrades.

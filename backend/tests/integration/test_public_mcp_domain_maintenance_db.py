@@ -692,3 +692,80 @@ async def test_a_failing_report_purge_never_stops_the_checks(world: World, monke
     failures = [e for e in events if e["event"] == "public_mcp_domain_tls_report_purge_failed"]
     assert len(failures) == 1 and failures[0]["log_level"] == "error"
     assert [e for e in events if e["event"] == "public_mcp_domain_maintenance_run"]
+
+
+# ----------------------------------------------------------------------------
+# #2979: the CNAME proof under the same grace
+# ----------------------------------------------------------------------------
+
+
+class CnameDns(Dns):
+    """Per name the CNAME target its chain reaches (``cname``); no TXT at all.
+    The proof combines as the adapter does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cname: dict[str, str] = {}
+        self.seen: dict[str, str | None] = {}
+
+    async def check(  # type: ignore[override]
+        self, hostname: str, token: str, routing_target: str, *, cname_target: str | None = None
+    ) -> DomainCheck:
+        self.calls.append(hostname)
+        self.seen[hostname] = cname_target
+        cname = "ok" if cname_target and self.cname.get(hostname) == cname_target else "missing"
+        proof, via = domain_dns.combine_proof("missing", cname)
+        return DomainCheck(proof, "ok", via)
+
+
+async def test_cname_proof_lost_after_three_absences_then_back(world: World, monkeypatch) -> None:
+    from mcp_server.public.domains import cname_proof_target
+
+    w = world
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    dns = CnameDns()
+    monkeypatch.setattr(domain_dns, "domain_resolver", lambda: dns)
+    row = await w.add(proof_ok_at=timedelta(days=-5))
+    target = cname_proof_target(row.verification_token)
+    assert target is not None
+    dns.cname[row.hostname] = target
+
+    counts = await w.run()
+    assert counts.proof_ok >= 1
+    after = await w.row(row.id)
+    assert after is not None
+    assert (after.state, after.last_proof_result, after.last_proof_via) == ("active", "ok", "cname")
+    assert dns.seen[row.hostname] == target
+
+    # The CNAME is gone: missing, inside the grace twice, then suspended.
+    del dns.cname[row.hostname]
+    await w.sql(
+        "UPDATE public_mcp_domains SET proof_ok_at = proof_ok_at - interval '5 days' "
+        "WHERE id = :id",
+        id=row.id,
+    )
+    for _ in range(2):
+        await w.age([row.id])
+        await w.run()
+        after = await w.row(row.id)
+        assert after is not None and after.state == "active"
+        assert (after.last_proof_result, after.last_proof_via) == ("missing", None)
+        assert await w.serves(row.hostname) == row.endpoint_id
+    await w.age([row.id])
+    counts = await w.run()
+    assert counts.suspended >= 1
+    after = await w.row(row.id)
+    assert after is not None
+    assert (after.state, after.suspended_reason) == ("suspended", "proof_lost")
+    assert await w.serves(row.hostname) is None
+    assert await _permission(row.hostname) == 404
+
+    # The CNAME is back: the next check reinstates the name.
+    dns.cname[row.hostname] = target
+    await w.age([row.id])
+    counts = await w.run()
+    assert counts.reinstated >= 1
+    after = await w.row(row.id)
+    assert after is not None and after.state == "active" and after.last_proof_via == "cname"
+    assert await w.serves(row.hostname) == row.endpoint_id
+    assert await _permission(row.hostname) == 200

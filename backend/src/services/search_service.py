@@ -8,6 +8,7 @@ Issue #1 specification:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from db.qdrant import chunk_points_supported, search_memories_fulltext, search_memories_qdrant
+from models.config import CONTEXT_FUSION_VALUES, DEFAULT_BM25_WEIGHT, DEFAULT_SEMANTIC_WEIGHT
 from models.llm_call_log import (
     LLM_CALL_LOG_CALL_TYPES,
     LLM_CALL_LOG_CALLERS,
@@ -54,6 +56,59 @@ _RRF_TOP = 2 / (RRF_K + 1)
 # cut, unless a selection plan is set (it orders after the floor). The floor
 # never changes a score.
 KEYWORD_FLOOR_KEY = "_keyword_floor"
+
+
+def _weight_is(value: object, default: float) -> bool:
+    """Whether a stored weight equals ``default`` at two decimal places.
+
+    A missing weight (``None``) or one that is not a number counts as the
+    default: the check never raises. ``Decimal('0.60')`` and ``0.6`` agree.
+    """
+    if value is None or isinstance(value, bool):
+        return True
+    if not isinstance(value, int | float | Decimal):
+        return True
+    try:
+        return round(float(value), 2) == default
+    except (TypeError, ValueError, ArithmeticError):
+        return True
+
+
+def stored_fusion(config: object) -> str:
+    """#2980: a context's stored ``fusion`` choice, ``auto`` when absent.
+
+    Anything other than ``auto`` / ``rrf`` / ``weighted`` (a config object
+    without the attribute, a test double) reads as ``auto``.
+    """
+    value = getattr(config, "fusion", None)
+    return value if isinstance(value, str) and value in CONTEXT_FUSION_VALUES else "auto"
+
+
+def resolve_fusion(config: object, deployment: str) -> str:
+    """#2980: the fusion a hybrid search over ``config``'s context uses.
+
+    An explicit ``rrf`` / ``weighted`` wins. Otherwise (``auto``, a missing
+    attribute, anything else) it is ``weighted`` when the context's weights
+    differ from 0.6 / 0.4 (compared at two decimal places), else the
+    deployment's ``HYBRID_FUSION`` (``weighted``, ``rrf`` or
+    ``keyword_floor``). A config without weights counts as default weights.
+
+    Args:
+        config: The context's search config (ORM row or a duck-typed default);
+            ``None`` reads as ``auto`` with default weights.
+        deployment: ``get_settings().hybrid_fusion``.
+
+    Returns:
+        ``"weighted"``, ``"rrf"`` or the deployment value.
+    """
+    explicit = stored_fusion(config)
+    if explicit != "auto":
+        return explicit
+    if _weight_is(getattr(config, "semantic_weight", None), DEFAULT_SEMANTIC_WEIGHT) and (
+        _weight_is(getattr(config, "bm25_weight", None), DEFAULT_BM25_WEIGHT)
+    ):
+        return deployment
+    return "weighted"
 
 
 def _floor_base_score(row: dict) -> float:
@@ -223,8 +278,11 @@ class SearchService:
         if effective_use_rerank:
             fetch_factor = fetch_factor * 2
         fetch_size = min(k * fetch_factor, 200)  # Cap to prevent excessive Qdrant/reranker load
-        # #2958: deployment-wide fusion of the two legs, read once per search.
-        fusion = get_settings().hybrid_fusion
+        # #2958 / #2980: the fusion of the two legs, decided once per search
+        # from the (primary) context's setting and weights and the deployment's
+        # HYBRID_FUSION. Everything below — the merge, the floor mark, the
+        # rerank pool, the recall_completed line — follows this value.
+        fusion = resolve_fusion(config, get_settings().hybrid_fusion)
         # #2015: a context with content chunk vectors returns chunk points from
         # the dense arm; several of one memory collapse into one, so that arm
         # oversamples and collapses back to fetch_size. `is True`: a duck-typed
@@ -375,6 +433,7 @@ class SearchService:
         effective_search_mode: SearchMode = search_mode
         if timings is None:
             timings = RecallTimings()  # discarded; keeps the stage blocks unconditional
+        timings.fusion = fusion
 
         if search_mode in ("hybrid", "semantic"):
             try:

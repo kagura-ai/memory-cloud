@@ -363,3 +363,52 @@ async def test_lookup_turns_a_failing_factory_into_unavailable(monkeypatch) -> N
     assert await service.lookup("alias.example.org", "t") == DomainCheck(
         "unavailable", "unresolved"
     )
+
+
+class _CnameResolver:
+    def __init__(self, answer: DomainCheck) -> None:
+        self.answer = answer
+        self.calls: list[tuple[tuple[str, str, str], dict[str, str | None]]] = []
+
+    async def check(
+        self, hostname: str, token: str, routing_target: str, *, cname_target: str | None = None
+    ) -> DomainCheck:
+        self.calls.append(((hostname, token, routing_target), {"cname_target": cname_target}))
+        return self.answer
+
+
+async def test_lookup_without_the_zone_passes_no_cname_target(monkeypatch) -> None:
+    """#2979: the zone empty, the resolver is called exactly as before."""
+    from config.settings import get_settings
+    from mcp_server.public import domains
+
+    async def ok() -> DomainCheck:
+        return DomainCheck("ok", "ok")
+
+    derived: list[str] = []
+    monkeypatch.setattr(domains, "cname_proof_label", lambda token: derived.append(token) or "x")
+    fake = _Resolver(ok)
+    monkeypatch.setattr(domain_dns, "domain_resolver", lambda: fake)
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_routing_target", "edge.example.net")
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "")
+    assert await service.lookup("alias.example.org", "t" * 64) == DomainCheck("ok", "ok")
+    assert fake.calls == [("alias.example.org", "t" * 64, "edge.example.net")]
+    assert derived == []
+
+
+async def test_lookup_with_the_zone_passes_the_rows_cname_target(monkeypatch) -> None:
+    from config.settings import get_settings
+    from mcp_server.public import domains
+
+    answer = DomainCheck("ok", "unresolved", "cname")
+    fake = _CnameResolver(answer)
+    monkeypatch.setattr(domain_dns, "domain_resolver", lambda: fake)
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_routing_target", "edge.example.net")
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    token = "t" * 64
+    assert await service.lookup("alias.example.org", token) == answer
+    expected = domains.cname_proof_target(token)
+    assert expected is not None and expected.endswith(".proof.example.net")
+    assert fake.calls == [
+        (("alias.example.org", token, "edge.example.net"), {"cname_target": expected})
+    ]

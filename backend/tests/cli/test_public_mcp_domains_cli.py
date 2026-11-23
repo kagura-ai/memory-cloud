@@ -210,6 +210,23 @@ async def test_show_by_hostname_prints_every_row_of_the_name(rows: Rows, capsys)
     assert str(active.id) in out and str(released.id) not in out
 
 
+async def test_show_and_list_print_no_cname_proof_label(rows: Rows, capsys, monkeypatch) -> None:
+    """#2979: the CNAME target is derived from the token; it never reaches the
+    command line's output or its log lines."""
+    from mcp_server.public.domains import cname_proof_label
+
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    active = await rows.add("active")
+    label = cname_proof_label(active.verification_token)
+    with capture_logs() as logs:
+        assert await _run(["show", "--domain-id", str(active.id)]) == 0
+        assert await _run(["list"]) == 0
+    out = capsys.readouterr().out
+    assert str(active.id) in out
+    assert label not in out
+    assert label not in repr(logs)
+
+
 async def test_show_unknown_exits_1(rows: Rows, capsys) -> None:
     assert await _run(["show", "--domain-id", str(uuid4())]) == 1
     assert "no public MCP domain" in capsys.readouterr().err

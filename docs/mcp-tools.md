@@ -458,7 +458,7 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `update_context` | Update context settings (summary, usage guide, resource_id, is_public). Changing `resource_id` revokes the resource tokens the caller issued for the old slug | Editor+ |
 | `delete_context` | Delete a context, all its memories and its files (storage released at once; files restorable by an admin for 6 days) | Owner/Admin |
 | `merge_contexts` | Merge memories from source context into target context; `delete_source=true` deletes the source and moves its files to the target | Owner/Admin |
-| `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
+| `update_search_config` | Tune hybrid search weights and fusion (`fusion`), reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
 
 ### Default context — `?context=`
 
@@ -780,7 +780,7 @@ filters={"within": {"polygon": [{"lat": 35.6, "lon": 139.7}, ...]}}  # geofence,
 
 **Few or no results.** Shorten the query, remove filters, try related terms, lower the importance threshold, or switch to `search_mode="keyword"`.
 
-**Search modes.** `hybrid` (default) combines semantic understanding with keyword matching (60% semantic + 40% BM25 unless the context's search config says otherwise; a deployment can choose rank fusion or a keyword floor instead with `HYBRID_FUSION`) and applies Neural Memory boosting. `semantic` is vector similarity only — best when you know the concept but not the words; Neural Memory is skipped. `keyword` is BM25 only, with no embeddings — best for exact terms and for Japanese hiragana-only queries, where embedding models struggle.
+**Search modes.** `hybrid` (default) combines semantic understanding with keyword matching (60% semantic + 40% BM25 unless the context's search config says otherwise; the context's `fusion` setting, or for `auto` the deployment's `HYBRID_FUSION`, can choose rank fusion or a keyword floor instead) and applies Neural Memory boosting. `semantic` is vector similarity only — best when you know the concept but not the words; Neural Memory is skipped. `keyword` is BM25 only, with no embeddings — best for exact terms and for Japanese hiragana-only queries, where embedding models struggle.
 
 **`confidence`.** A cheap triage hint for "is anything relevant here, or should I go external?" — not a correctness verdict. `level` (`high` / `moderate` / `low` / `none`) is driven by `top_score`, the best hit's absolute semantic cosine, and `prominence`, `(top_score − mean background cosine) / mean background cosine` — a ratio, so it is robust to an embedding model's cosine scale rather than a global cutoff.
 
@@ -1055,6 +1055,7 @@ On a feed-managed context (`feed` or `stopping`, see [Feed ownership and safe ma
 ### `update_search_config`
 
 - More keyword matching: `semantic_weight=0.5, bm25_weight=0.5`. Semantic-heavy: `semantic_weight=0.7, bm25_weight=0.3`. The two must sum to 1.0.
+- `fusion` ([#2980](https://github.com/kagura-ai/memory-cloud/issues/2980)): how a hybrid recall fuses its semantic and keyword legs. `rrf` (reciprocal rank fusion, the weights unused) suits conversation and work history, where an exact term in one memory should surface even when its summary reads differently. `weighted` (each leg normalised and blended with the weights) suits documents and manuals, with a higher `semantic_weight`. `auto` (the default) uses `weighted` when the weights differ from 0.6 / 0.4 and otherwise the deployment's `HYBRID_FUSION` (see [deployment](deployment.md#hybrid-fusion--issue-2958)). Any other value is refused with `invalid_search_config` (REST: 422). The parameter is changed only when you send it. The result's `config.fusion_effective` is the fusion the context's hybrid recall uses now; `get_context_info` reports `fusion` and `fusion_effective` in `search_config`. A recall over several contexts uses the first context's setting, as it does for the weights. `POST /api/v1/contexts/{id}/search-config/reset` sets it back to `auto`.
 - Reranking: `use_rerank=true, reranker_provider="voyage"` (or `"cohere"`) needs the provider's API key; `reranker_provider="self_hosted"` is keyless and uses the deployment's local reranker, so `reranker_model` may be omitted. A `recall` that omits `use_rerank` follows this setting.
 - `reinforce_enabled` is the bounded adoption + feedback re-rank. Contexts created since [#1207](https://github.com/kagura-ai/memory-cloud/issues/1207) start enabled; older ones keep their stored setting (typically false) until you set it. It never overrides semantic relevance: each score is multiplied by a factor in `[1 − reinforce_max_boost, 1 + reinforce_max_boost]`.
 - `routing_mode` ([#1212](https://github.com/kagura-ai/memory-cloud/issues/1212)): turn on `log_only` first to measure the traffic mix with zero ranking change, then `active`.

@@ -35,6 +35,7 @@ from services.permission_service import (
     gate_content_chunks_change,
     gate_llm_selector_change,
 )
+from services.search_service import resolve_fusion
 from utils.exceptions import AuthorizationError, MemoryCloudException
 from utils.logger import get_logger
 
@@ -100,6 +101,8 @@ async def build_search_config_response(
     )
     return ContextSearchConfigResponse.model_validate(config).model_copy(
         update={
+            # #2980: the fusion a hybrid search of this context uses now.
+            "fusion_effective": resolve_fusion(config, get_settings().hybrid_fusion),
             "content_chunks_can_change": can_change,
             "content_chunks_supported": chunk_points_supported(),
             "embedding_provider": provider,
@@ -362,6 +365,7 @@ async def reset_context_search_config(
     - content_chunks_enabled: false — while it is on, that is a change and takes
       the context owner or a workspace owner/admin (#2015)
     - llm_selector_enabled: false — on the same rule (#2144)
+    - fusion: 'auto' (#2980)
 
     Args:
         context_id: Context UUID

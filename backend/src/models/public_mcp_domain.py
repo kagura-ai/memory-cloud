@@ -29,13 +29,20 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
-from utils.public_hostname import MAX_HOSTNAME_LENGTH
+from utils.public_hostname import (
+    CNAME_LABEL_HEX_CHARS,
+    CNAME_PROOF_ZONE_MAX_LENGTH,
+    MAX_HOSTNAME_LENGTH,
+)
 
 __all__ = [
     "ACTIVATIONS_PER_DAY",
     "CHALLENGE_LABEL",
     "CHALLENGE_VALUE_PREFIX",
     "CHECK_TIMEOUT_SECONDS",
+    "CNAME_LABEL_HEX_CHARS",
+    "CNAME_LABEL_INPUT_PREFIX",
+    "CNAME_PROOF_ZONE_MAX_LENGTH",
     "DOMAIN_SERVICE_ID",
     "HELD_STATES",
     "MAINTENANCE_BATCH",
@@ -57,6 +64,13 @@ DOMAIN_SERVICE_ID = "public-mcp-domains"
 # Proof of control: TXT ``<CHALLENGE_LABEL>.<hostname>`` = prefix + token.
 CHALLENGE_LABEL = "_kagura-public-mcp"
 CHALLENGE_VALUE_PREFIX = "kagura-public-mcp-verification="
+# #2979: with MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE set, a CNAME of the name to
+# ``<label>.<zone>`` proves control too. The label is the first
+# CNAME_LABEL_HEX_CHARS lower-case hex characters of
+# sha256(CNAME_LABEL_INPUT_PREFIX + token): one per row, like the TXT value,
+# never stored. CNAME_PROOF_ZONE_MAX_LENGTH (the settings validator's bound)
+# leaves room for the label; both live with the host-name rules.
+CNAME_LABEL_INPUT_PREFIX = "kagura-public-mcp-cname-v1:"
 # A proof is lost after this many confirmed absences AND this many hours
 # since it was last seen.
 PROOF_GRACE_HOURS = 72
@@ -100,6 +114,9 @@ class PublicMcpDomain(Base):
         serve_until: The lease; an ``active`` row is served only before it.
         check_seq: Incremented by every UPDATE; the fence of a lookup result.
         last_proof_result: ``ok``, ``missing`` or ``unavailable``.
+        last_proof_via: Which record the last check found the proof in:
+            ``txt``, ``cname`` or ``both`` (#2979); NULL when it found none or
+            the CNAME proof is off.
         routing_status: ``ok``, ``mismatch`` or ``unresolved`` (informational).
         proof_ok_at: The last time a check found the proof.
         proof_missing_checks: Confirmed absences since ``proof_ok_at``.
@@ -147,6 +164,10 @@ class PublicMcpDomain(Base):
             "routing_status IN ('ok', 'mismatch', 'unresolved')",
             name="ck_public_mcp_domains_routing_status",
         ),
+        CheckConstraint(
+            "last_proof_via IN ('txt', 'cname', 'both')",
+            name="ck_public_mcp_domains_last_proof_via",
+        ),
         # One holder per host name across all workspaces.
         Index(
             "ux_public_mcp_domains_hostname_held",
@@ -183,6 +204,7 @@ class PublicMcpDomain(Base):
     check_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     last_proof_result: Mapped[str | None] = mapped_column(String(16), nullable=True)
     routing_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_proof_via: Mapped[str | None] = mapped_column(String(8), nullable=True)
     proof_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     proof_missing_checks: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")

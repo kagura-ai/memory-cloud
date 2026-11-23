@@ -49,6 +49,7 @@ async def handle_update_search_config(
                 gate_llm_selector_change,
             )
             from services.reranker_service import default_reranker_model_for
+            from services.search_service import resolve_fusion, stored_fusion
             from utils.exceptions import (
                 AuthorizationError,
                 FeatureNotAvailableError,
@@ -141,6 +142,10 @@ async def handle_update_search_config(
             # Issue #2144: the recall LLM selector opt-in, on the same terms.
             if "llm_selector_enabled" in args:
                 update_fields["llm_selector_enabled"] = args["llm_selector_enabled"]
+            # Issue #2980: the context's fusion, sent only when the caller sends it
+            # (an omitted one keeps the stored value).
+            if "fusion" in args:
+                update_fields["fusion"] = args["fusion"]
 
             # Validate via Pydantic (same as REST API)
             try:
@@ -248,6 +253,9 @@ async def handle_update_search_config(
                                     config.reinforce_require_host_arbitration
                                 ),
                                 "routing_mode": config.routing_mode,
+                                # #2980: stored, and the one a hybrid search uses.
+                                "fusion": stored_fusion(config),
+                                "fusion_effective": resolve_fusion(config, settings.hybrid_fusion),
                                 "content_chunks_enabled": config.content_chunks_enabled,
                                 # #2103 / #2080: whether the stored flag is acted
                                 # on (store, and the plan where gated).

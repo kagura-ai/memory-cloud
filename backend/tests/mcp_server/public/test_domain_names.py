@@ -242,3 +242,49 @@ def test_constants() -> None:
     assert m.ACTIVATIONS_PER_DAY == 6
     # The challenge name of the longest claimable host still fits in 253.
     assert m.MAX_HOSTNAME_LENGTH == 253 - len(m.CHALLENGE_LABEL) - 1 == 234
+
+
+# --- #2979: the CNAME proof zone -------------------------------------------
+
+
+def test_cname_proof_target_is_off_while_the_zone_is_empty(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "")
+    calls: list[str] = []
+    monkeypatch.setattr(domains, "cname_proof_label", lambda token: calls.append(token) or "x")
+    assert domains.cname_proof_target("ab" * 32) is None
+    assert calls == []  # no label is derived
+
+
+def test_cname_proof_target_is_a_label_of_the_token_in_the_zone(monkeypatch) -> None:
+    import hashlib
+
+    from models.public_mcp_domain import CNAME_LABEL_HEX_CHARS, CNAME_LABEL_INPUT_PREFIX
+
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    token = "ab" * 32
+    label = hashlib.sha256(("kagura-public-mcp-cname-v1:" + token).encode()).hexdigest()[:32]
+    assert CNAME_LABEL_INPUT_PREFIX == "kagura-public-mcp-cname-v1:"
+    assert CNAME_LABEL_HEX_CHARS == 32
+    assert domains.cname_proof_label(token) == label
+    assert domains.cname_proof_target(token) == f"{label}.proof.example.net"
+    # Row-specific: another token, another target; never the token itself.
+    other = domains.cname_proof_target("cd" * 32)
+    assert other is not None and other != domains.cname_proof_target(token)
+    assert token[:32] != label
+    # Any ASCII token (tests use short ones) derives a label.
+    assert len(domains.cname_proof_label("t")) == 32
+
+
+def test_names_in_the_cname_proof_zone_are_reserved(configured) -> None:
+    s = get_settings()
+    assert claimable_hostname("x.proof.example.net") == "x.proof.example.net"
+    configured.setattr(s, "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    for name in ("proof.example.net", "x.proof.example.net", f"{'a1' * 16}.proof.example.net"):
+        assert is_reserved(name), name
+        assert claimable_hostname(name) is None, name
+    assert claimable_hostname("example.net") == "example.net"
+    assert claimable_hostname("mcp.customer.example.org") == "mcp.customer.example.org"
+    # A name in the zone is not an application host: it stays foreign.
+    assert classify_request_host("x.proof.example.net") == "foreign"
+    configured.setattr(s, "mcp_public_domains_cname_proof_zone", "")
+    assert claimable_hostname("x.proof.example.net") == "x.proof.example.net"

@@ -26,6 +26,11 @@ import re
 # and its dot: the proof record of the longest claimable name still fits.
 MAX_HOSTNAME_LENGTH = 234
 MIN_HOSTNAME_LENGTH = 4
+# #2979: the CNAME proof target is ``<label>.<zone>`` with a label of
+# CNAME_LABEL_HEX_CHARS hex characters; the zone is bounded so that the target
+# is itself a host name of at most MAX_HOSTNAME_LENGTH characters.
+CNAME_LABEL_HEX_CHARS = 32
+CNAME_PROOF_ZONE_MAX_LENGTH = 200
 
 PASS_THROUGH_SUFFIXES: tuple[str, ...] = (
     "localhost",

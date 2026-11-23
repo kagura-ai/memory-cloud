@@ -44,10 +44,14 @@ class RecallTimings:
         clock: Monotonic clock; tests pass a fake to make durations exact.
         embed_cache_hit: Whether the query embedding came from the cache
             (``None`` until the embed stage ran).
+        fusion: The fusion the search used (#2980), set by
+            ``SearchService.hybrid_search`` once it is resolved; ``None``
+            when no search ran. Not a stage: ``log_fields()`` leaves it out.
     """
 
     clock: Callable[[], float] = time.perf_counter
     embed_cache_hit: bool | None = None
+    fusion: str | None = None
     _started: float = field(init=False, repr=False)
     _stages: dict[str, float] = field(default_factory=dict, init=False, repr=False)
 

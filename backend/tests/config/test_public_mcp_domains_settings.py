@@ -21,7 +21,12 @@ _ENV_KEYS = [
     "MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES",
     "MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS",
     "MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE",
+    "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE",
     "MCP_PUBLIC_ENDPOINTS_ENABLED",
+    "FRONTEND_URL",
+    "OIDC_ISSUER",
+    "KMC_MCP_URL",
+    "API_URL",
 ]
 
 
@@ -42,6 +47,7 @@ def test_defaults(clean_env) -> None:
     assert s.mcp_public_domains_reserved_suffixes == ""
     assert s.mcp_public_domains_reassign_cooldown_hours == 168
     assert s.mcp_public_domains_max_per_workspace == 3
+    assert s.mcp_public_domains_cname_proof_zone == ""
 
 
 def test_domain_settings_inventory() -> None:
@@ -55,6 +61,7 @@ def test_domain_settings_inventory() -> None:
         "mcp_public_domains_reserved_suffixes",
         "mcp_public_domains_reassign_cooldown_hours",
         "mcp_public_domains_max_per_workspace",
+        "mcp_public_domains_cname_proof_zone",
     }
 
 
@@ -172,3 +179,95 @@ def test_max_per_workspace_bounds(clean_env, value: str, ok: bool) -> None:
     else:
         with pytest.raises(ValidationError):
             Settings(_env_file=None)
+
+
+# --- #2979: the CNAME proof zone ---------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_cname_proof_zone_empty_is_off(clean_env, value: str) -> None:
+    clean_env.setenv("MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE", value)
+    assert Settings(_env_file=None).mcp_public_domains_cname_proof_zone == ""
+
+
+def test_cname_proof_zone_normalised(clean_env) -> None:
+    clean_env.setenv("MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE", " Proof.Example.NET. ")
+    assert Settings(_env_file=None).mcp_public_domains_cname_proof_zone == "proof.example.net"
+
+
+def test_cname_proof_zone_of_200_characters_is_allowed(clean_env) -> None:
+    zone = f"{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 8}"
+    assert len(zone) == 200
+    clean_env.setenv("MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE", zone)
+    assert Settings(_env_file=None).mcp_public_domains_cname_proof_zone == zone
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "localhost",
+        "proof.internal",
+        "nas.home.arpa",
+        "x.onion",
+        "1.2.3.4",
+        "proof.example.com:443",
+        "*.proof.example.com",
+        "https://proof.example.com",
+        f"{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 9}",  # 201 characters: no room for the label
+    ],
+)
+def test_cname_proof_zone_refused(clean_env, value: str) -> None:
+    clean_env.setenv("MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE", value)
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    message = str(excinfo.value)
+    assert "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE" in message
+    secret_marker = value
+    assert secret_marker not in message
+
+
+@pytest.mark.parametrize(
+    ("env", "app", "zone"),
+    [
+        ("FRONTEND_URL", "https://app.example.com", "app.example.com"),
+        ("FRONTEND_URL", "https://app.example.com", "proof.app.example.com"),
+        ("API_URL", "https://api.example.com", "proof.api.example.com"),
+        ("OIDC_ISSUER", "https://id.example.com", "id.example.com"),
+        ("KMC_MCP_URL", "https://mcp.example.com/mcp", "x.mcp.example.com"),
+        ("MCP_PUBLIC_DOMAINS_APP_HOSTS", ".apps.example.com", "proof.apps.example.com"),
+        ("MCP_PUBLIC_DOMAINS_APP_HOSTS", "edge.example.com", "edge.example.com"),
+    ],
+)
+def test_cname_proof_zone_inside_an_application_host_refused(
+    clean_env, env: str, app: str, zone: str
+) -> None:
+    clean_env.setenv(env, app)
+    clean_env.setenv("MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE", zone)
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    message = str(excinfo.value)
+    assert "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE" in message
+    secret_marker = zone
+    assert secret_marker not in message
+
+
+def test_cname_proof_zone_beside_the_application_hosts_is_allowed(clean_env) -> None:
+    clean_env.setenv("FRONTEND_URL", "https://app.example.com")
+    clean_env.setenv("MCP_PUBLIC_DOMAINS_APP_HOSTS", ".apps.example.com")
+    clean_env.setenv("MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE", "proof.example.com")
+    assert Settings(_env_file=None).mcp_public_domains_cname_proof_zone == "proof.example.com"
+
+
+def test_the_zone_bound_is_the_label_constant_not_a_literal() -> None:
+    """Fix round 1: the validator reads the bound that leaves room for the label."""
+    import inspect
+
+    from config import settings as settings_module
+    from models.public_mcp_domain import CNAME_LABEL_HEX_CHARS, CNAME_PROOF_ZONE_MAX_LENGTH
+    from utils.public_hostname import MAX_HOSTNAME_LENGTH
+
+    assert CNAME_PROOF_ZONE_MAX_LENGTH + 1 + CNAME_LABEL_HEX_CHARS <= MAX_HOSTNAME_LENGTH
+    source = inspect.getsource(Settings._check_public_domains_cname_proof_zone)
+    assert "CNAME_PROOF_ZONE_MAX_LENGTH" in source
+    assert "200" not in source.split('"""')[-1]
+    assert settings_module.CNAME_PROOF_ZONE_MAX_LENGTH == CNAME_PROOF_ZONE_MAX_LENGTH
