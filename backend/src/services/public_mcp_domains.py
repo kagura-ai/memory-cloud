@@ -74,7 +74,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from db.redis import get_redis_client, incrby_counter
-from mcp_server.public.domains import claimable_hostname
+from mcp_server.public.domains import claimable_hostname, cname_proof_target
 from models.auth import AuditLog, User, Workspace
 from models.public_mcp import PublicMcpEndpoint
 from models.public_mcp_domain import (
@@ -160,13 +160,21 @@ async def lookup(hostname: str, token: str) -> DomainCheck:
 
     A timeout, or any exception of the resolver (a replaced one included), is
     ``DomainCheck("unavailable", "unresolved")``. Nothing is logged.
+
+    #2979: while ``MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`` is set the resolver
+    also gets the row's CNAME target (derived from ``token``, never logged);
+    while it is empty nothing is derived and the call is the one before.
     """
     try:
         resolver = domain_dns.domain_resolver()
-        return await asyncio.wait_for(
-            resolver.check(hostname, token, get_settings().mcp_public_domains_routing_target),
-            CHECK_TIMEOUT_SECONDS,
+        routing_target = get_settings().mcp_public_domains_routing_target
+        cname_target = cname_proof_target(token)
+        check = (
+            resolver.check(hostname, token, routing_target)
+            if cname_target is None
+            else resolver.check(hostname, token, routing_target, cname_target=cname_target)
         )
+        return await asyncio.wait_for(check, CHECK_TIMEOUT_SECONDS)
     except Exception:
         return _UNAVAILABLE
 
@@ -991,6 +999,9 @@ async def _apply(
     row.last_checked_at = decision.last_checked_at
     row.last_proof_result = decision.last_proof_result
     row.routing_status = decision.routing_status
+    # #2979: which record proved it, straight from the check (decide_check
+    # decides states only).
+    row.last_proof_via = check.proof_via
     if decision.renew_lease:
         row.serve_until = _lease(access, db_now)
     if decision.state == "released":
@@ -1150,6 +1161,7 @@ async def _activate(
         row.last_checked_at = db_now
         row.last_proof_result = check.proof
         row.routing_status = check.routing
+        row.last_proof_via = check.proof_via
         row.check_seq = row.check_seq + 1
         try:
             await db.flush()
@@ -1188,6 +1200,7 @@ async def _record_pending_check(
                 last_checked_at=_DB_NOW,
                 last_proof_result=check.proof,
                 routing_status=check.routing,
+                last_proof_via=check.proof_via,
                 check_seq=PublicMcpDomain.check_seq + 1,
             )
             .execution_options(synchronize_session=False)

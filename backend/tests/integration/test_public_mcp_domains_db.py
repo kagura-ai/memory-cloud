@@ -1440,3 +1440,127 @@ async def test_owner_api_audit_rows_carry_no_command_fields(world: World) -> Non
             "reason",
             "hostname_sha256",
         }
+
+
+# ----------------------------------------------------------------------------
+# #2979: a row-specific CNAME proves control
+# ----------------------------------------------------------------------------
+
+
+class CnameDns(Dns):
+    """``Dns`` that also holds the CNAME target each name's chain reaches."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cname: dict[str, str] = {}
+
+    async def check(  # type: ignore[override]
+        self, hostname: str, token: str, routing_target: str, *, cname_target: str | None = None
+    ) -> DomainCheck:
+        self.calls.append(hostname)
+        if hostname in self.unavailable:
+            return DomainCheck("unavailable", "unresolved")
+        txt = "ok" if token in self.txt.get(hostname, set()) else "missing"
+        if cname_target is None:
+            return DomainCheck(txt, "ok")
+        cname = "ok" if self.cname.get(hostname) == cname_target else "missing"
+        proof, via = domain_dns.combine_proof(txt, cname)
+        return DomainCheck(proof, "ok", via)
+
+
+@pytest.fixture
+def cname_zone(world: World, monkeypatch) -> CnameDns:
+    dns = CnameDns()
+    world.dns = dns
+    monkeypatch.setattr(domain_dns, "domain_resolver", lambda: dns)
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "proof.example.net")
+    return dns
+
+
+def _target(token: str) -> str:
+    from mcp_server.public.domains import cname_proof_target
+
+    target = cname_proof_target(token)
+    assert target is not None
+    return target
+
+
+async def test_cname_only_activates_and_records_the_kind(
+    world: World, cname_zone: CnameDns
+) -> None:
+    w = world
+    row = await w.attach("a", w.name())
+    cname_zone.cname[row.hostname] = _target(row.verification_token)
+    active = await w.verify("a", row.id)
+    assert active.state == "active"
+    assert (active.last_proof_result, active.last_proof_via) == ("ok", "cname")
+    assert await w.serves(row.hostname) == w.endpoint["a"]
+    await w.detach("a", row.id)
+
+
+async def test_txt_only_and_both_with_the_zone_on(world: World, cname_zone: CnameDns) -> None:
+    w = world
+    row = await w.attach("a", w.name())
+    cname_zone.publish(row.hostname, row.verification_token)
+    active = await w.verify("a", row.id)
+    assert (active.state, active.last_proof_via) == ("active", "txt")
+    cname_zone.cname[row.hostname] = _target(row.verification_token)
+    again = await w.verify("a", row.id)
+    assert (again.state, again.last_proof_via) == ("active", "both")
+    await w.detach("a", row.id)
+
+
+async def test_neither_record_or_another_rows_target_is_missing(
+    world: World, cname_zone: CnameDns
+) -> None:
+    w = world
+    mine = await w.attach("a", w.name())
+    theirs = await w.attach("b", w.name())
+    assert _target(mine.verification_token) != _target(theirs.verification_token)
+    pending = await w.verify("a", mine.id)
+    assert (pending.state, pending.last_proof_result, pending.last_proof_via) == (
+        "pending",
+        "missing",
+        None,
+    )
+    cname_zone.cname[mine.hostname] = _target(theirs.verification_token)
+    pending = await w.verify("a", mine.id)
+    assert (pending.state, pending.last_proof_result) == ("pending", "missing")
+    await w.detach("a", mine.id)
+    await w.detach("b", theirs.id)
+
+
+async def test_a_released_rows_cname_target_is_missing_for_the_new_claim(
+    world: World, cname_zone: CnameDns
+) -> None:
+    w = world
+    first = await w.attach("a", w.name())
+    old_target = _target(first.verification_token)
+    cname_zone.cname[first.hostname] = old_target
+    assert (await w.verify("a", first.id)).state == "active"
+    await w.detach("a", first.id)
+    assert (await w.row(first.id)).state == "released"  # type: ignore[union-attr]
+
+    again = await w.attach("a", first.hostname)
+    assert _target(again.verification_token) != old_target
+    # The old CNAME is still published: it proves nothing for the new row.
+    pending = await w.verify("a", again.id)
+    assert (pending.state, pending.last_proof_result) == ("pending", "missing")
+    cname_zone.cname[first.hostname] = _target(again.verification_token)
+    assert (await w.verify("a", again.id)).state == "active"
+    await w.detach("a", again.id)
+
+
+async def test_a_name_inside_the_zone_cannot_be_claimed(world: World, cname_zone: CnameDns) -> None:
+    w = world
+    for name in ("proof.example.net", f"{'a1' * 16}.proof.example.net"):
+        with pytest.raises(PublicMcpDomainHostnameNotAllowedError):
+            await w.attach("a", name)
+
+
+async def test_without_the_zone_nothing_is_derived_or_recorded(world: World, monkeypatch) -> None:
+    w = world
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_cname_proof_zone", "")
+    active = await w.active("a")
+    assert active.last_proof_via is None
+    await w.detach("a", active.id)

@@ -4,7 +4,8 @@
 ``POST .../domains/{domain_id}/verify`` and ``DELETE .../domains/{domain_id}``.
 A custom domain is an alias of the resource's live publication, served at
 ``https://<hostname>/mcp`` once the owner proved control of the name with a
-DNS TXT record (``docs/public-mcp-domains.md``).
+DNS TXT record or, while ``MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`` is set, a
+CNAME to the claim's own target (#2979, ``docs/public-mcp-domains.md``).
 
 Every route answers 404 before any statement while
 ``MCP_PUBLIC_DOMAINS_ENABLED`` is off, and ``Cache-Control: no-store`` on
@@ -33,7 +34,11 @@ from api.routes.public_mcp_endpoints import ResourceSlug
 from auth.dependencies import WorkspaceOwner
 from config.settings import get_settings
 from db.base import get_db
-from mcp_server.public.domains import challenge_record, public_domains_enabled
+from mcp_server.public.domains import (
+    challenge_record,
+    cname_proof_target,
+    public_domains_enabled,
+)
 from mcp_server.public.publication import load_serving_endpoint_for_alias
 from models.api_base import TZAwareBaseModel
 from models.public_mcp_domain import PublicMcpDomain
@@ -51,6 +56,13 @@ DomainStateField = Literal["pending", "active", "suspended"]
 SuspendedReasonField = Literal["proof_lost", "right_ended", "reserved"]
 RoutingStatusField = Literal["ok", "mismatch", "unresolved"]
 ProofResultField = Literal["ok", "missing", "unavailable"]
+ProofViaField = Literal["txt", "cname", "both"]
+
+
+def _cname_proof_off(_value: object) -> bool:
+    """#2979: the CNAME proof fields are left out of every answer while the
+    zone is empty (decided from the setting, never from the stored row)."""
+    return not get_settings().mcp_public_domains_cname_proof_zone
 
 
 class _NoStoreRoute(APIRoute):
@@ -112,17 +124,34 @@ class PublicMcpDomainCreate(BaseModel):
 
 
 class PublicMcpDomainVerification(BaseModel):
-    """The DNS record that proves control of the name."""
+    """The DNS records that prove control of the name: the TXT record, or
+    (while the deployment sets a CNAME proof zone) a CNAME to ``cname_target``."""
 
     record_type: Literal["TXT"] = "TXT"
     record_name: str = Field(..., description="Name of the TXT record")
     record_value: str = Field(..., description="Exact value of the TXT record")
+    cname_target: str | None = Field(
+        None,
+        exclude_if=_cname_proof_off,
+        description=(
+            "This claim's own CNAME target: a CNAME of the name to it routes the name "
+            "and proves control (either record suffices). Present only where the "
+            "deployment sets MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE"
+        ),
+    )
 
 
 class PublicMcpDomainRouting(BaseModel):
     """Where the name should point (informational: never a condition of serving)."""
 
-    target: str = Field(..., description="MCP_PUBLIC_DOMAINS_ROUTING_TARGET (CNAME target)")
+    target: str = Field(
+        ...,
+        description=(
+            "MCP_PUBLIC_DOMAINS_ROUTING_TARGET: where a CNAME (or the A/AAAA records) of "
+            "the name points; with verification.cname_target present, a CNAME to that "
+            "target routes the name as well"
+        ),
+    )
     status: RoutingStatusField | None = Field(
         None, description="Result of the last check; null before the first"
     )
@@ -133,6 +162,15 @@ class PublicMcpDomainLastCheck(TZAwareBaseModel):
 
     result: ProofResultField | None = None
     checked_at: datetime | None = None
+    proof: ProofViaField | None = Field(
+        None,
+        exclude_if=_cname_proof_off,
+        description=(
+            "Which record the last check found the proof in (txt, cname or both); "
+            "null when it found none. Present only where the deployment sets "
+            "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE"
+        ),
+    )
 
 
 class PublicMcpDomainResponse(TZAwareBaseModel):
@@ -168,6 +206,9 @@ async def domain_response(db: AsyncSession, row: PublicMcpDomain) -> PublicMcpDo
         endpoint = await load_serving_endpoint_for_alias(db, row.hostname)
         serving = endpoint is not None and endpoint.id == row.endpoint_id
     record_name, record_value = challenge_record(row.hostname, row.verification_token)
+    # #2979: None (and left out of the answer) while the zone is empty.
+    cname_target = cname_proof_target(row.verification_token)
+    proof_via = cast(ProofViaField | None, row.last_proof_via) if cname_target is not None else None
     return PublicMcpDomainResponse(
         domain_id=row.id,
         hostname=row.hostname,
@@ -176,7 +217,7 @@ async def domain_response(db: AsyncSession, row: PublicMcpDomain) -> PublicMcpDo
         suspended_reason=cast(SuspendedReasonField | None, row.suspended_reason),
         serving=serving,
         verification=PublicMcpDomainVerification(
-            record_name=record_name, record_value=record_value
+            record_name=record_name, record_value=record_value, cname_target=cname_target
         ),
         routing=PublicMcpDomainRouting(
             target=get_settings().mcp_public_domains_routing_target,
@@ -185,6 +226,7 @@ async def domain_response(db: AsyncSession, row: PublicMcpDomain) -> PublicMcpDo
         last_check=PublicMcpDomainLastCheck(
             result=cast(ProofResultField | None, row.last_proof_result),
             checked_at=row.last_checked_at,
+            proof=proof_via,
         ),
         proof_ok_at=row.proof_ok_at,
         proof_missing_checks=row.proof_missing_checks,
@@ -217,7 +259,7 @@ async def add_public_mcp_domain(
     resource_id: str = ResourceSlug,
     db: AsyncSession = Depends(get_db),
 ) -> PublicMcpDomainResponse:
-    """Add a host name as a custom domain (``pending``) and return its TXT record.
+    """Add a host name as a custom domain (``pending``) and return its proof records.
 
     The canonical owner only. The domain serves nothing until it is verified.
     """
@@ -236,7 +278,7 @@ async def verify_public_mcp_domain(
     domain_id: UUID = DomainId,
     db: AsyncSession = Depends(get_db),
 ) -> PublicMcpDomainResponse:
-    """Check the TXT record now; a found proof activates a ``pending`` domain.
+    """Check the proof records now; a found proof activates a ``pending`` domain.
 
     The canonical owner only. Limited per workspace (verify calls per hour,
     activation attempts per day).

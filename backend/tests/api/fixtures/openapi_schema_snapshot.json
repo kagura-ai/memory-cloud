@@ -10231,6 +10231,7 @@
       "PublicMcpDomainLastCheck": {
         "properties": {
           "checked_at": {},
+          "proof": {},
           "result": {}
         },
         "type": "object"
@@ -10308,6 +10309,16 @@
       },
       "PublicMcpDomainVerification": {
         "properties": {
+          "cname_target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "record_name": {
             "type": "string"
           },

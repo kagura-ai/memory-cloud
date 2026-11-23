@@ -13,8 +13,12 @@ what a request's Host is:
 
 and which names may be claimed: a normalised name that is not special-use,
 not equal to or under an application host, the billing origin, a CORS or MCP
-browser origin, the routing target, or an entry of
+browser origin, the routing target, the CNAME proof zone
+(``MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE``, #2979), or an entry of
 ``MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES``.
+
+It also derives a claim's two proof records from its token: the TXT record
+and, while the CNAME proof zone is set, the row's CNAME target.
 
 The host sets are rebuilt from the setting values on every call, memoised
 only on the tuple of those values: a setting changed in place is seen by the
@@ -23,6 +27,7 @@ next call. Nothing here touches the database.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -30,7 +35,12 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from config.settings import get_settings
-from models.public_mcp_domain import CHALLENGE_LABEL, CHALLENGE_VALUE_PREFIX
+from models.public_mcp_domain import (
+    CHALLENGE_LABEL,
+    CHALLENGE_VALUE_PREFIX,
+    CNAME_LABEL_HEX_CHARS,
+    CNAME_LABEL_INPUT_PREFIX,
+)
 from utils.logger import get_logger
 from utils.public_hostname import (
     is_internal_shape,
@@ -107,6 +117,7 @@ def _sources() -> tuple[str, ...]:
         s.mcp_public_domains_routing_target,
         s.mcp_public_domains_app_hosts,
         s.mcp_public_domains_reserved_suffixes,
+        s.mcp_public_domains_cname_proof_zone,
     )
 
 
@@ -124,6 +135,7 @@ def _host_sets(sources: tuple[str, ...]) -> _HostSets:
         routing_target,
         app_hosts,
         reserved_suffixes,
+        cname_proof_zone,
     ) = sources
 
     exact: set[str] = set()
@@ -152,6 +164,8 @@ def _host_sets(sources: tuple[str, ...]) -> _HostSets:
     reserved.update(_list_hosts(mcp_allowed_origins))
     reserved.update(_names(routing_target))
     reserved.update(_names(reserved_suffixes))
+    # #2979: the CNAME targets live in the zone; none of its names is a domain.
+    reserved.update(_names(cname_proof_zone))
     return _HostSets(application=application, reserved=HostSet(zones=frozenset(reserved)))
 
 
@@ -169,7 +183,8 @@ def is_reserved(name: str) -> bool:
 
     Special-use; or equal to or under an application host, the billing
     origin's host, a ``CORS_ORIGINS`` / ``MCP_ALLOWED_ORIGINS`` host, the
-    routing target, or an entry of ``MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES``.
+    routing target, the CNAME proof zone, or an entry of
+    ``MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES``.
     """
     return is_reserved_special_use(name) or _current().reserved.matches(name)
 
@@ -194,6 +209,26 @@ def classify_request_host(host: str) -> RequestHostClass:
 def challenge_record(hostname: str, token: str) -> tuple[str, str]:
     """The TXT record (name, value) that proves control of ``hostname``."""
     return f"{CHALLENGE_LABEL}.{hostname}", f"{CHALLENGE_VALUE_PREFIX}{token}"
+
+
+def cname_proof_label(token: str) -> str:
+    """#2979: the row's CNAME label, derived from its token (pure).
+
+    The first ``CNAME_LABEL_HEX_CHARS`` lower-case hex characters of
+    sha256(``CNAME_LABEL_INPUT_PREFIX`` + token): a valid DNS label that
+    belongs to one claim, like the TXT value. Never stored, never logged.
+    """
+    digest = hashlib.sha256(f"{CNAME_LABEL_INPUT_PREFIX}{token}".encode()).hexdigest()
+    return digest[:CNAME_LABEL_HEX_CHARS]
+
+
+def cname_proof_target(token: str) -> str | None:
+    """#2979: the CNAME target ``<label>.<zone>`` that proves control of the
+    row with ``token``; ``None`` (nothing derived) while the zone is empty."""
+    zone = get_settings().mcp_public_domains_cname_proof_zone
+    if not zone:
+        return None
+    return f"{cname_proof_label(token)}.{zone}"
 
 
 def log_application_hosts() -> None:

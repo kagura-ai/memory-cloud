@@ -1431,6 +1431,17 @@ class Settings(BaseSettings):
         le=50,
         description="Custom domains (pending, active or suspended) per workspace",
     )
+    # #2979: a zone of the operator's own (``*.<zone>`` routes to the TLS
+    # proxy). Set: every claim also gets a row-specific CNAME target
+    # ``<label>.<zone>``, and a CNAME of the name to it proves control as the
+    # TXT record does; names in the zone are reserved. Empty: off.
+    mcp_public_domains_cname_proof_zone: str = Field(
+        default="",
+        description=(
+            "Zone of the row-specific CNAME targets that prove control of a custom "
+            "domain (empty: TXT proof only)"
+        ),
+    )
     # #2941: the bearer credential of the certificate operator's reporter
     # (PUT /internal/public-mcp-domains/tls-observation). Empty: reports are
     # refused (404) and none is shown. Use: openssl rand -hex 32.
@@ -1535,6 +1546,60 @@ class Settings(BaseSettings):
                 raise ValueError("MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES entries must be host names")
             entries.append(name)
         return ",".join(entries)
+
+    @field_validator("mcp_public_domains_cname_proof_zone")
+    @classmethod
+    def _check_public_domains_cname_proof_zone(cls, value: str) -> str:
+        """Empty, or a host name outside the special-use suffixes (normalised)
+        of at most 200 characters, so that ``<32 hex>.<zone>`` stays a valid
+        name (models.public_mcp_domain.CNAME_PROOF_ZONE_MAX_LENGTH)."""
+        if not value.strip():
+            return ""
+        name = normalize_hostname(value)
+        if name is None or is_reserved_special_use(name) or len(name) > 200:
+            raise ValueError(
+                "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE must be a DNS host name (no scheme, "
+                "port or wildcard) of at most 200 characters outside the special-use suffixes"
+            )
+        return name
+
+    @model_validator(mode="after")
+    def _cname_proof_zone_outside_the_application(self) -> "Settings":
+        """The CNAME proof zone is not an application host nor under one.
+
+        Names in the zone are reserved; one that were also an application
+        host would reach the application. Only the variable is named.
+        """
+        zone = self.mcp_public_domains_cname_proof_zone
+        if not zone:
+            return self
+        hosts: list[str] = []
+        for url in (
+            self.frontend_url,
+            os.environ.get("API_URL", ""),
+            self.oidc_issuer,
+            self.kmc_mcp_url,
+        ):
+            url = (url or "").strip()
+            if not url:
+                continue
+            try:
+                host = urlparse(url if "://" in url else f"//{url}").hostname
+            except ValueError:
+                continue
+            name = normalize_hostname(host) if host else None
+            if name is not None:
+                hosts.append(name)
+        hosts.extend(
+            entry.lstrip(".") for entry in self.mcp_public_domains_app_hosts.split(",") if entry
+        )
+        if any(zone == host or zone.endswith("." + host) for host in hosts):
+            raise ValueError(
+                "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE must not be an application host "
+                "(FRONTEND_URL, API_URL, OIDC_ISSUER, KMC_MCP_URL, "
+                "MCP_PUBLIC_DOMAINS_APP_HOSTS) or a name under one"
+            )
+        return self
 
     @model_validator(mode="after")
     def _public_domains_need_a_routing_target(self) -> "Settings":

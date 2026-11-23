@@ -379,6 +379,271 @@ async def test_routing_never_decides_the_proof(dnsmods: SimpleNamespace) -> None
     assert result == adapter.DomainCheck("ok", "unresolved")
 
 
+# --- the CNAME proof (#2979) ---------------------------------------------
+
+ZONE = "proof.example.net"
+CNAME_TARGET = f"{'a1' * 16}.{ZONE}"
+OTHER_TARGET = f"{'b2' * 16}.{ZONE}"
+
+
+async def _check_cname(
+    dnsmods: SimpleNamespace,
+    script: dict[tuple[str, str], Any],
+    *,
+    routing_target: str = TARGET,
+    cname_target: str = CNAME_TARGET,
+) -> tuple[adapter.DomainCheck, FakeResolver]:
+    fake = FakeResolver(dnsmods, script)
+    resolver = adapter.DnsDomainResolver(resolver_factory=lambda: fake)
+    result = await resolver.check(HOST, TOKEN, routing_target, cname_target=cname_target)
+    return result, fake
+
+
+def _cname_to(dnsmods: SimpleNamespace, rdtype: str, target: str) -> Any:
+    """The name's A/AAAA answer through a CNAME to ``target`` (the zone's wildcard)."""
+    record = "A 192.0.2.10" if rdtype == "A" else "AAAA 2001:db8::10"
+    return _answer(
+        dnsmods,
+        HOST,
+        rdtype,
+        f"{HOST}. 300 IN CNAME {target}.",
+        f"{target}. 300 IN {record}",
+    )
+
+
+def _plain(dnsmods: SimpleNamespace, rdtype: str) -> Any:
+    record = "A 198.51.100.7" if rdtype == "A" else "AAAA 2001:db8::7"
+    return _answer(dnsmods, HOST, rdtype, f"{HOST}. 300 IN {record}")
+
+
+async def test_cname_only_proves_control(dnsmods: SimpleNamespace) -> None:
+    script = {
+        (HOST, "A"): _cname_to(dnsmods, "A", CNAME_TARGET),
+        (HOST, "AAAA"): dnsmods.resolver.NoAnswer(),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("ok", "cname")
+
+
+async def test_cname_through_the_wildcard_to_the_routing_target_also_routes(
+    dnsmods: SimpleNamespace,
+) -> None:
+    script = {
+        (HOST, "A"): _answer(
+            dnsmods,
+            HOST,
+            "A",
+            f"{HOST}. 300 IN CNAME {CNAME_TARGET.upper()}.",
+            f"{CNAME_TARGET}. 300 IN CNAME {TARGET}.",
+            f"{TARGET}. 300 IN A 192.0.2.10",
+        ),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert result == adapter.DomainCheck("ok", "ok", "cname")
+
+
+async def test_txt_only_proves_control_with_the_zone_on(dnsmods: SimpleNamespace) -> None:
+    script = {
+        (CHALLENGE_NAME, "TXT"): _txt(dnsmods, f'"{EXPECTED}"'),
+        (HOST, "A"): _plain(dnsmods, "A"),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("ok", "txt")
+
+
+async def test_both_records_are_both(dnsmods: SimpleNamespace) -> None:
+    script = {
+        (CHALLENGE_NAME, "TXT"): _txt(dnsmods, f'"{EXPECTED}"'),
+        (HOST, "A"): _cname_to(dnsmods, "A", CNAME_TARGET),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("ok", "both")
+
+
+async def test_neither_record_is_missing(dnsmods: SimpleNamespace) -> None:
+    script = {(HOST, "A"): _plain(dnsmods, "A"), (HOST, "AAAA"): _plain(dnsmods, "AAAA")}
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("missing", None)
+
+
+async def test_another_rows_target_is_missing(dnsmods: SimpleNamespace) -> None:
+    script = {
+        (HOST, "A"): _cname_to(dnsmods, "A", OTHER_TARGET),
+        (HOST, "AAAA"): _cname_to(dnsmods, "AAAA", OTHER_TARGET),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("missing", None)
+
+
+@pytest.mark.parametrize(
+    ("a", "aaaa"),
+    [
+        pytest.param("nxdomain", "nxdomain", id="nxdomain-both"),
+        pytest.param("noanswer", "nxdomain", id="no-answer-and-nxdomain"),
+        pytest.param("answered", "timeout", id="one-answer-settles-it"),
+        pytest.param("timeout", "nxdomain", id="one-definite-empty-settles-it"),
+        pytest.param("servfail", "answered", id="aaaa-answer-settles-it"),
+    ],
+)
+async def test_one_settled_address_lookup_decides_missing(
+    dnsmods: SimpleNamespace, a: str, aaaa: str
+) -> None:
+    def outcome(kind: str, rdtype: str) -> Any:
+        return {
+            "nxdomain": dnsmods.resolver.NXDOMAIN(),
+            "noanswer": dnsmods.resolver.NoAnswer(),
+            "timeout": dnsmods.resolver.LifetimeTimeout(timeout=3.0, errors=[]),
+            "servfail": dnsmods.resolver.NoNameservers(),
+            "answered": _plain(dnsmods, rdtype),
+        }[kind]
+
+    script = {(HOST, "A"): outcome(a, "A"), (HOST, "AAAA"): outcome(aaaa, "AAAA")}
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("missing", None)
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(lambda d: d.resolver.LifetimeTimeout(timeout=3.0, errors=[]), id="timeout"),
+        pytest.param(lambda d: d.resolver.NoNameservers(), id="servfail"),
+        pytest.param(lambda d: OSError("network unreachable"), id="os-error"),
+    ],
+)
+async def test_no_settled_address_lookup_without_txt_is_unavailable(
+    dnsmods: SimpleNamespace, make_error
+) -> None:
+    script = {(HOST, "A"): make_error(dnsmods), (HOST, "AAAA"): make_error(dnsmods)}
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("unavailable", None)
+
+
+async def test_txt_ok_wins_over_an_indeterminate_cname_lookup(dnsmods: SimpleNamespace) -> None:
+    timeout = dnsmods.resolver.LifetimeTimeout(timeout=3.0, errors=[])
+    script = {
+        (CHALLENGE_NAME, "TXT"): _txt(dnsmods, f'"{EXPECTED}"'),
+        (HOST, "A"): timeout,
+        (HOST, "AAAA"): timeout,
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("ok", "txt")
+
+
+async def test_cname_ok_wins_over_an_indeterminate_txt_lookup(dnsmods: SimpleNamespace) -> None:
+    script = {
+        (CHALLENGE_NAME, "TXT"): dnsmods.resolver.NoNameservers(),
+        (HOST, "A"): _cname_to(dnsmods, "A", CNAME_TARGET),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("ok", "cname")
+
+
+async def test_an_indeterminate_txt_lookup_and_a_missing_cname_is_unavailable(
+    dnsmods: SimpleNamespace,
+) -> None:
+    script = {
+        (CHALLENGE_NAME, "TXT"): dnsmods.resolver.NoNameservers(),
+        (HOST, "A"): _plain(dnsmods, "A"),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("unavailable", None)
+
+
+async def test_the_cname_part_reuses_the_routing_lookup_of_the_name(
+    dnsmods: SimpleNamespace,
+) -> None:
+    """With a routing target the name's A and AAAA are asked once each, as
+    without the zone: the CNAME proof reads the same answers."""
+    script = {
+        (HOST, "A"): _cname_to(dnsmods, "A", CNAME_TARGET),
+        (TARGET, "A"): _answer(dnsmods, TARGET, "A", f"{TARGET}. 300 IN A 192.0.2.99"),
+    }
+
+    _, with_zone = await _check_cname(dnsmods, script)
+    _, without_zone = await _check(dnsmods, script)
+
+    assert sorted(c[:2] for c in with_zone.calls) == sorted(c[:2] for c in without_zone.calls)
+    assert sorted(c[:2] for c in with_zone.calls) == [
+        (CHALLENGE_NAME, "TXT"),
+        (TARGET, "A"),
+        (TARGET, "AAAA"),
+        (HOST, "A"),
+        (HOST, "AAAA"),
+    ]
+
+
+async def test_without_a_routing_target_the_name_is_still_asked(
+    dnsmods: SimpleNamespace,
+) -> None:
+    script = {(HOST, "A"): _cname_to(dnsmods, "A", CNAME_TARGET)}
+
+    result, fake = await _check_cname(dnsmods, script, routing_target="")
+
+    assert result == adapter.DomainCheck("ok", "unresolved", "cname")
+    assert sorted(c[:2] for c in fake.calls) == [
+        (CHALLENGE_NAME, "TXT"),
+        (HOST, "A"),
+        (HOST, "AAAA"),
+    ]
+
+
+async def test_without_a_cname_target_the_check_is_the_txt_check(
+    dnsmods: SimpleNamespace,
+) -> None:
+    """The zone off: no third field, and the calls of today."""
+    script = _routed(dnsmods)
+    script[(CHALLENGE_NAME, "TXT")] = _txt(dnsmods, f'"{EXPECTED}"')
+
+    result, fake = await _check(dnsmods, script)
+
+    assert result == adapter.DomainCheck("ok", "ok")
+    assert result.proof_via is None
+    _, no_target = await _check(dnsmods, script, routing_target="")
+    assert {call[0] for call in no_target.calls} == {CHALLENGE_NAME}
+    _, explicit_none = await _check_cname(dnsmods, script, cname_target=None)  # type: ignore[arg-type]
+    assert explicit_none.calls == fake.calls
+
+
+@pytest.mark.parametrize(
+    ("txt", "cname", "expected"),
+    [
+        ("ok", "ok", ("ok", "both")),
+        ("ok", "missing", ("ok", "txt")),
+        ("ok", "unavailable", ("ok", "txt")),
+        ("missing", "ok", ("ok", "cname")),
+        ("unavailable", "ok", ("ok", "cname")),
+        ("missing", "missing", ("missing", None)),
+        ("missing", "unavailable", ("unavailable", None)),
+        ("unavailable", "missing", ("unavailable", None)),
+        ("unavailable", "unavailable", ("unavailable", None)),
+    ],
+)
+def test_combine_proof(txt: str, cname: str, expected: tuple[str, str | None]) -> None:
+    assert adapter.combine_proof(txt, cname) == expected  # type: ignore[arg-type]
+
+
 # --- the default resolver ------------------------------------------------
 
 

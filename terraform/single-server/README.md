@@ -504,7 +504,9 @@ Two registry-mode guards worth knowing about, because both protect against a
 
 A workspace owner can serve a published public MCP endpoint under a host
 name they control, as `https://<their name>/mcp`, once they have proved
-control of the name with a DNS TXT record. The application side (states,
+control of the name with a DNS TXT record or, with the optional CNAME proof
+zone (step 3 below), with the one CNAME that also routes the name. The
+application side (states,
 proof, the right to use it, limits, API, settings) is described in
 [`docs/public-mcp-domains.md`](../../docs/public-mcp-domains.md). This section
 covers the proxy: certificates for those names, and routing them.
@@ -547,14 +549,29 @@ marker lines.
    **DNS only** (grey cloud: not proxied by Cloudflare, which holds no
    certificate for your customers' names). Owners point their names at it
    with a `CNAME`.
-3. Open 443 to everyone (next paragraph).
-4. Set the `MCP_PUBLIC_DOMAINS_*` settings in `.env.prod` (commented in
+3. Optional, one record per customer name (#2979): pick a zone used for
+   nothing else, for example `domains-proof.example.com`, and create the
+   wildcard record `*.domains-proof.example.com`, **DNS only**, as an `A`
+   record with the VM's address or a `CNAME` to the routing target of step 2.
+   With `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` set to the zone, every claim
+   gets its own CNAME target in it (`verification.cname_target`), and a
+   `CNAME` of the customer name to that target both routes the name and
+   proves control; the TXT record stays the way for a zone apex. The names
+   of the zone are never claimable and never get a certificate: the
+   permission path answers 404 for them, so `Caddyfile.tpl` is unchanged.
+   The setting needs the migration `f60_2979_domain_proof_via` (run by
+   `./scripts/deploy.sh` before the new code). Emptying or changing the zone
+   later makes every CNAME-only name lose its proof (suspended after 3
+   absences and 72 hours): have their owners publish the TXT record first.
+4. Open 443 to everyone (next paragraph).
+5. Set the `MCP_PUBLIC_DOMAINS_*` settings in `.env.prod` (commented in
    `.env.prod.example`): `MCP_PUBLIC_DOMAINS_ROUTING_TARGET` to the record of
    step 2, `MCP_PUBLIC_DOMAINS_APP_HOSTS` to every further name the API is
-   reached under, `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` to your own domain.
+   reached under, `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` to your own domain,
+   and, for step 3, `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`.
    Confirm that a scheduler leader runs: without the periodic check every
    alias stops when its 72-hour lease passes.
-5. Switch the feature on (`MCP_PUBLIC_DOMAINS_ENABLED=true`,
+6. Switch the feature on (`MCP_PUBLIC_DOMAINS_ENABLED=true`,
    `./scripts/deploy.sh`), **then** enable the proxy part below: the reverse
    of the stop order. (A new name gets no certificate while the switch is
    off, because the permission path answers 404 then, but a name whose

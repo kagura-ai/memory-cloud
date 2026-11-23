@@ -4308,7 +4308,9 @@ Every request re-checks the publication with one indexed query (nothing is cache
 
 A workspace owner can serve a published public MCP endpoint under a host name
 they control, as `https://<host>/mcp`, after proving control of the name with
-a DNS TXT record. The alias serves the same endpoint, sessions, limits, usage
+a DNS TXT record or, where `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` is set, with
+one CNAME record to the claim's own target that also routes the name
+([#2979](https://github.com/kagura-ai/memory-cloud/issues/2979)). The alias serves the same endpoint, sessions, limits, usage
 budget and usage events as `/mcp/public/<public_id>`. Contract (states, DNS
 records, Host rules, right and lease, cooldown, limits, owner API, permission
 call, job, CLI, data lifecycle, log events):
@@ -4325,6 +4327,7 @@ call, job, CLI, data lifecycle, log events):
 | `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES` | *(empty)* | Names never claimable, nor any name under them, comma-separated. Refused on the request path from the first request after a restart; the next check suspends a domain under them (`reserved`). |
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | `0`–`2160`. Hours a released name stays closed to other workspaces (the releasing workspace may take it back at once). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | `1`–`50`. Domains (`pending`, `active`, `suspended`) per workspace; one per publication in any case. |
+| `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` | *(empty)* | [#2979](https://github.com/kagura-ai/memory-cloud/issues/2979). A zone of your own, for example `domains-proof.example.com`, with a wildcard record `*.<zone>` that reaches the TLS proxy (DNS only). Set: every claim also gets a row-specific CNAME target `<label>.<zone>` (`verification.cname_target`), and a CNAME of the name to it proves control as the TXT record does; the check records which record proved it (`last_check.proof`); names in the zone are never claimable. Empty: off, every answer and lookup as before. A host name outside the special-use suffixes, at most 200 characters, not an application host nor under one; otherwise start-up refuses. Needs the revision `f60_2979_domain_proof_via`. Emptying or changing it makes every CNAME-only domain `missing` (suspended after the usual grace): have their owners publish the TXT record first. See "The CNAME proof" in [Public MCP custom domains](public-mcp-domains.md). |
 | `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ([#2941](https://github.com/kagura-ai/memory-cloud/issues/2941), "Edge certificate reports" in [Public MCP custom domains](public-mcp-domains.md)). Empty: every report is refused (`404`), no statement runs on `public_mcp_domain_tls_reports` and every certificate is `unreported`. Set (with both switches on): reports are accepted and shown. Apply the revision `f58_2941_domain_tls_reports` before setting it and empty it before downgrading the revision (with the credential set and the table missing, the report route and the owner observation of a live domain answer errors, and the domain maintenance pass logs `public_mcp_domain_tls_report_purge_failed` each run). Once it is emptied, stored reports are neither shown nor deleted; clear them with `DELETE FROM public_mcp_domain_tls_reports;`. A value with a blank refuses start-up; under `ENVIRONMENT=production` it must be at least 32 characters and differ from the system-admin, billing and worker service credentials. Never logged. |
 
 A malformed host name in the routing target, an application host or a
@@ -4375,7 +4378,10 @@ the application hosts (a warning when the list is empty).
 3. Put your own registrable domain and sibling hosts in
    `MCP_PUBLIC_DOMAINS_RESERVED_SUFFIXES`.
 4. Create the routing target record (it must reach the TLS proxy directly) and
-   set `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`.
+   set `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`. Optionally (#2979) create a
+   wildcard record `*.<zone>` for a zone used for nothing else and set
+   `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`, so that one CNAME both routes and
+   proves a name.
 5. Check that the API container's resolver configuration (`/etc/resolv.conf`)
    reaches a recursive resolver you trust. The application reads DNS through
    it only, with no cache of its own, and does not validate DNSSEC. The new
