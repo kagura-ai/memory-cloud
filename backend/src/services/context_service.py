@@ -708,6 +708,7 @@ class ContextService:
             ExportedSearchConfig,
         )
         from services.permission_service import PermissionService
+        from services.search_service import stored_fusion
 
         ctx = await PermissionService(self.db).resolve_context_for_workspace_read(
             user_id=user_id,
@@ -755,6 +756,7 @@ class ContextService:
                 reinforce_max_boost=float(cfg.reinforce_max_boost),
                 reinforce_require_host_arbitration=cfg.reinforce_require_host_arbitration,
                 routing_mode=cfg.routing_mode,
+                fusion=stored_fusion(cfg),
                 content_chunks_enabled=cfg.content_chunks_enabled,
                 llm_selector_enabled=cfg.llm_selector_enabled,
             )

@@ -56,6 +56,7 @@ import {
   getContextSearchConfig,
   updateContextSearchConfig,
   type ContentChunksDisabledReason,
+  type ContextFusion,
   type ContextSearchConfig,
   type ContextSearchConfigUpdate,
   type LlmSelectorDisabledReason,
@@ -104,8 +105,9 @@ const SELF_HOSTED_MODELS = [
 
 /**
  * The fields the save bar stages (#2159). The content chunk and LLM selector
- * switches are not among them: they save as soon as they are confirmed. These
- * six are also the fields the PUT body requires.
+ * switches are not among them: they save as soon as they are confirmed. The
+ * first six are also the fields the PUT body requires; `fusion` (#2980) is
+ * optional on the server and sent only when it changed.
  */
 const STAGED_FIELDS = [
   "semantic_weight",
@@ -114,6 +116,7 @@ const STAGED_FIELDS = [
   "use_rerank",
   "reranker_provider",
   "reranker_model",
+  "fusion",
 ] as const;
 type StagedField = (typeof STAGED_FIELDS)[number];
 type StagedEdits = Partial<Pick<ContextSearchConfigUpdate, StagedField>>;
@@ -200,6 +203,7 @@ export function SearchSettingsSection({
     key === "bm25_weight" ? differs("semantic_weight") : differs(key),
   );
   const isDirty = dirtyFields.length > 0;
+  const fusionDirty = dirtyFields.includes("fusion");
 
   const providerLabel = (provider: string) =>
     provider === "voyage"
@@ -284,8 +288,10 @@ export function SearchSettingsSection({
       setSaving(true);
       setError(null);
 
-      // The six staged fields only: the content chunk and LLM selector flags
+      // The six required fields: the content chunk and LLM selector flags
       // are optional on the server and saved by their own switches (#2159).
+      // #2980: the fusion only when it changed (a backend that predates it
+      // never reports one, so nothing is sent there).
       const updateData: ContextSearchConfigUpdate = {
         semantic_weight: editedConfig.semantic_weight ?? config.semantic_weight,
         bm25_weight: editedConfig.bm25_weight ?? config.bm25_weight,
@@ -294,6 +300,11 @@ export function SearchSettingsSection({
         reranker_provider:
           editedConfig.reranker_provider ?? config.reranker_provider,
         reranker_model: editedConfig.reranker_model ?? config.reranker_model,
+        ...(config.fusion !== undefined &&
+        editedConfig.fusion !== undefined &&
+        editedConfig.fusion !== config.fusion
+          ? { fusion: editedConfig.fusion }
+          : {}),
       };
 
       await updateContextSearchConfig(contextId, updateData);
@@ -635,7 +646,22 @@ export function SearchSettingsSection({
     ...(weightsDirty ? [t("unsavedFieldSemanticWeight")] : []),
     ...(fetchFactorDirty ? [t("unsavedFieldFetchFactor")] : []),
     ...(rerankerDirty ? [t("unsavedFieldReranker")] : []),
+    ...(fusionDirty ? [t("unsavedFieldFusion")] : []),
   ];
+  // #2980: what `auto` resolves to now (server-computed for the stored
+  // config), named only while the stored choice is auto.
+  const effectiveFusionLabel =
+    config?.fusion_effective === "rrf"
+      ? t("fusion.effectiveRrf")
+      : config?.fusion_effective === "keyword_floor"
+        ? t("fusion.effectiveKeywordFloor")
+        : config?.fusion_effective === "weighted"
+          ? t("fusion.effectiveWeighted")
+          : null;
+  const autoFusionLabel =
+    config?.fusion === "auto" && effectiveFusionLabel !== null
+      ? t("fusion.autoCurrent", { effective: effectiveFusionLabel })
+      : t("fusion.auto");
   const unsavedBadge = (
     <Badge
       variant="outline"
@@ -701,7 +727,8 @@ export function SearchSettingsSection({
             <CardTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
               {t("hybridSearchWeights")}
-              {(weightsDirty || fetchFactorDirty) && unsavedBadge}
+              {(weightsDirty || fetchFactorDirty || fusionDirty) &&
+                unsavedBadge}
             </CardTitle>
             <CardDescription>{t("hybridSearchWeightsDesc")}</CardDescription>
           </CardHeader>
@@ -748,6 +775,42 @@ export function SearchSettingsSection({
                 {t("bm25WeightDesc")}
               </p>
             </div>
+
+            {/* #2980: shown only by a backend that reports the setting. */}
+            {config?.fusion !== undefined && (
+              <div className="space-y-3">
+                <Label htmlFor="fusion">{t("fusion.label")}</Label>
+                <Select
+                  value={getCurrentValue("fusion")}
+                  onValueChange={(value) =>
+                    setEditedConfig({
+                      ...editedConfig,
+                      fusion: value as ContextFusion,
+                    })
+                  }
+                >
+                  <SelectTrigger id="fusion">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">{autoFusionLabel}</SelectItem>
+                    <SelectItem value="rrf">{t("fusion.rrf")}</SelectItem>
+                    <SelectItem value="weighted">
+                      {t("fusion.weighted")}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-sm text-muted-foreground">
+                  {t("fusion.description")}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {t("fusion.guidance")}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t("fusion.autoDesc")}
+                </p>
+              </div>
+            )}
 
             <div className="space-y-3">
               <div className="flex items-center justify-between">

@@ -1075,6 +1075,8 @@ class ExportedSearchConfig(BaseModel):
     reinforce_require_host_arbitration: bool = False
     # #1212: default keeps pre-routing exports parseable.
     routing_mode: str = "off"
+    # #2980: default keeps older exports parseable.
+    fusion: str = "auto"
     # #2015: default keeps older exports parseable.
     content_chunks_enabled: bool = False
     # #2144: the recall LLM selector opt-in, like the chunk one.
@@ -1886,6 +1888,22 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
         default="off",
         description="Query-intent router: off | log_only (telemetry only) | active (opt-in)",
     )
+    # Issue #2980: the stored fusion choice and, server-computed, the one used.
+    fusion: Literal["auto", "rrf", "weighted"] = Field(
+        default="auto",
+        description=(
+            "How a hybrid search fuses its semantic and keyword legs: auto (weighted "
+            "when the weights differ from 0.6 / 0.4, else the deployment's "
+            "HYBRID_FUSION), rrf, or weighted"
+        ),
+    )
+    fusion_effective: Literal["weighted", "rrf", "keyword_floor"] = Field(
+        default="weighted",
+        description=(
+            "The fusion a hybrid search of this context uses now: fusion resolved "
+            "against the weights and the deployment's HYBRID_FUSION"
+        ),
+    )
     # Issue #2015: content chunk vectors opt-in.
     content_chunks_enabled: bool = Field(
         default=False, description="Embed long content as chunk vectors for dense retrieval"
@@ -2067,6 +2085,15 @@ class ContextSearchConfigUpdate(BaseModel):
         pattern="^(off|log_only|active)$",
         description="Query-intent router: off | log_only (stamp telemetry, zero "
         "ranking change) | active (routed lane used only when search_mode is omitted)",
+    )
+    # Issue #2980: optional (default-preserving via exclude_unset in the repo).
+    fusion: Literal["auto", "rrf", "weighted"] = Field(
+        default="auto",
+        description="How a hybrid search fuses its semantic and keyword legs. auto "
+        "(default): weighted when semantic_weight / bm25_weight differ from 0.6 / 0.4, "
+        "else the deployment's HYBRID_FUSION. rrf: reciprocal rank fusion, the "
+        "weights unused (suits conversation and work history). weighted: the "
+        "weighted blend (suits documents and manuals, with a higher semantic_weight)",
     )
     # Issue #2015: optional (default-preserving via exclude_unset in the repo).
     content_chunks_enabled: bool = Field(

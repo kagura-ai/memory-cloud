@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import Settings, get_settings
 from models.config import (
+    DEFAULT_BM25_WEIGHT,
+    DEFAULT_SEMANTIC_WEIGHT,
     ROUTER_CALIBRATION_SOURCE_FROZEN,
     ContextSearchConfig,
     RouterCalibration,
@@ -398,8 +400,8 @@ class ContextSearchConfigRepository:
             {"llm_selector_enabled": False} if reset_llm_selector else {}
         )
         defaults = ContextSearchConfigUpdate(
-            semantic_weight=0.6,
-            bm25_weight=0.4,
+            semantic_weight=DEFAULT_SEMANTIC_WEIGHT,
+            bm25_weight=DEFAULT_BM25_WEIGHT,
             fetch_factor=3,
             # #1572: "reset" means the DEPLOYMENT default — the same reranker
             # values create_context writes — not the code default.
@@ -411,6 +413,8 @@ class ContextSearchConfigRepository:
             reinforce_enabled=True,
             reinforce_max_boost=0.15,
             reinforce_require_host_arbitration=False,
+            # #2980: explicit for the same reason.
+            fusion="auto",
             **chunk_reset,
             **selector_reset,
         )

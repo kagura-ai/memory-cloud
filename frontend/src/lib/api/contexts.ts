@@ -201,6 +201,12 @@ export interface ContextSearchConfig {
   /** The caller may change the flag: the context owner or a workspace
    * owner/admin, and to turn it on, the plan's feature and a free slot. */
   llm_selector_can_change?: boolean;
+  // #2980: the context's hybrid fusion. Optional — a backend predating it
+  // omits both, and the control is then hidden (nothing is sent).
+  /** The STORED choice: auto, rrf or weighted. */
+  fusion?: ContextFusion;
+  /** The fusion a hybrid search of this context uses now (auto resolved). */
+  fusion_effective?: EffectiveFusion;
   created_at: string;
   updated_at: string;
 }
@@ -211,6 +217,12 @@ export type ContentChunksDisabledReason =
 
 /** Why the LLM selector toggle cannot be turned on, or the selector is inactive. */
 export type LlmSelectorDisabledReason = "permission" | "plan" | "cap";
+
+/** #2980: a context's fusion setting. */
+export type ContextFusion = "auto" | "rrf" | "weighted";
+
+/** #2980: the fusion a hybrid search uses (keyword_floor only via auto). */
+export type EffectiveFusion = "weighted" | "rrf" | "keyword_floor";
 
 export interface ContextSearchConfigUpdate {
   semantic_weight: number;
@@ -223,6 +235,8 @@ export interface ContextSearchConfigUpdate {
   content_chunks_enabled?: boolean;
   /** #2144: sent only when the user changed it (optional on the server). */
   llm_selector_enabled?: boolean;
+  /** #2980: sent only when the server reports it (optional on the server). */
+  fusion?: ContextFusion;
 }
 
 /**

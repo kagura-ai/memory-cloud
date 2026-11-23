@@ -1786,8 +1786,9 @@ class Settings(BaseSettings):
         ),
     )
     # Issue #2958: how a hybrid search fuses its semantic and keyword legs.
-    # Deployment-wide (no per-context knob). ``weighted`` is the fusion every
-    # earlier release ran and stays the default.
+    # The deployment default: a context whose ``fusion`` setting is ``auto``
+    # (#2980) and whose weights are the defaults follows it. ``weighted`` is
+    # the fusion every earlier release ran and stays the default.
     hybrid_fusion: Literal["weighted", "rrf", "keyword_floor"] = Field(
         default="weighted",
         description=(
@@ -1799,7 +1800,10 @@ class Settings(BaseSettings):
             "hit j sits at position <= 2j on the returned page unless a reranker "
             "scored the list (the last ordering step before the page is cut; only a "
             "selection plan orders after it); no score changes. With 'rrf' / 'keyword_floor' the "
-            "rerank pool holds the fused head and the keyword leg's top hits."
+            "rerank pool holds the fused head and the keyword leg's top hits. "
+            "Issue #2980: the deployment default. A context's fusion setting 'rrf' "
+            "or 'weighted' wins over it; 'auto' (default) follows it while the "
+            "context's weights are 0.6 / 0.4 and uses 'weighted' otherwise."
         ),
     )
 

@@ -4498,7 +4498,7 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ENABLE_RERANKING` | `true` | Deployment kill switch. `false` ⇒ no context reranks; `/system/info` reports `features.reranking=false` and the web UI hides the reranker card from the context search settings. |
-| `HYBRID_FUSION` | `weighted` | How a hybrid recall fuses its semantic and keyword legs, for the whole deployment: `weighted` \| `rrf` \| `keyword_floor` (case-insensitive; empty ⇒ `weighted`; any other value refuses start-up). See [Hybrid fusion](#hybrid-fusion--issue-2958). |
+| `HYBRID_FUSION` | `weighted` | How a hybrid recall fuses its semantic and keyword legs: the deployment default, which a context's `fusion` setting `auto` follows while the context's weights are 0.6 / 0.4: `weighted` \| `rrf` \| `keyword_floor` (case-insensitive; empty ⇒ `weighted`; any other value refuses start-up). See [Hybrid fusion](#hybrid-fusion--issue-2958). |
 | `DEFAULT_RERANKER_PROVIDER` | `voyage` | `voyage` \| `cohere` \| `self_hosted`. Written to **new** context search configs. |
 | `DEFAULT_USE_RERANK` | `false` | `use_rerank` written to new context search configs. `true` with `self_hosted` requires `RERANK_BASE_URL` or `SELF_HOSTED_BASE_URL`, else the API refuses to start. |
 | `DEFAULT_RERANKER_MODEL` | — | Model written to new configs. Empty ⇒ the provider's default (`rerank-2`, `rerank-multilingual-v3.0`, or for `self_hosted` `RERANK_MODEL` when `RERANK_BASE_URL` is set, else `SELF_HOSTED_RERANK_MODEL`). For voyage/cohere it must be a model the UI offers. |
@@ -4521,8 +4521,23 @@ content_chunks_enabled}` — names only, never URLs or keys.
 ### Hybrid fusion — Issue #2958
 
 `HYBRID_FUSION` picks how a hybrid recall (`search_mode="hybrid"`) combines its
-two legs. It applies to the whole deployment (there is no per-context setting)
-and to every caller: MCP and REST recall, public search and the public MCP tools.
+two legs by default, for every caller: MCP and REST recall, public search and the
+public MCP tools.
+
+Each context has its own `fusion` search setting (#2980; REST search-config
+routes, MCP `update_search_config`, the Web UI's search settings): `auto`
+(default), `rrf` or `weighted`.
+
+- `rrf` / `weighted`: that fusion for this context, whatever `HYBRID_FUSION` says.
+- `auto`: `weighted` when the context's `semantic_weight` / `bm25_weight` differ
+  from 0.6 / 0.4 (compared at two decimal places), otherwise `HYBRID_FUSION`. A
+  context whose owner tuned the weights keeps them on a deployment that runs
+  `rrf`; `keyword_floor` is reached only through `auto` with the default weights.
+
+Existing contexts read `auto`, so with `HYBRID_FUSION=weighted` (the default)
+nothing changes. A recall over several contexts (`context_ids`) uses the first
+context's setting, as it does for the weights. The search-config answers carry
+`fusion_effective`, the fusion the context's hybrid recall uses now.
 
 - `weighted` (default, the fusion of every earlier release): each leg's scores
   are divided by that leg's top score and summed with the context's
@@ -4555,7 +4570,8 @@ leg fails still answers from the keyword leg alone (#1515). The recall
 every mode whenever the semantic leg returns rows; without them it falls back
 to the fused scores.
 
-The `recall_completed` log line carries `fusion` (this setting) and
+The `recall_completed` log line carries `fusion` (the fusion the recall used,
+resolved from the context's setting; `HYBRID_FUSION` when no search ran) and
 `leg_ranks`: for each result of the page, in page order, its rank in the
 semantic and in the keyword leg (`null` where that leg did not return it).
 

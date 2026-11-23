@@ -1148,11 +1148,11 @@ Returns: {status, message, merged, source_id, target_id, delete_source}. source_
         # =================================================================
         {
             "name": "update_search_config",
-            "description": """Tune a context's search: hybrid weights, reranker, reinforce re-rank and query routing. Context owner or editor only (changing content_chunks_enabled or llm_selector_enabled: context owner or workspace owner/admin). semantic_weight + bm25_weight must sum to 1.0; a recall() that omits use_rerank follows this context's use_rerank.
+            "description": """Tune a context's search: hybrid weights and fusion, reranker, reinforce re-rank and query routing. Context owner or editor only (changing content_chunks_enabled or llm_selector_enabled: context owner or workspace owner/admin). semantic_weight + bm25_weight must sum to 1.0; a recall() that omits use_rerank follows this context's use_rerank.
 
 Example (keyless local reranking): use_rerank=true, reranker_provider='self_hosted' — reranker_model may be omitted.
 
-Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode, content_chunks_enabled, content_chunks_effective, llm_selector_enabled, llm_selector_effective}}.""",
+Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode, fusion, fusion_effective, content_chunks_enabled, content_chunks_effective, llm_selector_enabled, llm_selector_effective}}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1169,6 +1169,11 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     "bm25_weight": {
                         "type": "number",
                         "description": "BM25 (keyword) weight, 0.0-1.0 (default 0.4).",
+                    },
+                    "fusion": {
+                        "type": "string",
+                        "enum": ["auto", "rrf", "weighted"],
+                        "description": "How hybrid recall fuses the two legs. 'auto' (default): 'weighted' if the weights are not 0.6/0.4, else the deployment's. 'rrf' suits conversation and work history; 'weighted' with a higher semantic_weight suits documents and manuals.",
                     },
                     "fetch_factor": {
                         "type": "integer",

@@ -35,6 +35,14 @@ ROUTER_CALIBRATION_ARMS = ("keyword", "semantic", "hybrid", "routed")
 ROUTER_CALIBRATION_SOURCE_FROZEN = "frozen_corpus"
 ROUTER_CALIBRATION_SOURCE_LIVE = "live_traffic"
 
+# Issue #2980: the hybrid weights a context starts with. ``fusion='auto'``
+# compares a context's weights (rounded to two places) against these.
+DEFAULT_SEMANTIC_WEIGHT = 0.6
+DEFAULT_BM25_WEIGHT = 0.4
+
+# Issue #2980: the stored values of ``ContextSearchConfig.fusion``.
+CONTEXT_FUSION_VALUES = ("auto", "rrf", "weighted")
+
 
 class ConfigOverride(Base):
     """Runtime configuration override.
@@ -75,6 +83,8 @@ class ContextSearchConfig(Base):
         use_rerank: Enable/disable reranking
         reranker_provider: Reranker provider ('voyage', 'cohere', or 'self_hosted')
         reranker_model: Provider-specific model name
+        fusion: How a hybrid search fuses its two legs: 'auto' (default),
+            'rrf' or 'weighted' (Issue #2980)
         created_at: Creation timestamp
         updated_at: Last update timestamp
     """
@@ -149,6 +159,15 @@ class ContextSearchConfig(Base):
     # the router beating semantic-only — the same bar hybrid failed (#1212).
     routing_mode: Mapped[str] = mapped_column(
         String(10), nullable=False, server_default="off", default="off"
+    )
+
+    # Issue #2980: how a hybrid search fuses its semantic and keyword legs.
+    # 'auto' (default): 'weighted' when the weights differ from 0.6 / 0.4,
+    # otherwise the deployment's HYBRID_FUSION; 'rrf' / 'weighted' win over
+    # both (services.search_service.resolve_fusion). String(20) leaves room
+    # for another value without widening the column.
+    fusion: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="auto", default="auto"
     )
 
     # Issue #2015: give dense retrieval a view of content. When true, a long
@@ -238,6 +257,10 @@ class ContextSearchConfig(Base):
         CheckConstraint(
             "routing_mode IN ('off', 'log_only', 'active')",
             name="routing_mode_check",
+        ),
+        CheckConstraint(
+            "fusion IN ('auto', 'rrf', 'weighted')",
+            name="fusion_check",
         ),
         # Issue #2107: the reconciler reads only the contexts with a gap.
         Index(

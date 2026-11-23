@@ -142,6 +142,7 @@ async def _search(
     keyword=None,
     semantic_error: Exception | None = None,
     use_rerank: bool | None = None,
+    timings=None,
 ) -> list[dict]:
     service._get_search_config = AsyncMock(return_value=config or _config())
     ctx_svc = MagicMock()
@@ -169,6 +170,7 @@ async def _search(
             context_id=_CTX,
             k=k,
             use_rerank=use_rerank,
+            timings=timings,
         )
 
 
@@ -283,6 +285,8 @@ class TestRRF:
         use_fusion("rrf")
         heavy = _config()
         heavy.semantic_weight, heavy.bm25_weight = 0.95, 0.05
+        # #2980: tuned weights under ``auto`` mean weighted; rrf is explicit here.
+        heavy.fusion = "rrf"
         rows = await _search(_service(), k=8, config=heavy)
         assert _ids(rows) == ["A", "K", "B", "C", "Z", "D", "E", "F"]
 
@@ -590,3 +594,195 @@ class TestLegRanks:
         service.reranker_service.rerank = AsyncMock(side_effect=_reverse)
         rows = await _search(service, k=2, config=_config(True), use_rerank=None)
         assert all("semantic_rank" in r and "keyword_rank" in r for r in rows)
+
+
+# --- #2980: the context's fusion setting -------------------------------------------
+
+_WEIGHTED_ORDER = ["A", "B", "C", "D", "E", "F", "K", "Z"]
+_RRF_ORDER = ["A", "K", "B", "C", "Z", "D", "E", "F"]
+
+
+def _ctx(fusion=None, *, semantic=0.6, bm25=0.4, use_rerank: bool = False):
+    """A duck-typed context config; ``fusion=None`` leaves the attribute out."""
+    cfg = _config(use_rerank)
+    cfg.semantic_weight, cfg.bm25_weight = semantic, bm25
+    if fusion is not None:
+        cfg.fusion = fusion
+    return cfg
+
+
+class TestResolveFusion:
+    """``resolve_fusion(config, deployment)``: explicit rrf / weighted win;
+    otherwise weighted when the weights differ from 0.6 / 0.4, else the
+    deployment's HYBRID_FUSION."""
+
+    @pytest.mark.parametrize("deployment", ["weighted", "rrf", "keyword_floor"])
+    @pytest.mark.parametrize("weights", [(0.6, 0.4), (0.7, 0.3)])
+    @pytest.mark.parametrize("explicit", ["rrf", "weighted"])
+    def test_an_explicit_value_wins_over_deployment_and_weights(
+        self, deployment, weights, explicit
+    ):
+        from services.search_service import resolve_fusion
+
+        cfg = _ctx(explicit, semantic=weights[0], bm25=weights[1])
+        assert resolve_fusion(cfg, deployment) == explicit
+
+    @pytest.mark.parametrize("deployment", ["weighted", "rrf", "keyword_floor"])
+    def test_auto_with_default_weights_follows_the_deployment(self, deployment):
+        from services.search_service import resolve_fusion
+
+        assert resolve_fusion(_ctx("auto"), deployment) == deployment
+
+    @pytest.mark.parametrize("deployment", ["weighted", "rrf", "keyword_floor"])
+    @pytest.mark.parametrize("weights", [(0.7, 0.3), (0.5, 0.5), (0.61, 0.39), (1.0, 0.0)])
+    def test_auto_with_tuned_weights_is_weighted(self, deployment, weights):
+        from services.search_service import resolve_fusion
+
+        cfg = _ctx("auto", semantic=weights[0], bm25=weights[1])
+        assert resolve_fusion(cfg, deployment) == "weighted"
+
+    @pytest.mark.parametrize(
+        ("semantic", "bm25", "expected"),
+        [
+            (Decimal("0.60"), Decimal("0.40"), "rrf"),
+            (Decimal("0.6"), Decimal("0.4"), "rrf"),
+            (Decimal("0.70"), Decimal("0.30"), "weighted"),
+            (0.6000001, 0.3999999, "rrf"),
+            (0.6, 0.4, "rrf"),
+        ],
+    )
+    def test_decimal_and_float_weights_compare_rounded(self, semantic, bm25, expected):
+        from services.search_service import resolve_fusion
+
+        assert resolve_fusion(_ctx("auto", semantic=semantic, bm25=bm25), "rrf") == expected
+
+    @pytest.mark.parametrize("deployment", ["weighted", "rrf", "keyword_floor"])
+    def test_a_missing_fusion_attribute_reads_as_auto(self, deployment):
+        from services.search_service import resolve_fusion
+
+        assert resolve_fusion(_ctx(), deployment) == deployment
+        assert resolve_fusion(_ctx(semantic=0.8, bm25=0.2), deployment) == "weighted"
+
+    @pytest.mark.parametrize("value", ["keyword_floor", "RRF", "", None, 3, MagicMock()])
+    def test_anything_else_reads_as_auto(self, value):
+        from services.search_service import resolve_fusion
+
+        cfg = _ctx()
+        cfg.fusion = value
+        assert resolve_fusion(cfg, "keyword_floor") == "keyword_floor"
+
+    def test_no_config_or_no_weights_follows_the_deployment(self):
+        from types import SimpleNamespace
+
+        from services.search_service import resolve_fusion
+
+        assert resolve_fusion(None, "rrf") == "rrf"
+        assert resolve_fusion(SimpleNamespace(routing_mode="off"), "rrf") == "rrf"
+        assert resolve_fusion(SimpleNamespace(fusion="auto", semantic_weight=0.6), "rrf") == "rrf"
+        # Weights that are not numbers never raise: they count as the defaults.
+        odd = SimpleNamespace(fusion="auto", semantic_weight="x", bm25_weight=MagicMock())
+        assert resolve_fusion(odd, "rrf") == "rrf"
+
+    def test_stored_fusion_is_the_stored_choice_or_auto(self):
+        from types import SimpleNamespace
+
+        from services.search_service import stored_fusion
+
+        assert stored_fusion(SimpleNamespace(fusion="rrf")) == "rrf"
+        assert stored_fusion(SimpleNamespace(fusion="weighted")) == "weighted"
+        assert stored_fusion(SimpleNamespace(fusion="auto")) == "auto"
+        assert stored_fusion(SimpleNamespace()) == "auto"
+        assert stored_fusion(MagicMock()) == "auto"
+        assert stored_fusion(None) == "auto"
+
+
+class TestContextFusion:
+    """The resolved fusion drives the merge, the rerank pool and the floor mark,
+    and comes back to the recall through ``timings.fusion``."""
+
+    @pytest.mark.parametrize("weights", [(0.6, 0.4), (0.7, 0.3)])
+    async def test_weighted_deployment_with_auto_contexts_is_byte_identical(
+        self, use_fusion, weights
+    ):
+        use_fusion("weighted")
+        cfg = _ctx("auto", semantic=weights[0], bm25=weights[1])
+        before = await _search(
+            _service(), k=8, config=_ctx(None, semantic=weights[0], bm25=weights[1])
+        )
+        rows = await _search(_service(), k=8, config=cfg)
+        assert rows == before
+        expected = _service()._merge_results(
+            [dict(r) for r in _SEMANTIC], [dict(r) for r in _KEYWORD], *weights
+        )
+        assert _without_ranks(rows) == expected
+
+    async def test_explicit_rrf_under_a_weighted_deployment(self, use_fusion):
+        use_fusion("weighted")
+        rows = await _search(_service(), k=8, config=_ctx("rrf"))
+        assert _ids(rows) == _RRF_ORDER
+        assert rows[0]["hybrid_score"] == pytest.approx((1 / 61 + 1 / 62) * 61 / 2)
+
+    async def test_explicit_weighted_under_an_rrf_deployment(self, use_fusion):
+        use_fusion("rrf")
+        rows = await _search(_service(), k=8, config=_ctx("weighted"))
+        assert _ids(rows) == _WEIGHTED_ORDER
+        assert rows[0]["hybrid_score"] == pytest.approx(0.6 + 0.4 * 0.5)
+
+    async def test_auto_with_tuned_weights_under_rrf_uses_the_weights(self, use_fusion):
+        use_fusion("rrf")
+        rows = await _search(_service(), k=8, config=_ctx("auto", semantic=0.7, bm25=0.3))
+        assert _ids(rows) == _WEIGHTED_ORDER
+        assert rows[0]["hybrid_score"] == pytest.approx(0.7 + 0.3 * 0.5)
+
+    async def test_auto_with_default_weights_under_rrf_is_rrf(self, use_fusion):
+        use_fusion("rrf")
+        rows = await _search(_service(), k=8, config=_ctx("auto"))
+        assert _ids(rows) == _RRF_ORDER
+
+    @pytest.mark.parametrize("explicit", ["rrf", "weighted"])
+    async def test_an_explicit_value_turns_the_deployment_floor_off(self, use_fusion, explicit):
+        use_fusion("keyword_floor")
+        rows = await _search(_service(), k=8, config=_ctx(explicit))
+        assert not any(KEYWORD_FLOOR_KEY in r for r in rows)
+
+    async def test_auto_with_default_weights_keeps_the_deployment_floor(self, use_fusion):
+        use_fusion("keyword_floor")
+        rows = await _search(_service(), k=8, config=_ctx("auto"))
+        assert all(r[KEYWORD_FLOOR_KEY] is True for r in rows)
+
+    async def test_the_rerank_pool_follows_an_explicit_weighted(self, use_fusion):
+        """Deployment rrf, context weighted: the pool is the weighted list cut
+        to fetch_size (6), so K and Z never reach the reranker."""
+        use_fusion("rrf")
+        service = _service()
+        await _search(service, k=1, config=_ctx("weighted", use_rerank=True), use_rerank=None)
+        candidates = service.reranker_service.rerank.await_args.kwargs["candidates"]
+        assert _ids(candidates) == ["A", "B", "C", "D", "E", "F"]
+
+    async def test_the_rerank_pool_follows_an_explicit_rrf(self, use_fusion):
+        use_fusion("weighted")
+        service = _service()
+        await _search(service, k=1, config=_ctx("rrf", use_rerank=True), use_rerank=None)
+        candidates = service.reranker_service.rerank.await_args.kwargs["candidates"]
+        assert _ids(candidates) == ["A", "K", "B", "C", "Z", "D"]
+
+    @pytest.mark.parametrize(
+        ("deployment", "cfg", "expected"),
+        [
+            ("weighted", _ctx("auto"), "weighted"),
+            ("rrf", _ctx("auto"), "rrf"),
+            ("keyword_floor", _ctx(), "keyword_floor"),
+            ("rrf", _ctx("auto", semantic=0.7, bm25=0.3), "weighted"),
+            ("weighted", _ctx("rrf"), "rrf"),
+            ("keyword_floor", _ctx("weighted"), "weighted"),
+        ],
+    )
+    async def test_timings_carry_the_resolved_fusion(self, use_fusion, deployment, cfg, expected):
+        from services.recall_timings import RecallTimings
+
+        use_fusion(deployment)
+        timings = RecallTimings()
+        await _search(_service(), k=3, config=cfg, timings=timings)
+        assert timings.fusion == expected
+        # Not a stage: the per-stage fields stay as they were.
+        assert "fusion" not in timings.log_fields()

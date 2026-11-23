@@ -5678,9 +5678,11 @@ class MemoryService:
         """The one ``recall_completed`` line (#1989), shared by both exits so
         the empty page and the full page log the same shape.
 
-        #2958: ``fusion`` is the deployment's ``HYBRID_FUSION`` and
-        ``leg_ranks`` holds ``[semantic_rank, keyword_rank]`` per row of the
-        page, in page order (no memory id: a replay aligns by position).
+        #2958 / #2980: ``fusion`` is the fusion the search used (resolved
+        from the context's setting, ``timings.fusion``), the deployment's
+        ``HYBRID_FUSION`` when no search ran; ``leg_ranks`` holds
+        ``[semantic_rank, keyword_rank]`` per row of the page, in page order
+        (no memory id: a replay aligns by position).
         """
         from config.settings import get_settings
 
@@ -5688,7 +5690,7 @@ class MemoryService:
             "recall_completed",
             user_id=user_id,
             degraded=(degradation or {}).get("degraded"),
-            fusion=get_settings().hybrid_fusion,
+            fusion=timings.fusion or get_settings().hybrid_fusion,
             leg_ranks=leg_ranks,
             **timings.log_fields(
                 results=results, candidates=candidates, k=k, context_count=context_count

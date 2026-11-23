@@ -737,8 +737,9 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             type="enum",
             category="search",
             description=(
-                "How a hybrid search fuses its semantic and keyword legs, for the whole "
-                "deployment (#2958)"
+                "How a hybrid search fuses its semantic and keyword legs: the deployment "
+                "default, followed by a context whose fusion setting is auto and whose "
+                "weights are 0.6 / 0.4 (#2958, #2980)"
             ),
             default_value="weighted",
             enum_values=["weighted", "rrf", "keyword_floor"],

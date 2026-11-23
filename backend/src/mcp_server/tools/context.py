@@ -144,6 +144,7 @@ async def handle_get_context_info(
                 # #2144: the recall LLM selector, stored and acted on (one
                 # fail-closed read; none with the flag off or the gate off).
                 from services.llm_selector_policy import llm_selector_effective
+                from services.search_service import resolve_fusion, stored_fusion
 
                 selector_stored = (
                     search_config is not None and search_config.llm_selector_enabled is True
@@ -181,6 +182,9 @@ async def handle_get_context_info(
                         or "voyage",
                         "reranker_model": (search_config.reranker_model if search_config else None)
                         or "rerank-2",
+                        # #2980: stored, and the one a hybrid search uses.
+                        "fusion": stored_fusion(search_config),
+                        "fusion_effective": resolve_fusion(search_config, _settings.hybrid_fusion),
                         "llm_selector_enabled": selector_stored,
                         "llm_selector_effective": selector_effective,
                     },

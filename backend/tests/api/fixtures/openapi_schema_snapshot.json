@@ -3104,6 +3104,8 @@
           "embedding_model": {},
           "embedding_provider": {},
           "fetch_factor": {},
+          "fusion": {},
+          "fusion_effective": {},
           "llm_selector_can_change": {},
           "llm_selector_disabled_reason": {},
           "llm_selector_effective": {},
@@ -3150,6 +3152,15 @@
             "maximum": 10.0,
             "minimum": 1.0,
             "type": "integer"
+          },
+          "fusion": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "rrf",
+              "weighted"
+            ],
+            "type": "string"
           },
           "llm_selector_enabled": {
             "default": false,
@@ -5055,6 +5066,10 @@
           },
           "fetch_factor": {
             "type": "integer"
+          },
+          "fusion": {
+            "default": "auto",
+            "type": "string"
           },
           "llm_selector_enabled": {
             "default": false,

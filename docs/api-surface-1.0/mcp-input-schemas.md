@@ -272,6 +272,7 @@ Tune per-context hybrid-search weights and reranker settings.
 - **Optional**:
   - `semantic_weight` — number (0.0–1.0, default 0.6)
   - `bm25_weight` — number (0.0–1.0, default 0.4; weights must sum to 1.0 — prose-only constraint) ⚠ `bm25_weight` exposes the algorithm name (BM25) in a frozen param name; `keyword_weight` would survive an algorithm swap
+  - `fusion` — string, enum [`auto`, `rrf`, `weighted`] (default `auto`, [#2980](https://github.com/kagura-ai/memory-cloud/issues/2980)): how a hybrid search fuses its two legs; `auto` is `weighted` when the weights differ from 0.6 / 0.4, else the deployment's `HYBRID_FUSION`. Changed only when sent; widening the enum later is non-breaking
   - `fetch_factor` — integer (1–10, default 3) ⚠ leaks retrieval-pipeline implementation into the public surface
   - `use_rerank` — boolean
   - `reranker_provider` — string, enum [`voyage`, `cohere`, `self_hosted`] ✅ **DECIDED (#1054): now a hard enum** (was a free string; matches the DB CHECK constraint and aligns with connector_type's enum policy). Widening the enum later (adding a provider) is non-breaking; removing a value is a MAJOR bump. ⚠ **RENAMED (#1160): the `ollama` enum value → `self_hosted`.** Renaming (not widening) an enum value is a **breaking (MAJOR) change** under the frozen-1.0 policy; it ships as a **pre-1.0 exemption** to make the provider slot backend-neutral (self-hosted OpenAI-compatible: Ollama, vLLM). The distinct `ollama_cloud` provider is unaffected.
