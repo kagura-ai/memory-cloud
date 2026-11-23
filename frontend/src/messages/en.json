@@ -2605,7 +2605,7 @@
     "fusion": {
       "label": "Fusion",
       "description": "How a hybrid search combines its semantic and keyword results.",
-      "guidance": "Conversation and work history: rank fusion. Documents and manuals: weighted, with a higher semantic weight.",
+      "guidance": "Both purposes above use Auto, which follows the deployment's setting and the weights (see below). Rank fusion (rrf) or Weighted pins this context to that fusion, whatever the deployment uses.",
       "autoDesc": "Auto uses weighted when the weights above differ from 0.6 / 0.4, and the deployment's default otherwise.",
       "auto": "Auto",
       "autoCurrent": "Auto (currently {effective})",
