@@ -304,6 +304,18 @@ describe("purpose select — staging", () => {
     await waitFor(() => expect(saveBar()).toBeNull());
   });
 
+  it("a staged purpose hides what auto resolves to now, and Discard brings it back", async () => {
+    await renderWith(CURRENT);
+    const current = "fusion.autoCurrent(effective=fusion.effectiveRrf)";
+    expect(screen.getByText(current)).toBeTruthy();
+    fireEvent.change(purposeSelect(), { target: { value: "documents" } });
+    // The stored resolution says nothing about the staged weights.
+    expect(screen.queryByText(current)).toBeNull();
+    expect(fusionSelect().value).toBe("auto");
+    fireEvent.click(screen.getByRole("button", { name: "discardChanges" }));
+    await waitFor(() => expect(screen.getByText(current)).toBeTruthy());
+  });
+
   it("choosing Custom stages nothing", async () => {
     await renderWith({ ...CURRENT, semantic_weight: 0.7, bm25_weight: 0.3 });
     fireEvent.change(purposeSelect(), { target: { value: "custom" } });
