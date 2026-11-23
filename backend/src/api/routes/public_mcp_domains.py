@@ -27,7 +27,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.public_mcp_endpoints import ResourceSlug
@@ -59,10 +59,17 @@ ProofResultField = Literal["ok", "missing", "unavailable"]
 ProofViaField = Literal["txt", "cname", "both"]
 
 
-def _cname_proof_off(_value: object) -> bool:
+def _without_cname_proof_key(payload: Any, key: str) -> Any:
     """#2979: the CNAME proof fields are left out of every answer while the
-    zone is empty (decided from the setting, never from the stored row)."""
-    return not get_settings().mcp_public_domains_cname_proof_zone
+    zone is empty (decided from the setting, never from the stored row).
+
+    Used by the two models' wrap serializers, so the omission holds for the
+    route answer, ``model_dump()`` and the sync observation alike, on every
+    pydantic 2 release the backend allows.
+    """
+    if isinstance(payload, dict) and not get_settings().mcp_public_domains_cname_proof_zone:
+        payload.pop(key, None)
+    return payload
 
 
 class _NoStoreRoute(APIRoute):
@@ -132,13 +139,18 @@ class PublicMcpDomainVerification(BaseModel):
     record_value: str = Field(..., description="Exact value of the TXT record")
     cname_target: str | None = Field(
         None,
-        exclude_if=_cname_proof_off,
         description=(
             "This claim's own CNAME target: a CNAME of the name to it routes the name "
             "and proves control (either record suffices). Present only where the "
             "deployment sets MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE"
         ),
     )
+
+    # No return annotation: an annotated one would replace the model's
+    # serialization schema (and so the OpenAPI document) with that type.
+    @model_serializer(mode="wrap")
+    def _omit_cname_target(self, handler: SerializerFunctionWrapHandler):
+        return _without_cname_proof_key(handler(self), "cname_target")
 
 
 class PublicMcpDomainRouting(BaseModel):
@@ -164,13 +176,18 @@ class PublicMcpDomainLastCheck(TZAwareBaseModel):
     checked_at: datetime | None = None
     proof: ProofViaField | None = Field(
         None,
-        exclude_if=_cname_proof_off,
         description=(
             "Which record the last check found the proof in (txt, cname or both); "
-            "null when it found none. Present only where the deployment sets "
-            "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE"
+            "null when it found none, and null or the previous check's value until "
+            "the first check after the zone was set or changed. Present only where "
+            "the deployment sets MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE"
         ),
     )
+
+    # No return annotation, as above.
+    @model_serializer(mode="wrap")
+    def _omit_proof(self, handler: SerializerFunctionWrapHandler):
+        return _without_cname_proof_key(handler(self), "proof")
 
 
 class PublicMcpDomainResponse(TZAwareBaseModel):

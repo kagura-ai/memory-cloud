@@ -256,3 +256,18 @@ def test_cname_proof_zone_beside_the_application_hosts_is_allowed(clean_env) -> 
     clean_env.setenv("MCP_PUBLIC_DOMAINS_APP_HOSTS", ".apps.example.com")
     clean_env.setenv("MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE", "proof.example.com")
     assert Settings(_env_file=None).mcp_public_domains_cname_proof_zone == "proof.example.com"
+
+
+def test_the_zone_bound_is_the_label_constant_not_a_literal() -> None:
+    """Fix round 1: the validator reads the bound that leaves room for the label."""
+    import inspect
+
+    from config import settings as settings_module
+    from models.public_mcp_domain import CNAME_LABEL_HEX_CHARS, CNAME_PROOF_ZONE_MAX_LENGTH
+    from utils.public_hostname import MAX_HOSTNAME_LENGTH
+
+    assert CNAME_PROOF_ZONE_MAX_LENGTH + 1 + CNAME_LABEL_HEX_CHARS <= MAX_HOSTNAME_LENGTH
+    source = inspect.getsource(Settings._check_public_domains_cname_proof_zone)
+    assert "CNAME_PROOF_ZONE_MAX_LENGTH" in source
+    assert "200" not in source.split('"""')[-1]
+    assert settings_module.CNAME_PROOF_ZONE_MAX_LENGTH == CNAME_PROOF_ZONE_MAX_LENGTH

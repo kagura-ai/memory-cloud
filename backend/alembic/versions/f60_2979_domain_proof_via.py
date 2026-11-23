@@ -13,10 +13,11 @@ Locks: ``ADD COLUMN`` and ``ADD CONSTRAINT ... NOT VALID`` take a brief
 ``SHARE UPDATE EXCLUSIVE`` on it. No other table is locked (the table has no
 foreign key).
 
-The previous release never names the column: its INSERTs leave it NULL and
-its SELECTs list their columns. The new code selects it with every domain
-row, so with ``MCP_PUBLIC_DOMAINS_ENABLED`` on the migration runs before the
-code (``deploy.sh`` migrates first). Re-runnable (``IF NOT EXISTS`` /
+Order: run this migration BEFORE starting the new code. The new code reads
+the column wherever it reads domain rows, whatever the switches say. The
+previous release never names the column (its INSERTs leave it NULL and its
+SELECTs list their columns), so it keeps working against the migrated
+schema. Re-runnable (``IF NOT EXISTS`` /
 ``DROP CONSTRAINT IF EXISTS``).
 
 Downgrade drops the CHECK and the column; the rows and their states stay.

@@ -559,8 +559,9 @@ marker lines.
    proves control; the TXT record stays the way for a zone apex. The names
    of the zone are never claimable and never get a certificate: the
    permission path answers 404 for them, so `Caddyfile.tpl` is unchanged.
-   The setting needs the migration `f60_2979_domain_proof_via` (run by
-   `./scripts/deploy.sh` before the new code). Emptying or changing the zone
+   The release that brings the setting reads the column of the migration
+   `f60_2979_domain_proof_via` whatever the switches say; `./scripts/deploy.sh`
+   runs the migrations before the new code. Emptying or changing the zone
    later makes every CNAME-only name lose its proof (suspended after 3
    absences and 72 hours): have their owners publish the TXT record first.
 4. Open 443 to everyone (next paragraph).

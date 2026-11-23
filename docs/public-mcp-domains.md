@@ -169,7 +169,8 @@ above. With the zone set:
   points into the zone without a claim is never served and never gets a
   certificate.
 - The check records which record proved it; the owner API shows it as
-  `last_check.proof`.
+  `last_check.proof`. Until the first check after the zone was set or
+  changed, `proof` is `null` or still the previous check's value.
 
 ## Host names
 
@@ -458,7 +459,7 @@ again (with a new token).
 | `serving` | whether the alias answers right now (the alias statement resolves this domain and the name is still claimable; a plan pause or capacity lock, answered `503`, does not change it) |
 | `verification` | the TXT record to publish; where the CNAME proof is on also `cname_target`, the claim's own CNAME target (a CNAME of the name to it routes and proves) |
 | `routing.target` | `MCP_PUBLIC_DOMAINS_ROUTING_TARGET`; `routing.status` is `ok`, `mismatch`, `unresolved` or `null` before the first check |
-| `last_check` | result (`ok`, `missing`, `unavailable`) and time of the last recorded check, `null` before it; where the CNAME proof is on also `proof`: the record the last check found the proof in (`txt`, `cname`, `both`), `null` when it found none |
+| `last_check` | result (`ok`, `missing`, `unavailable`) and time of the last recorded check, `null` before it; where the CNAME proof is on also `proof`: the record the last check found the proof in (`txt`, `cname`, `both`), `null` when it found none, and `null` or still the previous check's value until the first check after the zone was set or changed |
 | `proof_ok_at`, `proof_missing_checks` | last time the proof was found; confirmed absences since then |
 | `serve_until` | the lease; the alias is served only before it |
 
@@ -679,10 +680,12 @@ concurrent lookups per process and 3 s.
 5. **CNAME proof (optional).** Pick a zone used for nothing else (for example
    `domains-proof.example.com`), create the wildcard record `*.<zone>` (DNS
    only: an A/AAAA record of the proxy, or a CNAME to the routing target), and
-   set `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`. It needs the migration
-   `f60_2979_domain_proof_via` (run by `alembic upgrade head`; with the switch
-   on, the code from that release reads its column, so the migration runs
-   before the code). Leave it empty to keep the TXT proof only.
+   set `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE`. Leave it empty to keep the TXT
+   proof only. Whatever the switches say, the release that brings it reads
+   the column `last_proof_via` of the migration `f60_2979_domain_proof_via`
+   wherever it reads domain rows: run the migrations (`alembic upgrade head`)
+   before starting the new code; the previous release keeps working against
+   the migrated schema.
 6. **Resolver.** The API container's resolver configuration must reach a
    recursive resolver you trust; the application does not validate DNSSEC.
 7. **Scheduler leader.** Confirm that a scheduler leader runs and that

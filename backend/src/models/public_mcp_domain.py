@@ -29,7 +29,11 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
-from utils.public_hostname import MAX_HOSTNAME_LENGTH
+from utils.public_hostname import (
+    CNAME_LABEL_HEX_CHARS,
+    CNAME_PROOF_ZONE_MAX_LENGTH,
+    MAX_HOSTNAME_LENGTH,
+)
 
 __all__ = [
     "ACTIVATIONS_PER_DAY",
@@ -64,10 +68,9 @@ CHALLENGE_VALUE_PREFIX = "kagura-public-mcp-verification="
 # ``<label>.<zone>`` proves control too. The label is the first
 # CNAME_LABEL_HEX_CHARS lower-case hex characters of
 # sha256(CNAME_LABEL_INPUT_PREFIX + token): one per row, like the TXT value,
-# never stored. The zone leaves room for the label (234-character names).
+# never stored. CNAME_PROOF_ZONE_MAX_LENGTH (the settings validator's bound)
+# leaves room for the label; both live with the host-name rules.
 CNAME_LABEL_INPUT_PREFIX = "kagura-public-mcp-cname-v1:"
-CNAME_LABEL_HEX_CHARS = 32
-CNAME_PROOF_ZONE_MAX_LENGTH = 200
 # A proof is lost after this many confirmed absences AND this many hours
 # since it was last seen.
 PROOF_GRACE_HOURS = 72

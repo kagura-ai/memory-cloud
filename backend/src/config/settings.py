@@ -24,7 +24,11 @@ from config.google_connected_apps import (
     parse_verification_tokens as parse_google_connected_apps_verification_tokens,
 )
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
-from utils.public_hostname import is_reserved_special_use, normalize_hostname
+from utils.public_hostname import (
+    CNAME_PROOF_ZONE_MAX_LENGTH,
+    is_reserved_special_use,
+    normalize_hostname,
+)
 from utils.recall_projection import RECALL_DEFAULT_FULL, RECALL_MAX_FULL
 
 if TYPE_CHECKING:
@@ -1551,15 +1555,16 @@ class Settings(BaseSettings):
     @classmethod
     def _check_public_domains_cname_proof_zone(cls, value: str) -> str:
         """Empty, or a host name outside the special-use suffixes (normalised)
-        of at most 200 characters, so that ``<32 hex>.<zone>`` stays a valid
-        name (models.public_mcp_domain.CNAME_PROOF_ZONE_MAX_LENGTH)."""
+        of at most ``CNAME_PROOF_ZONE_MAX_LENGTH`` characters, so that the
+        row's ``<label>.<zone>`` stays a valid host name."""
         if not value.strip():
             return ""
         name = normalize_hostname(value)
-        if name is None or is_reserved_special_use(name) or len(name) > 200:
+        if name is None or is_reserved_special_use(name) or len(name) > CNAME_PROOF_ZONE_MAX_LENGTH:
             raise ValueError(
                 "MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE must be a DNS host name (no scheme, "
-                "port or wildcard) of at most 200 characters outside the special-use suffixes"
+                f"port or wildcard) of at most {CNAME_PROOF_ZONE_MAX_LENGTH} characters "
+                "outside the special-use suffixes"
             )
         return name
 

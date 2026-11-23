@@ -411,6 +411,29 @@ def _cname_to(dnsmods: SimpleNamespace, rdtype: str, target: str) -> Any:
     )
 
 
+def _no_answer(dnsmods: SimpleNamespace, rdtype: str, *records: str) -> Any:
+    """The ``NoAnswer`` dnspython raises for the name: the response answers
+    ``records`` (a CNAME chain, possibly empty) but no record of ``rdtype``."""
+    text = "\n".join(
+        [
+            "id 1",
+            "opcode QUERY",
+            "rcode NOERROR",
+            "flags QR RD RA",
+            ";QUESTION",
+            f"{HOST}. IN {rdtype}",
+            ";ANSWER",
+            *records,
+        ]
+    )
+    return dnsmods.resolver.NoAnswer(response=dnsmods.message.from_text(text))
+
+
+def _wildcard_chain(target: str) -> tuple[str, ...]:
+    """The name's CNAME to ``target`` (an A-only wildcard: no AAAA there)."""
+    return (f"{HOST}. 300 IN CNAME {target}.",)
+
+
 def _plain(dnsmods: SimpleNamespace, rdtype: str) -> Any:
     record = "A 198.51.100.7" if rdtype == "A" else "AAAA 2001:db8::7"
     return _answer(dnsmods, HOST, rdtype, f"{HOST}. 300 IN {record}")
@@ -495,6 +518,7 @@ async def test_another_rows_target_is_missing(dnsmods: SimpleNamespace) -> None:
         pytest.param("answered", "timeout", id="one-answer-settles-it"),
         pytest.param("timeout", "nxdomain", id="one-definite-empty-settles-it"),
         pytest.param("servfail", "answered", id="aaaa-answer-settles-it"),
+        pytest.param("timeout", "noanswer-elsewhere", id="no-answer-chain-elsewhere-settles-it"),
     ],
 )
 async def test_one_settled_address_lookup_decides_missing(
@@ -503,7 +527,9 @@ async def test_one_settled_address_lookup_decides_missing(
     def outcome(kind: str, rdtype: str) -> Any:
         return {
             "nxdomain": dnsmods.resolver.NXDOMAIN(),
-            "noanswer": dnsmods.resolver.NoAnswer(),
+            # A readable response without the record type and without a chain.
+            "noanswer": _no_answer(dnsmods, rdtype),
+            "noanswer-elsewhere": _no_answer(dnsmods, rdtype, *_wildcard_chain(OTHER_TARGET)),
             "timeout": dnsmods.resolver.LifetimeTimeout(timeout=3.0, errors=[]),
             "servfail": dnsmods.resolver.NoNameservers(),
             "answered": _plain(dnsmods, rdtype),
@@ -514,6 +540,92 @@ async def test_one_settled_address_lookup_decides_missing(
     result, _ = await _check_cname(dnsmods, script)
 
     assert (result.proof, result.proof_via) == ("missing", None)
+
+
+# An A-only wildcard: the AAAA lookup of a name CNAMEd into the zone is a
+# NoAnswer whose response still carries the chain (fix round 1).
+
+
+async def test_a_only_wildcard_a_answer_with_aaaa_no_answer_is_ok(
+    dnsmods: SimpleNamespace,
+) -> None:
+    script = {
+        (HOST, "A"): _cname_to(dnsmods, "A", CNAME_TARGET),
+        (HOST, "AAAA"): _no_answer(dnsmods, "AAAA", *_wildcard_chain(CNAME_TARGET)),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("ok", "cname")
+
+
+async def test_a_timeout_and_a_no_answer_whose_chain_holds_the_target_is_ok(
+    dnsmods: SimpleNamespace,
+) -> None:
+    script = {
+        (HOST, "A"): dnsmods.resolver.LifetimeTimeout(timeout=3.0, errors=[]),
+        (HOST, "AAAA"): _no_answer(dnsmods, "AAAA", *_wildcard_chain(CNAME_TARGET.upper())),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("ok", "cname")
+
+
+async def test_a_timeout_and_a_no_answer_without_the_target_is_missing(
+    dnsmods: SimpleNamespace,
+) -> None:
+    script = {
+        (HOST, "A"): dnsmods.resolver.LifetimeTimeout(timeout=3.0, errors=[]),
+        (HOST, "AAAA"): _no_answer(dnsmods, "AAAA", *_wildcard_chain(OTHER_TARGET)),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("missing", None)
+
+
+async def test_a_timeout_and_an_aaaa_servfail_is_unavailable(dnsmods: SimpleNamespace) -> None:
+    script = {
+        (HOST, "A"): dnsmods.resolver.LifetimeTimeout(timeout=3.0, errors=[]),
+        (HOST, "AAAA"): dnsmods.resolver.NoNameservers(),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("unavailable", None)
+
+
+async def test_a_no_answer_without_a_readable_response_settles_nothing(
+    dnsmods: SimpleNamespace,
+) -> None:
+    script = {
+        (HOST, "A"): dnsmods.resolver.LifetimeTimeout(timeout=3.0, errors=[]),
+        (HOST, "AAAA"): dnsmods.resolver.NoAnswer(),
+    }
+
+    result, _ = await _check_cname(dnsmods, script)
+
+    assert (result.proof, result.proof_via) == ("unavailable", None)
+
+
+async def test_routing_reads_only_answered_chains_with_and_without_the_zone(
+    dnsmods: SimpleNamespace,
+) -> None:
+    """A no-answer chain to the routing target decides only the CNAME part:
+    routing reads as it always did, with the zone on or off."""
+    chain = (f"{HOST}. 300 IN CNAME {TARGET}.",)
+    script = {
+        (CHALLENGE_NAME, "TXT"): _txt(dnsmods, f'"{EXPECTED}"'),
+        (HOST, "A"): _no_answer(dnsmods, "A", *chain),
+        (HOST, "AAAA"): _no_answer(dnsmods, "AAAA", *chain),
+    }
+
+    with_zone, _ = await _check_cname(dnsmods, script)
+    without_zone, _ = await _check(dnsmods, script)
+
+    assert without_zone == adapter.DomainCheck("ok", "unresolved")
+    assert with_zone == adapter.DomainCheck("ok", "unresolved", "txt")
 
 
 @pytest.mark.parametrize(

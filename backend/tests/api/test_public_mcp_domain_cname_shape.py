@@ -110,3 +110,33 @@ async def test_the_sync_observation_keeps_the_same_keys(zone, value: str) -> Non
         assert set(body["verification"]) == {"record_type", "record_name", "record_value"}
         assert set(body["last_check"]) == {"result", "checked_at"}
     assert body["tls"] == {"status": "unreported"}
+
+
+def test_the_omission_needs_no_field_exclude_if() -> None:
+    """Fix round 1: ``Field(exclude_if=...)`` needs a newer pydantic than the
+    declared floor; the two small models omit their keys themselves."""
+    from api.routes.public_mcp_domains import (
+        PublicMcpDomainLastCheck,
+        PublicMcpDomainVerification,
+    )
+
+    for model, key in (
+        (PublicMcpDomainVerification, "cname_target"),
+        (PublicMcpDomainLastCheck, "proof"),
+    ):
+        assert getattr(model.model_fields[key], "exclude_if", None) is None
+        schema = model.model_json_schema(mode="serialization")
+        assert key in schema["properties"]
+        assert "exclude_if" not in repr(schema)
+
+
+async def test_json_mode_and_python_mode_omit_alike(zone) -> None:
+    zone("")
+    response = await domain_response(AsyncMock(), _row())
+    assert "cname_target" not in response.model_dump()["verification"]
+    assert "proof" not in response.model_dump()["last_check"]
+    assert '"cname_target"' not in response.model_dump_json()
+    zone(ZONE)
+    response = await domain_response(AsyncMock(), _row())
+    assert response.model_dump()["verification"]["cname_target"] == cname_proof_target(TOKEN)
+    assert '"proof":"cname"' in response.model_dump_json()
