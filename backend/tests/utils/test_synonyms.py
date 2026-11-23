@@ -6,10 +6,12 @@ Issue #69: Verify synonym expansion for Japanese writing variations.
 import pytest
 
 from utils.synonyms import (
+    _load_synonyms,
     expand_query_tokens,
     expand_synonyms,
     get_synonym_dict,
 )
+from utils.tokenizer import normalize_term
 
 
 @pytest.fixture(scope="module")
@@ -112,3 +114,97 @@ class TestSynonymFileRelease:
         monkeypatch.setattr(synonyms.logger, "warning", lambda event, **_: warnings.append(event))
         assert len(synonyms._load_synonyms()) > 0
         assert warnings == []
+
+
+def _write(tmp_path, rows: list[str]):
+    path = tmp_path / "synonyms.txt"
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return path
+
+
+class TestExpansionControlFlag:
+    """Column 2 of SudachiDict's synonyms.txt, the expansion-control flag.
+
+    0 (or empty) = always used for expansion; 1 = never a trigger, but still
+    an expansion of the group's other entries; 2 = never used (kept in the
+    file as a deletion record).
+    """
+
+    def test_flag_0_and_empty_expand_both_ways(self, tmp_path):
+        path = _write(
+            tmp_path,
+            ["000001,1,0,1,0,0,0,(),alpha,,", "000001,1,,2,0,0,0,(),beta,,"],
+        )
+        loaded = _load_synonyms(path)
+        assert loaded["alpha"] == ["beta"]
+        assert loaded["beta"] == ["alpha"]
+
+    def test_flag_1_is_a_target_but_not_a_trigger(self, tmp_path):
+        path = _write(
+            tmp_path,
+            [
+                "000001,1,0,1,0,0,0,(),alpha,,",
+                "000001,1,1,2,0,0,0,(),beta,,",
+                "000001,1,0,3,0,0,0,(),gamma,,",
+            ],
+        )
+        loaded = _load_synonyms(path)
+        assert "beta" not in loaded
+        assert loaded["alpha"] == ["beta", "gamma"]
+        assert loaded["gamma"] == ["alpha", "beta"]
+
+    def test_flag_2_is_never_used(self, tmp_path):
+        path = _write(
+            tmp_path,
+            [
+                "000001,1,0,1,0,0,0,(),alpha,,",
+                "000001,1,2,2,0,0,0,(),beta,,",
+                "000001,1,0,3,0,0,0,(),gamma,,",
+            ],
+        )
+        loaded = _load_synonyms(path)
+        assert "beta" not in loaded
+        assert loaded["alpha"] == ["gamma"]
+        assert loaded["gamma"] == ["alpha"]
+
+    def test_a_group_with_one_usable_entry_expands_nothing(self, tmp_path):
+        path = _write(
+            tmp_path,
+            ["000001,1,0,1,0,0,0,(),alpha,,", "000001,1,2,2,0,0,0,(),beta,,"],
+        )
+        assert _load_synonyms(path) == {}
+
+    def test_a_group_of_targets_only_has_no_trigger(self, tmp_path):
+        path = _write(
+            tmp_path,
+            ["000001,1,1,1,0,0,0,(),alpha,,", "000001,1,1,2,0,0,0,(),beta,,"],
+        )
+        assert _load_synonyms(path) == {}
+
+    def test_the_flag_is_per_group(self, tmp_path):
+        """A term that is only a target in one group is a trigger in another."""
+        path = _write(
+            tmp_path,
+            [
+                "000001,1,0,1,0,0,0,(),alpha,,",
+                "000001,1,1,2,0,0,0,(),beta,,",
+                "",
+                "000002,1,0,1,0,0,0,(),beta,,",
+                "000002,1,0,2,0,0,0,(),delta,,",
+            ],
+        )
+        loaded = _load_synonyms(path)
+        assert loaded["beta"] == ["delta"]
+        assert loaded["alpha"] == ["beta"]
+        assert loaded["delta"] == ["beta"]
+
+    def test_the_shipped_file(self, synonym_dict):
+        """SudachiDict's own flags: ``sub`` is flag 2 in its only group,
+        ``abstract`` flag 1 in both of its groups, ``yellow`` flag 2 next to
+        イエローカード and flag 1 elsewhere."""
+        assert "sub" not in synonym_dict
+        assert "abstract" not in synonym_dict
+        assert "abstract" in synonym_dict[normalize_term("概要")]
+        assert "yellow" not in synonym_dict
+        assert "yellow" not in synonym_dict[normalize_term("イエローカード")]
+        assert "sub" not in expand_query_tokens(normalize_term("副")).split()

@@ -5,6 +5,10 @@ O(1) synonym lookup for BM25 query expansion.
 
 Format: CSV with group_id as first column, surface form at column index 8.
 Empty lines separate groups. All surfaces in the same group are synonyms.
+Column 2 is SudachiDict's expansion-control flag: 0 (or empty) = always used
+for expansion; 1 = not a trigger of its group's expansion, but still an
+expansion of the group's other entries; 2 = never used (the file keeps such
+entries as a deletion record).
 
 #2986: the keyword tokens are Sudachi normalized forms, so each surface is
 normalized once at load (``utils.tokenizer.normalize_term``) and the dictionary
@@ -36,6 +40,11 @@ _synonym_dict: dict[str, list[str]] | None = None
 # Cap expanded tokens to prevent BM25 score distortion from large synonym groups
 MAX_EXPANDED_TOKENS = 50
 
+# Column 2 (expansion-control flag) values, see the module docstring
+_EXPAND_ALWAYS = "0"
+_EXPAND_TARGET_ONLY = "1"
+_EXPAND_NEVER = "2"
+
 # Default path: backend/src/data/sudachi_synonyms.txt (relative to this module)
 _DEFAULT_PATH = Path(__file__).parent.parent / "data" / "sudachi_synonyms.txt"
 
@@ -47,8 +56,9 @@ def _load_synonyms(path: str | Path | None = None) -> dict[str, list[str]]:
         path: Path to synonyms.txt (default: backend/data/sudachi_synonyms.txt)
 
     Returns:
-        Dict mapping each normalized form to the other normalized forms of its
-        group(s), in file order, without duplicates
+        Dict mapping each normalized form that triggers an expansion (flag 0)
+        to the other normalized forms of its group(s) (flag 0 or 1), in file
+        order, without duplicates
     """
     from utils.tokenizer import normalize_term
 
@@ -57,8 +67,11 @@ def _load_synonyms(path: str | Path | None = None) -> dict[str, list[str]]:
         logger.warning("sudachi_synonyms_not_found", path=str(filepath))
         return {}
 
-    # Group the normalized surfaces by group_id
+    # Group the normalized surfaces by group_id; the group's triggers are the
+    # terms with at least one surface flagged 0 (column 2). A flag-2 surface
+    # is left out; a flag-1 one is a member (an expansion) only.
     groups: dict[str, list[str]] = defaultdict(list)
+    triggers: dict[str, set[str]] = defaultdict(set)
     normalized: dict[str, str] = {}
 
     with open(filepath, encoding="utf-8") as f:
@@ -68,19 +81,27 @@ def _load_synonyms(path: str | Path | None = None) -> dict[str, list[str]]:
                 continue
             group_id = row[0].strip()
             surface = row[8].strip()
-            if group_id and surface:
-                term = normalized.get(surface)
-                if term is None:
-                    term = normalized[surface] = normalize_term(surface)
-                if term and term not in groups[group_id]:
-                    groups[group_id].append(term)
+            flag = row[2].strip() or _EXPAND_ALWAYS
+            if not group_id or not surface or flag == _EXPAND_NEVER:
+                continue
+            term = normalized.get(surface)
+            if term is None:
+                term = normalized[surface] = normalize_term(surface)
+            if not term:
+                continue
+            if term not in groups[group_id]:
+                groups[group_id].append(term)
+            if flag != _EXPAND_TARGET_ONLY:
+                triggers[group_id].add(term)
 
-    # Build reverse lookup: surface → all synonyms in its group
+    # Build reverse lookup: trigger term → the other terms of its group(s)
     synonym_dict: dict[str, list[str]] = {}
-    for surfaces in groups.values():
+    for group_id, surfaces in groups.items():
         if len(surfaces) < 2:
             continue  # Skip single-entry groups (no synonyms)
         for surface in surfaces:
+            if surface not in triggers[group_id]:
+                continue
             # Include all group members except self
             others = [s for s in surfaces if s != surface]
             if surface in synonym_dict:
