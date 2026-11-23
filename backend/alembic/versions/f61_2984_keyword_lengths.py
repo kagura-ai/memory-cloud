@@ -13,9 +13,11 @@ averages until its point is written again or
 docs/deployment.md). Adding a nullable column without a default is
 metadata-only on PostgreSQL: no table rewrite, no scan.
 
-Locks: each ``ADD COLUMN`` takes a brief ``ACCESS EXCLUSIVE`` lock on
-``memories`` only (it waits for, and then briefly blocks, the transactions
-using the table). No other table is locked: no constraint, index or foreign
+Locks: the first ``ADD COLUMN`` takes an ``ACCESS EXCLUSIVE`` lock on
+``memories``, held until the migration's transaction commits (five
+metadata-only statements, milliseconds). It waits for, and then briefly
+blocks, the transactions using the table; the migration ``lock_timeout``
+bounds the wait. No other table is locked: no constraint, index or foreign
 key is added.
 
 Order: run this migration BEFORE starting the new code. The new code selects

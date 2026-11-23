@@ -4621,8 +4621,8 @@ compares nothing first, so every run rewrites every row (`tokens_rewritten`).
 **Upgrade.** In this order:
 
 1. `alembic upgrade head` (it adds the five columns: a brief `ACCESS EXCLUSIVE`
-   lock on `memories` per column, no rewrite, no backfill, no other table
-   locked). Run it before starting the new code, which selects the columns;
+   lock on `memories`, held for the migration's one transaction, no rewrite,
+   no backfill, no other table locked). Run it before starting the new code, which selects the columns;
    the previous release keeps working against the migrated schema.
 2. Deploy the new code. From then on every point written is weighted the new
    way. Points written before keep raw term frequencies, so keyword ranking
