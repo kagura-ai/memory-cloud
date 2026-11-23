@@ -4,6 +4,16 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.177.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.177.0) — 2026-11-22
+
+A connector's PII masking can be seen and changed after creation, and an MCP connection can find and list the account's other workspaces. No migration.
+
+### Added
+- **`list_workspaces` and `list_contexts(workspace_id)`** ([#2972](https://github.com/kagura-ai/memory-cloud/issues/2972)): the new MCP tool `list_workspaces` (full profile, callable from any URL) lists the workspaces the account belongs to, with the account's role, the connection's workspace marked, and whether each is usable now (`usable`, `reason`). `list_contexts` takes an optional `workspace_id` to list another of the account's workspaces under the account's role there; the slot and seat checks apply to that workspace, and a workspace the account is not a member of is refused. Without `workspace_id` the reply is as before, plus `other_workspaces` and a hint for an account with other usable workspaces (the count only in the google and microsoft views). Workspace-scoped API keys stay in their workspace. The core tool list is unchanged; the MCP connection settings offer an "Other workspaces" tool preset.
+
+### Changed
+- **Connector settings show and edit PII masking** ([#2971](https://github.com/kagura-ai/memory-cloud/issues/2971)): the settings update accepts `pii_guardrail_config`, validated as on create (an explicit `null` is refused; masking off is `enabled: false`), and the connector list returns the stored config. A running worker applies a change to content it ingests after its next config poll. The settings dialog has the create dialog's PII controls; a section left untouched is not sent. A connector with no stored config says that nothing is ingested until it is set, and Save stores the shown defaults. Operation history records a PII change as its own field.
+
 ## [v0.176.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.176.0) — 2026-11-22
 
 A setting that chooses how hybrid recall fuses its two legs, and the External keys page hidden while bring-your-own keys are off. No migration.
