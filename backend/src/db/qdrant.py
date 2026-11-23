@@ -2917,3 +2917,113 @@ async def erasure_point_identities(
         yield batch
         if offset is None:
             return
+
+
+# ============================================================================
+# Keyword vector rebuild (#2984)
+# ============================================================================
+
+#: Payload keys the keyword rebuild reads from a point: a summary point's token
+#: fields, a resource point's text, and the context the point belongs to.
+KEYWORD_REBUILD_PAYLOAD_FIELDS: tuple[str, ...] = (
+    *QDRANT_TOKEN_PAYLOAD_FIELDS,
+    "content",
+    "context_id",
+)
+
+
+async def retrieve_keyword_points(
+    point_ids: Sequence[UUID],
+    collection_name: str,
+    *,
+    with_bm25: bool = False,
+) -> dict[str, Any]:
+    """Fetch the points of ``point_ids`` with their keyword payload, by id.
+
+    Qdrant only (the LanceDB store keeps no sparse vector). A point that does
+    not exist is absent from the result.
+
+    Args:
+        point_ids: The points (``Memory.point_id``).
+        collection_name: Their collection.
+        with_bm25: Also fetch each point's ``bm25`` sparse vector.
+
+    Returns:
+        ``{str(point id): Record}``.
+
+    Raises:
+        QdrantError: The read failed.
+    """
+    if not point_ids:
+        return {}
+    client = get_qdrant_client()
+    try:
+        records = await client.retrieve(
+            collection_name=collection_name,
+            ids=[str(point_id) for point_id in point_ids],
+            with_payload=list(KEYWORD_REBUILD_PAYLOAD_FIELDS),
+            with_vectors=[KAGURA_MEMORIES_BM25_VECTOR_NAME] if with_bm25 else False,
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to retrieve points: {e}") from e
+    return {str(record.id): record for record in records}
+
+
+async def write_keyword_points(
+    collection_name: str,
+    *,
+    payloads: Sequence[tuple[UUID, dict[str, Any]]] = (),
+    vectors: Sequence[tuple[UUID, list[int], list[float]]] = (),
+) -> None:
+    """Rewrite points' keyword payload fields and ``bm25`` vectors, nothing else.
+
+    One request: a set-payload (a merge: other keys stay) per point and one
+    vector update for all points; the dense vector is not touched. Qdrant only.
+
+    Args:
+        collection_name: The points' collection.
+        payloads: ``(point id, {key: value})`` merged into each payload.
+        vectors: ``(point id, indices, values)`` replacing each ``bm25`` vector.
+
+    Raises:
+        QdrantError: The write failed.
+    """
+    from qdrant_client.models import (
+        PointVectors,
+        SetPayload,
+        SetPayloadOperation,
+        UpdateVectors,
+        UpdateVectorsOperation,
+    )
+
+    operations: list[Any] = [
+        SetPayloadOperation(set_payload=SetPayload(payload=payload, points=[str(point_id)]))
+        for point_id, payload in payloads
+    ]
+    if vectors:
+        operations.append(
+            UpdateVectorsOperation(
+                update_vectors=UpdateVectors(
+                    points=[
+                        PointVectors(
+                            id=str(point_id),
+                            vector={
+                                KAGURA_MEMORIES_BM25_VECTOR_NAME: SparseVector(
+                                    indices=indices, values=values
+                                )
+                            },
+                        )
+                        for point_id, indices, values in vectors
+                    ]
+                )
+            )
+        )
+    if not operations:
+        return
+    client = get_qdrant_client()
+    try:
+        await client.batch_update_points(
+            collection_name=collection_name, update_operations=operations
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to rewrite keyword vectors: {e}") from e

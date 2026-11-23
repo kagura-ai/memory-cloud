@@ -42,7 +42,10 @@ Query → Sudachi tokenization → Synonym expansion (Sudachi dict, ~25k groups)
   ↓
 BM25: Sparse vector search (Qdrant native, Modifier.IDF)
   - summary/context_summary tokens (weight ×2.0)
-  - content tokens (weight ×1.0)
+  - content tokens (weight ×1.0), summary reading (×0.5)
+  - each field BM25-weighted on the document side: tf saturation (k1 1.2)
+    and length normalisation (b 0.75) against the context's average field
+    length (#2984)
   ↓
 Semantic: Dense vector search (embedding model, COSINE)
   - summary only (no content/tags to avoid vector pollution)
@@ -62,7 +65,7 @@ Optional: Reranker (Voyage AI / Cohere)
 | Embedding = summary only | Tags/content in embedding caused vector pollution (P@1 regression) |
 | Tags NOT in BM25 | Tags in BM25 text_conditions caused score inflation for tag-heavy memories |
 | Tags = exact-match filter only | `filters: {"tags": ["python"]}` via MatchAny |
-| Content in BM25 at 0.5x weight | Prevents length bias from long content fields |
+| Content in BM25 at 1.0x weight, BM25 length normalisation per field (#2984) | Prevents length bias from long content fields |
 | Synonym expansion capped at 50 tokens | Prevents BM25 score distortion from large synonym groups |
 | MurmurHash3 for sparse indices | Deterministic, no vocabulary management, <0.1% collision rate |
 

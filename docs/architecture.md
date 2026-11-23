@@ -146,7 +146,7 @@ Results A       Results B
 
 ### Search Weights
 - **Semantic Search**: 60% (better for meaning) — per-context default (`context_search_configs.semantic_weight`)
-- **BM25 Full-text**: 40% (better for exact keywords) — a Qdrant sparse vector with IDF (`bm25_weight`)
+- **BM25 Full-text**: 40% (better for exact keywords) — a Qdrant sparse vector with IDF (`bm25_weight`); the document side carries the BM25 term saturation and length normalisation per field, with per-context average lengths (`backend/src/utils/sparse_vector.py`, `backend/src/services/keyword_stats.py`, #2984)
 - **Fusion**: each lane's scores are normalised by its maximum, then summed with the weights, unless the context's `fusion` setting (`auto` follows `HYBRID_FUSION` while the weights are the defaults) picks reciprocal rank fusion or the keyword floor (`resolve_fusion` in `backend/src/services/search_service.py`)
 - **Modes**: `search_mode` = `hybrid` (default), `semantic` or `keyword`; a context can opt into the deterministic query router (`routing_mode`)
 - **Reranking**: off by default (`use_rerank`); when on, Voyage `rerank-2` by default, or Cohere or a self-hosted reranker (`backend/src/services/reranker_service.py`); plan-gated
@@ -408,7 +408,7 @@ Since v0.48.0, REST and MCP batch ingest are thin adapters over `ResourceIngestS
 
 **Features**:
 - Semantic vector search
-- Full-text BM25 search (sparse vector with IDF; Sudachi tokens for Japanese)
+- Full-text BM25 search (sparse vector with IDF; the documents' values are BM25-weighted per field with the context's average lengths; Sudachi tokens for Japanese)
 - Metadata filtering (workspace / context / tags / importance)
 
 Prior "1 user = 1 collection" design (`kagura_user_{user_id}`) was replaced by the single-collection migration; no per-user collections remain in new deployments.

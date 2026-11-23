@@ -342,3 +342,18 @@ class TestResourceIndexerRow:
         assert existing.keyword_fulltext_len == len(tokenize_for_search(content).split())
         assert existing.keyword_summary_len is None
         assert existing.keyword_content_len is None
+
+
+def test_no_metadata_only_path_changes_a_context_summary():
+    """The keyword vector covers ``context_summary``, and a metadata-only edit
+    patches the payload without rebuilding it. So every path that changes a
+    row's ``context_summary`` re-embeds instead (the full point, its bm25
+    vector and token fields with it): ``update_memory`` (pinned in
+    tests/services/test_update_memory.py), the session rollback (a text field),
+    and PATCH cannot change it at all. The erasure restore reverts details only.
+    """
+    from models.schemas import PatchMemoryRequest
+    from services.session_rollback import _TEXT_FIELDS
+
+    assert "context_summary" in _TEXT_FIELDS
+    assert "context_summary" not in PatchMemoryRequest.model_fields
