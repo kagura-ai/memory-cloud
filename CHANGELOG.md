@@ -4,6 +4,17 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.178.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.178.0) — 2026-11-23
+
+A context can choose how hybrid recall fuses its two legs, and a custom domain of a public MCP endpoint can be proved with a single CNAME record. Two migrations (`f59`, `f60`): run them before starting the new code.
+
+### Added
+- **Per-context hybrid fusion** ([#2980](https://github.com/kagura-ai/memory-cloud/issues/2980)): a context's search settings gain `fusion`: `auto` (default), `rrf` or `weighted`. An explicit value wins over `HYBRID_FUSION`; `auto` uses `weighted` when the context's semantic/bm25 weights differ from 0.6 / 0.4 and the deployment setting otherwise. The rerank pool and the `recall_completed` log line follow the fusion a recall actually used; a recall over several contexts uses the first context's setting. REST, MCP `update_search_config` / `get_context_info` and the Web UI search settings read and write it and report the resolved value as `fusion_effective`. Existing contexts read `auto`, so nothing changes under `HYBRID_FUSION=weighted`.
+- **A CNAME can prove control of a public MCP custom domain** ([#2979](https://github.com/kagura-ai/memory-cloud/issues/2979)): new setting `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` (empty by default: no change). When set, every claim gets its own CNAME target `<label>.<zone>` (`verification.cname_target`); a CNAME of the name to it proves control as the TXT record does, either one suffices, and `last_check.proof` says which was seen. States, grace, lease and cooldown are unchanged; the claim step stays. Names inside the zone cannot be claimed and get no certificate. The operator publishes a wildcard record `*.<zone>` that routes to the TLS proxy.
+
+### Changed
+- **`rrf` under `HYBRID_FUSION` no longer overrides tuned weights** ([#2958](https://github.com/kagura-ai/memory-cloud/issues/2958)): a context whose weights differ from the defaults keeps the weighted fusion unless its `fusion` is set to `rrf`.
+
 ## [v0.177.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.177.0) — 2026-11-22
 
 A connector's PII masking can be seen and changed after creation, and an MCP connection can find and list the account's other workspaces. No migration.
