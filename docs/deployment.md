@@ -4615,8 +4615,9 @@ write. With the LanceDB store (`KAGURA_VECTOR_BACKEND=lance`) the weighting
 does not apply (its own full-text index already scores with BM25), but the
 normalized tokens do: run the same rebuild command there after the upgrade. On
 LanceDB it rewrites every memory's token fields from the row, which rebuilds the
-point's full-text column (no vectors are touched), and stores the lengths; it
-compares nothing first, so every run rewrites every row (`tokens_rewritten`).
+point's full-text column (no vectors are touched), and stores the lengths. It
+rewrites only the rows whose stored tokens differ (`tokens_rewritten`); a
+second run counts every row `unchanged`.
 
 **Upgrade.** In this order:
 
@@ -4639,13 +4640,20 @@ compares nothing first, so every run rewrites every row (`tokens_rewritten`).
    with the context's averages read fresh. No embedding call, no dense vector
    change; a summary point's four token payload fields are rewritten when they
    differ from the row's tokenization (after this upgrade: every point with a
-   Japanese spelling the normalized form changes). Rows another writer holds (locked,
-   re-queued, being embedded) are skipped and counted, never an error: their
-   writer weights them. A second run over unchanged rows writes nothing
-   (`unchanged`). `--context <uuid>` rebuilds one context; `--limit N` stops
-   after N contexts and prints `resume --after <context id>` to go on from; an
-   interrupted run is safe to start again (a context is redone, already
-   rebuilt points count as `unchanged`).
+   Japanese spelling the normalized form changes). The report counts each row
+   once: `skipped` = another writer holds it (locked, or changed between the
+   two passes), `not_embedded` = a live row that is not embedded (pending,
+   being embedded, failed), `missing_point` = its point is not in the vector
+   store (or was removed during the run); none of these is an error, the
+   row's writer weights it. A feed-managed context (a sync feed, or one
+   stopping) is left untouched and counted in `managed_contexts`. A second run
+   over unchanged rows writes nothing (`unchanged`). `--context <uuid>`
+   rebuilds one context; `--limit N` stops after N contexts and prints
+   `resume --after <context id>` to go on from; an interrupted run is safe to
+   start again (a context is redone, already rebuilt points count as
+   `unchanged`). Each API process keeps its cached averages for up to 5
+   minutes, so the weighting of new writes, and with it the ranking, settles
+   within 5 minutes after the run.
 
    Time: about 10 seconds per 10,000 memories, measured with a local Postgres
    and Qdrant (loopback, one WSL2 machine) on one context of 10,000 generated
