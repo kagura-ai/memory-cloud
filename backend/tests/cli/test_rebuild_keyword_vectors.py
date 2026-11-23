@@ -65,3 +65,15 @@ def test_lance_plan_says_what_it_rewrites(capsys):
     assert "LanceDB (token fields and full-text column only, no vectors)" in out
     assert "embedded rows                 5" in out
     assert cli._changes(result) == 5
+
+
+def test_the_applied_report_names_every_count_once(capsys):
+    result = KeywordRebuild(
+        dry_run=False, skipped=1, not_embedded=2, missing_point=3, managed_contexts=4
+    )
+    cli._print_applied(result)
+    out = capsys.readouterr().out
+    assert "skipped           1" in out
+    assert "not_embedded      2" in out
+    assert "missing_point     3" in out
+    assert "managed_contexts  4" in out

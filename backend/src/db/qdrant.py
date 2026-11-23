@@ -2940,8 +2940,9 @@ async def retrieve_keyword_points(
 ) -> dict[str, Any]:
     """Fetch the points of ``point_ids`` with their keyword payload, by id.
 
-    Qdrant only (the LanceDB store keeps no sparse vector). A point that does
-    not exist is absent from the result.
+    A point that does not exist is absent from the result. With the LanceDB
+    store each record carries the point's whole payload and no vector (the
+    store keeps no sparse vector).
 
     Args:
         point_ids: The points (``Memory.point_id``).
@@ -2956,6 +2957,17 @@ async def retrieve_keyword_points(
     """
     if not point_ids:
         return {}
+    store = _active_store()
+    if store is not None:
+        from qdrant_client.models import Record
+
+        payloads = await store.retrieve_payloads(
+            collection_name, [str(point_id) for point_id in point_ids]
+        )
+        return {
+            point_id: Record(id=point_id, payload=payload, vector=None)
+            for point_id, payload in payloads.items()
+        }
     client = get_qdrant_client()
     try:
         records = await client.retrieve(
@@ -2974,21 +2986,28 @@ async def write_keyword_points(
     *,
     payloads: Sequence[tuple[UUID, dict[str, Any]]] = (),
     vectors: Sequence[tuple[UUID, list[int], list[float]]] = (),
+    delete_vectors: Sequence[UUID] = (),
 ) -> None:
     """Rewrite points' keyword payload fields and ``bm25`` vectors, nothing else.
 
-    One request: a set-payload (a merge: other keys stay) per point and one
-    vector update for all points; the dense vector is not touched. Qdrant only.
+    One request: a set-payload (a merge: other keys stay) per point, one
+    vector update for all points and one ``bm25`` vector delete; the dense
+    vector is not touched. Qdrant only. The request is all or nothing: a
+    point that does not exist fails it.
 
     Args:
         collection_name: The points' collection.
         payloads: ``(point id, {key: value})`` merged into each payload.
         vectors: ``(point id, indices, values)`` replacing each ``bm25`` vector.
+        delete_vectors: Points whose ``bm25`` vector is removed (no keyword
+            token left, as a writer leaves such a point).
 
     Raises:
         QdrantError: The write failed.
     """
     from qdrant_client.models import (
+        DeleteVectors,
+        DeleteVectorsOperation,
         PointVectors,
         SetPayload,
         SetPayloadOperation,
@@ -3015,6 +3034,15 @@ async def write_keyword_points(
                         )
                         for point_id, indices, values in vectors
                     ]
+                )
+            )
+        )
+    if delete_vectors:
+        operations.append(
+            DeleteVectorsOperation(
+                delete_vectors=DeleteVectors(
+                    points=[str(point_id) for point_id in delete_vectors],
+                    vector=[KAGURA_MEMORIES_BM25_VECTOR_NAME],
                 )
             )
         )

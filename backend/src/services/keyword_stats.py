@@ -60,7 +60,11 @@ _cache: dict[tuple[UUID, str], tuple[float, Any]] = {}
 
 
 def clear_keyword_stats_cache() -> None:
-    """Forget every cached aggregate (tests, and the rebuild CLI after a pass)."""
+    """Forget every cached aggregate of this process (tests).
+
+    Nothing else calls it: each API process keeps an aggregate up to
+    ``STATS_TTL_SECONDS``, a rebuild run included.
+    """
     _cache.clear()
 
 

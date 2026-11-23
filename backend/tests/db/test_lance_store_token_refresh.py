@@ -54,3 +54,48 @@ async def test_rewritten_token_fields_rebuild_the_full_text_column(tmp_path):
     )
 
     assert str(memory_id) in await hits()
+
+
+async def test_retrieve_payloads_reads_stored_payloads_and_skips_absent_rows(tmp_path):
+    """The keyword rebuild compares the stored token fields before a rewrite
+    (``db.qdrant.retrieve_keyword_points`` reads them here on LanceDB)."""
+    store = LanceVectorStore(str(tmp_path / "lance"))
+    memory_id = uuid4()
+    await store.ensure_collection(4, DEFAULT_COLLECTION)
+    await store.add_memory(
+        user_id=USER,
+        memory_id=memory_id,
+        vector=[0.1, 0.2, 0.3, 0.4],
+        payload={"summary": "手続き", "summary_tokens": "手続き", "type": "note"},
+        workspace_id=WS,
+        context_id=CTX,
+    )
+
+    found = await store.retrieve_payloads(DEFAULT_COLLECTION, [str(memory_id), str(uuid4())])
+
+    assert list(found) == [str(memory_id)]
+    assert found[str(memory_id)]["summary_tokens"] == "手続き"
+    assert found[str(memory_id)]["context_id"] == CTX
+    assert await store.retrieve_payloads(DEFAULT_COLLECTION, []) == {}
+
+
+async def test_retrieve_keyword_points_reads_the_lance_store(monkeypatch, tmp_path):
+    from db import qdrant
+
+    store = LanceVectorStore(str(tmp_path / "lance"))
+    memory_id = uuid4()
+    await store.ensure_collection(4, DEFAULT_COLLECTION)
+    await store.add_memory(
+        user_id=USER,
+        memory_id=memory_id,
+        vector=[0.1, 0.2, 0.3, 0.4],
+        payload={"summary": "手続き", "summary_tokens": "手続き"},
+        workspace_id=WS,
+        context_id=CTX,
+    )
+    monkeypatch.setattr(qdrant, "_active_store", lambda: store)
+
+    points = await qdrant.retrieve_keyword_points([memory_id], DEFAULT_COLLECTION)
+
+    assert points[str(memory_id)].payload["summary_tokens"] == "手続き"
+    assert points[str(memory_id)].vector is None

@@ -19,7 +19,9 @@ from sqlalchemy.dialects import postgresql
 from services import keyword_stats
 from services.memory_service import build_memory_point, memory_keyword_tokens
 from services.resource_indexer import resource_point_id
+from services.sync_managed_guard import TargetFence
 from tasks import keyword_rebuild as task
+from utils.exceptions import QdrantError, SyncLockBusyError
 from utils.sparse_vector import MemoryFieldStats, build_resource_sparse_vector
 from utils.tokenizer import tokenize_for_search
 
@@ -76,6 +78,8 @@ class _Store:
         self.points: dict[str, dict[str, Any]] = {}
         self.payload_writes = 0
         self.vector_writes = 0
+        self.vector_deletes = 0
+        self.requests = 0
 
     def add(self, point_id: UUID, payload: dict[str, Any], indices=(), values=()) -> None:
         self.points[str(point_id)] = {
@@ -95,47 +99,65 @@ class _Store:
                 continue
             vector = None
             if with_bm25:
-                indices, values = point["bm25"]
-                vector = {"bm25": SparseVector(indices=indices, values=values)}
+                vector = {}
+                if point["bm25"] is not None:
+                    indices, values = point["bm25"]
+                    vector = {"bm25": SparseVector(indices=indices, values=values)}
             out[str(point_id)] = SimpleNamespace(
                 id=str(point_id), payload=dict(point["payload"]), vector=vector
             )
         return out
 
-    async def write(self, collection, *, payloads=(), vectors=()):
+    async def write(self, collection, *, payloads=(), vectors=(), delete_vectors=()):
+        """All or nothing, as Qdrant's batch: a point that is gone fails the request."""
+        self.requests += 1
+        named = [p for p, _ in payloads] + [v[0] for v in vectors] + list(delete_vectors)
+        if any(str(point_id) not in self.points for point_id in named):
+            raise QdrantError("Failed to rewrite keyword vectors: Not found: no point")
         for point_id, payload in payloads:
             self.points[str(point_id)]["payload"].update(payload)
             self.payload_writes += 1
         for point_id, indices, values in vectors:
             self.points[str(point_id)]["bm25"] = (list(indices), list(values))
             self.vector_writes += 1
+        for point_id in delete_vectors:
+            self.points[str(point_id)]["bm25"] = None
+            self.vector_deletes += 1
 
 
 def _db() -> MagicMock:
     db = MagicMock()
     db.commit = AsyncMock()
     db.flush = AsyncMock()
+    db.rollback = AsyncMock()
     return db
 
 
-def _pages(rows_by_page: list[tuple[list[UUID], list[Any]]]):
-    """``_locked_page`` answering each pass with the same pages."""
+def _pages(rows_by_page: list[tuple]):
+    """``_locked_page`` answering each pass with the same pages.
+
+    A page is ``(ids, rows)`` or ``(ids, rows, not_embedded ids)``.
+    """
     calls = {"n": 0}
 
     async def locked_page(db, context_id, after_id, page_size):
         index = calls["n"] % (len(rows_by_page) + 1)
         calls["n"] += 1
         if index == len(rows_by_page):
-            return [], []
-        return rows_by_page[index]
+            return task._Page([], [], [])
+        ids, rows, *rest = rows_by_page[index]
+        return task._Page(list(ids), list(rows), list(rest[0]) if rest else [])
 
     return locked_page
 
 
-async def _run(store: _Store, context_id: UUID, pages, **kwargs) -> task.KeywordRebuild:
+async def _run(
+    store: _Store, context_id: UUID, pages, *, managed: str | None = None, **kwargs
+) -> task.KeywordRebuild:
     with (
         patch.object(task, "_active_store", return_value=None),
         patch.object(task, "_contexts", AsyncMock(return_value=([context_id], False))),
+        patch.object(task, "_managed_state", AsyncMock(return_value=managed)),
         patch.object(task, "resolve_collection_name", AsyncMock(return_value="coll")),
         patch.object(task, "_locked_page", side_effect=_pages(pages)),
         patch.object(task, "retrieve_keyword_points", side_effect=store.retrieve),
@@ -148,8 +170,9 @@ async def _run(store: _Store, context_id: UUID, pages, **kwargs) -> task.Keyword
         result = await task.run_keyword_rebuild(
             _db(), context_id=context_id, dry_run=False, **kwargs
         )
-    assert stats.await_args.kwargs == {"fresh": True}
-    assert avgdl.await_args.kwargs == {"fresh": True}
+    if managed is None:
+        assert stats.await_args.kwargs == {"fresh": True}
+        assert avgdl.await_args.kwargs == {"fresh": True}
     return result
 
 
@@ -262,7 +285,8 @@ async def test_rows_another_writer_holds_are_skipped_and_counted():
 
     result = await _run(store, context_id, [([taken.id, busy.id], [taken])])
 
-    assert result.skipped == 2  # once per pass
+    assert result.skipped == 1  # once per row, though both passes met it
+    assert result.not_embedded == 0
     assert store.vector(busy.point_id) == before
     assert busy_vector == {**store.points[str(busy.id)]["payload"]}
     assert result.vectors_written == 1
@@ -298,9 +322,42 @@ async def test_a_row_without_a_point_in_the_context_is_counted_not_written():
 
     result = await _run(store, context_id, [([gone.id, elsewhere.id], [gone, elsewhere])])
 
-    assert result.missing_point == 4  # two rows, two passes
+    assert result.missing_point == 2  # once per row, though both passes met it
     assert result.written == 0
     assert gone.keyword_summary_len is None
+
+
+async def _run_lance(context_id: UUID, rows: list, payloads: dict[str, dict]):
+    """A Lance run over one page of ``rows``; the store holds ``payloads`` by point id."""
+    updates: list[tuple] = []
+
+    async def retrieve(point_ids, collection, *, with_bm25=False):
+        assert with_bm25 is False
+        return {
+            str(pid): SimpleNamespace(id=str(pid), payload=dict(payloads[str(pid)]), vector=None)
+            for pid in point_ids
+            if str(pid) in payloads
+        }
+
+    async def update(point_id, fields, collection, *, cascade_chunks):
+        updates.append((point_id, fields, collection, cascade_chunks))
+        payloads[str(point_id)].update(fields)
+
+    with (
+        patch.object(task, "_active_store", return_value=object()),
+        patch.object(task, "_contexts", AsyncMock(return_value=([context_id], False))),
+        patch.object(task, "_managed_state", AsyncMock(return_value=None)),
+        patch.object(task, "resolve_collection_name", AsyncMock(return_value="coll")),
+        patch.object(task, "_locked_page", side_effect=_pages([([r.id for r in rows], rows)])),
+        patch.object(task, "update_memory_payload_in_qdrant", side_effect=update),
+        patch.object(task, "retrieve_keyword_points", side_effect=retrieve),
+        patch.object(task, "write_keyword_points", AsyncMock()) as write,
+        patch.object(task, "memory_field_stats", AsyncMock()) as stats,
+    ):
+        result = await task.run_keyword_rebuild(_db(), context_id=context_id, dry_run=False)
+    write.assert_not_awaited()
+    stats.assert_not_awaited()
+    return result, updates
 
 
 @pytest.mark.asyncio
@@ -309,36 +366,46 @@ async def test_lance_store_rewrites_token_fields_and_skips_vectors():
     store's payload update rebuilds it. No vector pass, no resource points."""
     context_id = uuid4()
     memory, resource = _row(context_id), _resource_row(context_id)
-    updates: list[tuple] = []
+    payloads = {
+        str(memory.point_id): {"context_id": str(context_id), "summary_tokens": "old"},
+    }
 
-    async def update(point_id, fields, collection, *, cascade_chunks):
-        updates.append((point_id, fields, collection, cascade_chunks))
-
-    with (
-        patch.object(task, "_active_store", return_value=object()),
-        patch.object(task, "_contexts", AsyncMock(return_value=([context_id], False))),
-        patch.object(task, "resolve_collection_name", AsyncMock(return_value="coll")),
-        patch.object(
-            task,
-            "_locked_page",
-            side_effect=_pages([([memory.id, resource.id], [memory, resource])]),
-        ),
-        patch.object(task, "update_memory_payload_in_qdrant", side_effect=update),
-        patch.object(task, "retrieve_keyword_points", AsyncMock()) as retrieve,
-        patch.object(task, "write_keyword_points", AsyncMock()) as write,
-        patch.object(task, "memory_field_stats", AsyncMock()) as stats,
-    ):
-        result = await task.run_keyword_rebuild(_db(), context_id=context_id, dry_run=False)
+    result, updates = await _run_lance(context_id, [memory, resource], payloads)
 
     assert result.store == "lance"
     fields = memory_keyword_tokens(memory).payload_fields()
     assert updates == [(memory.point_id, fields, "coll", False)]
     assert result.tokens_rewritten == 1
-    assert result.skipped == 1  # the resource row
+    assert result.missing_point == 1  # the resource row: not in the LanceDB store
+    assert result.skipped == 0
     assert memory.keyword_summary_len == len(fields["summary_tokens"].split())
-    retrieve.assert_not_awaited()
-    write.assert_not_awaited()
-    stats.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lance_second_run_writes_nothing():
+    context_id = uuid4()
+    memory = _row(context_id)
+    payloads = {str(memory.point_id): {"context_id": str(context_id)}}
+    await _run_lance(context_id, [memory], payloads)
+
+    result, updates = await _run_lance(context_id, [memory], payloads)
+
+    assert updates == []
+    assert result.tokens_rewritten == result.lengths_written == 0
+    assert result.unchanged == 1
+
+
+@pytest.mark.asyncio
+async def test_lance_row_without_a_point_is_not_counted_as_rewritten():
+    context_id = uuid4()
+    memory = _row(context_id)
+
+    result, updates = await _run_lance(context_id, [memory], {})
+
+    assert updates == []
+    assert result.tokens_rewritten == 0
+    assert result.missing_point == 1
+    assert memory.keyword_summary_len is None
 
 
 @pytest.mark.asyncio
@@ -412,13 +479,18 @@ async def test_contexts_are_taken_by_id_after_the_cursor():
 async def test_the_page_locks_only_live_embedded_rows_and_skips_locked_ones():
     context_id, after = uuid4(), uuid4()
     db = _db()
+    embedded, pending = uuid4(), uuid4()
     ids = MagicMock()
-    ids.scalars.return_value.all.return_value = [uuid4()]
+    ids.all.return_value = [(embedded, "success"), (pending, "pending")]
     rows = MagicMock()
     rows.scalars.return_value.all.return_value = []
     db.execute = AsyncMock(side_effect=[ids, rows])
 
-    await task._locked_page(db, context_id, after, 50)
+    page = await task._locked_page(db, context_id, after, 50)
+
+    assert page.ids == [embedded, pending]
+    assert page.not_embedded == [pending]
+    assert page.rows == []
 
     page_sql, lock_sql = (
         str(c.args[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
@@ -430,3 +502,175 @@ async def test_the_page_locks_only_live_embedded_rows_and_skips_locked_ones():
     assert "FOR NO KEY UPDATE SKIP LOCKED" in lock_sql
     assert "memories.embedding_status = 'success'" in lock_sql
     assert "memories.embedding_suppressed_at IS NULL" in lock_sql
+
+
+@pytest.mark.asyncio
+async def test_rows_not_embedded_are_counted_apart_from_held_ones():
+    """A pending / failed row is not a row another writer holds."""
+    context_id = uuid4()
+    taken, held, pending = _row(context_id), _row(context_id), _row(context_id)
+    store = _Store()
+    for memory in (taken, held):
+        _legacy_point(store, memory, context_id)
+
+    result = await _run(
+        store, context_id, [([taken.id, held.id, pending.id], [taken], [pending.id])]
+    )
+
+    assert result.not_embedded == 1
+    assert result.skipped == 1
+    assert result.vectors_written == 1
+
+
+@pytest.mark.asyncio
+async def test_a_managed_context_is_left_counted_and_not_written():
+    context_id = uuid4()
+    memory = _row(context_id)
+    store = _Store()
+    _legacy_point(store, memory, context_id)
+    before = store.vector(memory.point_id)
+
+    result = await _run(store, context_id, [([memory.id], [memory])], managed="feed")
+
+    assert result.managed_contexts == 1
+    assert result.contexts == 1
+    assert result.written == 0
+    assert store.requests == 0
+    assert store.vector(memory.point_id) == before
+    assert memory.keyword_summary_len is None
+
+
+@pytest.mark.asyncio
+async def test_a_context_that_becomes_managed_mid_run_stops_there():
+    """The fence is taken per page: the vector pass of a context a feed took
+    over after the lengths pass writes nothing."""
+    context_id = uuid4()
+    memory = _row(context_id)
+    store = _Store()
+    _legacy_point(store, memory, context_id)
+    states = iter([None, None, "stopping"])
+
+    async def managed(db, ctx):
+        return next(states)
+
+    with patch.object(task, "_managed_state", side_effect=managed):
+        with (
+            patch.object(task, "_active_store", return_value=None),
+            patch.object(task, "_contexts", AsyncMock(return_value=([context_id], False))),
+            patch.object(task, "resolve_collection_name", AsyncMock(return_value="coll")),
+            patch.object(task, "_locked_page", side_effect=_pages([([memory.id], [memory])])),
+            patch.object(task, "retrieve_keyword_points", side_effect=store.retrieve),
+            patch.object(task, "write_keyword_points", side_effect=store.write),
+            patch.object(task, "memory_field_stats", AsyncMock(return_value=STATS)),
+            patch.object(task, "resource_fulltext_avgdl", AsyncMock(return_value=None)),
+        ):
+            result = await task.run_keyword_rebuild(_db(), context_id=context_id, dry_run=False)
+
+    assert result.managed_contexts == 1
+    assert result.lengths_written == 1
+    assert result.vectors_written == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [(None, None), ("manual", None), ("feed", "feed"), ("stopping", "stopping")],
+)
+async def test_the_managed_state_follows_the_shared_fence(state, expected):
+    fence = TargetFence(None, SimpleNamespace(mode=state) if state else None, None)
+    with patch("services.sync_managed_guard.target_fence", AsyncMock(return_value=fence)) as tf:
+        assert await task._managed_state(_db(), uuid4()) == expected
+    assert tf.await_args.kwargs == {}  # shared, not exclusive
+
+
+@pytest.mark.asyncio
+async def test_a_busy_fence_reads_busy():
+    with patch(
+        "services.sync_managed_guard.target_fence",
+        AsyncMock(side_effect=SyncLockBusyError("Feed management is changing; retry")),
+    ):
+        assert await task._managed_state(_db(), uuid4()) == "busy"
+
+
+@pytest.mark.asyncio
+async def test_a_point_deleted_before_the_write_is_counted_and_the_run_goes_on():
+    context_id = uuid4()
+    gone, kept = _row(context_id), _row(context_id)
+    store = _Store()
+    for memory in (gone, kept):
+        _legacy_point(store, memory, context_id)
+    retrieve = store.retrieve
+
+    async def retrieve_then_delete(point_ids, collection, *, with_bm25=False):
+        found = await retrieve(point_ids, collection, with_bm25=with_bm25)
+        if with_bm25:  # the vector pass read it; a Qdrant-only delete comes next
+            store.points.pop(str(gone.point_id), None)
+        return found
+
+    store.retrieve = retrieve_then_delete
+    result = await _run(store, context_id, [([gone.id, kept.id], [gone, kept])])
+
+    assert result.missing_point == 1
+    assert result.vectors_written == 1
+    _, indices, values = build_memory_point(kept, STATS)
+    assert store.vector(kept.point_id) == pytest.approx(dict(zip(indices, values, strict=True)))
+
+
+@pytest.mark.asyncio
+async def test_a_point_deleted_before_the_token_write_keeps_its_row_lengths():
+    context_id = uuid4()
+    memory = _row(context_id)
+    store = _Store()
+    _legacy_point(store, memory, context_id)
+    store.points[str(memory.id)]["payload"]["content_tokens"] = "old tokens"
+    retrieve = store.retrieve
+
+    async def retrieve_then_delete(point_ids, collection, *, with_bm25=False):
+        found = await retrieve(point_ids, collection, with_bm25=with_bm25)
+        store.points.pop(str(memory.point_id), None)
+        return found
+
+    store.retrieve = retrieve_then_delete
+    result = await _run(store, context_id, [([memory.id], [memory])])
+
+    assert result.missing_point == 1
+    assert result.tokens_rewritten == result.lengths_written == 0
+    assert memory.keyword_summary_len is None
+
+
+@pytest.mark.asyncio
+async def test_a_write_failure_of_a_point_that_exists_is_raised():
+    context_id = uuid4()
+    memory = _row(context_id)
+    store = _Store()
+    _legacy_point(store, memory, context_id)
+
+    async def failing(collection, **kwargs):
+        raise QdrantError("Failed to rewrite keyword vectors: timed out")
+
+    store.write = failing
+    with pytest.raises(QdrantError):
+        await _run(store, context_id, [([memory.id], [memory])])
+
+
+@pytest.mark.asyncio
+async def test_a_point_without_tokens_loses_its_stored_vector():
+    """A writer leaves a point without keyword tokens with no bm25 vector; the
+    rebuild does the same instead of keeping a stale one."""
+    context_id = uuid4()
+    memory = _row(context_id, summary="", context_summary=None, content="")
+    store = _Store()
+    payload, indices, values = build_memory_point(memory)
+    assert indices == []
+    store.add(memory.point_id, {**payload, "context_id": str(context_id)}, [7], [2.0])
+
+    first = await _run(store, context_id, [([memory.id], [memory])])
+
+    assert store.points[str(memory.point_id)]["bm25"] is None
+    assert store.vector_deletes == 1
+    assert first.vectors_written == 1
+    assert first.unchanged == 0
+
+    second = await _run(store, context_id, [([memory.id], [memory])])
+    assert second.vectors_written == 0
+    assert second.unchanged == 1

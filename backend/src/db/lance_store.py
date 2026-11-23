@@ -970,6 +970,42 @@ class LanceVectorStore:
         except Exception as e:
             raise QdrantError(f"Failed to read vectors from LanceDB: {e}") from e
 
+    async def retrieve_payloads(
+        self, collection_name: str, point_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """The stored payload of each row, a chunk of ids per read (#2986).
+
+        The keyword rebuild compares a point's token fields before it rewrites
+        them. A row that does not exist is absent; no ids read nothing.
+        """
+        ids = [str(pid) for pid in point_ids]
+        if not ids:
+            return {}
+
+        def _run() -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return out
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start : start + 500]
+                    rows = (
+                        tbl.search()
+                        .where(f"id IN ({', '.join(_sql_str(pid) for pid in chunk)})")
+                        .select(["id", "payload_json"])
+                        .limit(len(chunk))
+                        .to_list()
+                    )
+                    for row in rows:
+                        out[str(row["id"])] = json.loads(row["payload_json"] or "{}")
+            return out
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as e:
+            raise QdrantError(f"Failed to read payloads from LanceDB: {e}") from e
+
     async def erasure_point_identities(
         self, collection: str
     ) -> list[tuple[str, str, str | None, datetime | None]]:

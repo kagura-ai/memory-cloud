@@ -15,12 +15,17 @@ Per context, two passes over its live, embedded (``success``) rows, by id:
    fields differ from the row's (a tokenizer or dictionary change since its
    write) gets them rewritten.
 2. Vectors. With the context's averages read fresh (past the cache), each
-   point's ``bm25`` vector is rebuilt from its token payload and replaced. A
-   point whose vector already equals the rebuilt one is left (``unchanged``),
-   so a second run over unchanged rows writes nothing.
+   point's ``bm25`` vector is rebuilt from its token payload and replaced (or
+   removed, when no token is left: a writer leaves such a point without one).
+   A point whose vector already equals the rebuilt one is left
+   (``unchanged``), so a second run over unchanged rows writes nothing.
 
 No embedding call, no dense vector or other payload change, no row change but
 the length columns.
+
+Live rows that are not embedded (``pending``, ``processing``, ``failed``, never
+embedded) are counted as ``not_embedded``: their writer weights them when it
+writes their point.
 
 Concurrent writers: each page's rows are locked ``FOR NO KEY UPDATE SKIP
 LOCKED`` and only rows whose ``embedding_status`` is ``success`` are taken, and
@@ -31,14 +36,21 @@ lock it), so it either waits for the page to commit and then writes the newer
 point, or the page skips the row (``skipped``). In pass 2 a point whose token
 payload does not have the lengths the row records (a writer came between the
 passes) is skipped as well. A skipped row is counted, never an error: its
-writer weights it.
+writer weights it. A point that disappears before the page's write
+(``missing_point``) does not stop the run either. Each row is counted once per
+run, whichever pass met it.
+
+Feed-managed contexts (a sync feed or one stopping, ``sync_managed_guard``)
+take no write here, as with every other vector writer: each page takes the
+context's management fence first, and a managed or busy context is left
+(``managed_contexts``), never an error.
 
 LanceDB keeps no sparse vector (its FTS scores with BM25 itself), but its
 full-text column is built from a point's token fields, so a tokenizer change
 (#2986) needs it rebuilt as well: with the LanceDB store the run does pass 1
-only, writing every row's token fields through the store's payload update
-(which rebuilds the point's ``search_text``), without comparing first. Its
-resource points are not in the LanceDB store; resource rows are skipped.
+only, writing a row's token fields through the store's payload update (which
+rebuilds the point's ``search_text``) when they differ from the stored ones.
+Its resource points are not in the LanceDB store (``missing_point``).
 """
 
 from __future__ import annotations
@@ -46,7 +58,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -75,6 +87,7 @@ from services.keyword_stats import (
 )
 from services.memory_service import memory_keyword_tokens
 from services.resource_indexer import owns_resource_point
+from utils.exceptions import QdrantError, SyncLockBusyError
 from utils.logger import get_logger
 from utils.sparse_vector import (
     MemoryFieldStats,
@@ -93,6 +106,10 @@ _REL_TOLERANCE = 1e-5
 
 Progress = Callable[[str], None]
 
+_SKIPPED = "skipped"
+_MISSING = "missing_point"
+_NOT_EMBEDDED = "not_embedded"
+
 
 @dataclass
 class KeywordRebuild:
@@ -110,17 +127,56 @@ class KeywordRebuild:
     tokens_rewritten: int = 0
     vectors_written: int = 0
     unchanged: int = 0
+    #: Rows another writer holds (locked, or changed between the passes).
     skipped: int = 0
+    #: Rows whose point is not in the store (or left it during the run).
     missing_point: int = 0
+    #: Live rows that are not embedded (pending, processing, failed).
+    not_embedded: int = 0
+    #: Contexts left because they are feed-managed (or their fence was busy).
+    managed_contexts: int = 0
     #: The last context finished: ``--after`` of the next run.
     last_context: UUID | None = None
     #: ``"limit"`` when ``--limit`` contexts were done and more remain.
     stopped: str | None = None
     seconds: float = 0.0
+    #: The rows counted per kind in the current context (each row once).
+    _counted: dict[str, set[UUID]] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def written(self) -> int:
         return self.lengths_written + self.tokens_rewritten + self.vectors_written
+
+    def count_row(self, kind: str, memory_id: UUID) -> None:
+        """Count ``memory_id`` under ``kind`` once, whichever pass meets it."""
+        seen = self._counted.setdefault(kind, set())
+        if memory_id not in seen:
+            seen.add(memory_id)
+            setattr(self, kind, getattr(self, kind) + 1)
+
+    def next_context(self) -> None:
+        """Rows belong to one context: the per-row memory starts again."""
+        self._counted.clear()
+
+
+class _ContextManaged(Exception):
+    """The context is feed-managed (or its fence is busy): leave it."""
+
+    def __init__(self, state: str) -> None:
+        super().__init__(state)
+        self.state = state
+
+
+@dataclass
+class _Page:
+    """One page of a context's live rows, by id."""
+
+    #: Every live row of the page.
+    ids: list[UUID]
+    #: The embedded rows this run locked (and may write).
+    rows: list[Memory]
+    #: The live rows that were not embedded when the page was read.
+    not_embedded: list[UUID]
 
 
 def _live(context_id: UUID) -> list[Any]:
@@ -161,16 +217,40 @@ async def _plan_context(db: AsyncSession, context_id: UUID, result: KeywordRebui
     result.rows_without_lengths += int(without or 0)
 
 
+async def _managed_state(db: AsyncSession, context_id: UUID) -> str | None:
+    """The context's management state when no vector writer may write it, else None.
+
+    Takes the context's shared management fence in the page's transaction
+    (``sync_managed_guard.target_fence``), so no mode change can come between
+    this check and the page's writes. A fence another transaction holds
+    exclusively (a mode change in progress) reads ``"busy"``.
+    """
+    from services.sync_managed_guard import target_fence
+
+    try:
+        fence = await target_fence(db, context_id)
+    except SyncLockBusyError:
+        return "busy"
+    return fence.state if fence.state not in (None, "manual") else None
+
+
 async def _locked_page(
     db: AsyncSession, context_id: UUID, after_id: UUID | None, page_size: int
-) -> tuple[list[UUID], list[Memory]]:
-    """The next page's ids, and the rows of it this run may write (locked)."""
-    stmt = select(Memory.id).where(*_live(context_id)).order_by(Memory.id).limit(page_size)
+) -> _Page:
+    """The next page's live rows, and the embedded ones this run may write (locked)."""
+    stmt = (
+        select(Memory.id, Memory.embedding_status)
+        .where(*_live(context_id))
+        .order_by(Memory.id)
+        .limit(page_size)
+    )
     if after_id is not None:
         stmt = stmt.where(Memory.id > after_id)
-    ids = list((await db.execute(stmt)).scalars().all())
+    listed = list((await db.execute(stmt)).all())
+    ids = [row[0] for row in listed]
     if not ids:
-        return [], []
+        return _Page([], [], [])
+    not_embedded = [row[0] for row in listed if row[1] != "success"]
     rows = list(
         (
             await db.execute(
@@ -188,7 +268,7 @@ async def _locked_page(
         .scalars()
         .all()
     )
-    return ids, rows
+    return _Page(ids, rows, not_embedded)
 
 
 def _point_of(points: dict[str, Any], memory: Memory, context_id: UUID) -> dict[str, Any] | None:
@@ -205,6 +285,48 @@ def _resource_text(payload: dict[str, Any]) -> str | None:
     return content if isinstance(content, str) and content else None
 
 
+async def _write_points(
+    collection: str,
+    *,
+    payloads: Sequence[tuple[UUID, dict[str, Any]]] = (),
+    vectors: Sequence[tuple[UUID, list[int], list[float]]] = (),
+    delete_vectors: Sequence[UUID] = (),
+) -> set[str]:
+    """Write a page's points; the ids of those that were gone (written nothing).
+
+    One request for the page. When it fails (one point deleted since it was
+    read fails the whole request), each point is written on its own: a point
+    that no longer exists is returned, any other failure is raised.
+    """
+    if not payloads and not vectors and not delete_vectors:
+        return set()
+    try:
+        await write_keyword_points(
+            collection, payloads=payloads, vectors=vectors, delete_vectors=delete_vectors
+        )
+        return set()
+    except QdrantError as exc:
+        logger.warning("keyword_rebuild_page_write_failed", error_class=type(exc).__name__)
+
+    gone: set[str] = set()
+
+    async def one(point_id: UUID, **write: Any) -> None:
+        try:
+            await write_keyword_points(collection, **write)
+        except QdrantError:
+            if await retrieve_keyword_points([point_id], collection):
+                raise
+            gone.add(str(point_id))
+
+    for point_id, payload in payloads:
+        await one(point_id, payloads=[(point_id, payload)])
+    for point_id, indices, values in vectors:
+        await one(point_id, vectors=[(point_id, indices, values)])
+    for point_id in delete_vectors:
+        await one(point_id, delete_vectors=[point_id])
+    return gone
+
+
 async def _lengths_page(
     db: AsyncSession,
     context_id: UUID,
@@ -214,33 +336,44 @@ async def _lengths_page(
 ) -> None:
     points = await retrieve_keyword_points([memory.point_id for memory in rows], collection)
     payload_writes: list[tuple[UUID, dict[str, Any]]] = []
+    lengths: list[tuple[Memory, dict[str, int | None]]] = []
     for memory in rows:
         payload = _point_of(points, memory, context_id)
         if payload is None:
-            result.missing_point += 1
+            result.count_row(_MISSING, memory.id)
             continue
         if owns_resource_point(memory):
             text = _resource_text(payload)
             if text is None:
-                result.missing_point += 1
+                result.count_row(_MISSING, memory.id)
                 continue
-            lengths = resource_keyword_lengths(tokenize_for_search(text))
+            lengths.append((memory, resource_keyword_lengths(tokenize_for_search(text))))
         else:
             fields = memory_keyword_tokens(memory).payload_fields()
             if any(payload.get(key) != value for key, value in fields.items()):
                 payload_writes.append((memory.point_id, fields))
-                result.tokens_rewritten += 1
-            lengths = memory_keyword_lengths(fields)
-        if apply_keyword_lengths(memory, lengths):
-            result.lengths_written += 1
+            lengths.append((memory, memory_keyword_lengths(fields)))
     # Under the page's row locks: the rows commit after the points are written.
-    await write_keyword_points(collection, payloads=payload_writes)
+    gone = await _write_points(collection, payloads=payload_writes)
+    rewritten = {str(point_id) for point_id, _ in payload_writes} - gone
+    for memory, values in lengths:
+        if str(memory.point_id) in gone:
+            result.count_row(_MISSING, memory.id)
+            continue
+        if str(memory.point_id) in rewritten:
+            result.tokens_rewritten += 1
+        if apply_keyword_lengths(memory, values):
+            result.lengths_written += 1
     await db.flush()
 
 
-def _same_vector(record: Any, indices: list[int], values: list[float]) -> bool:
+def _stored_bm25(record: Any) -> Any:
     vector = getattr(record, "vector", None)
-    stored = vector.get(KAGURA_MEMORIES_BM25_VECTOR_NAME) if isinstance(vector, dict) else None
+    return vector.get(KAGURA_MEMORIES_BM25_VECTOR_NAME) if isinstance(vector, dict) else None
+
+
+def _same_vector(record: Any, indices: list[int], values: list[float]) -> bool:
+    stored = _stored_bm25(record)
     if stored is None or len(stored.indices) != len(indices):
         return False
     old = dict(zip(stored.indices, stored.values, strict=True))
@@ -269,24 +402,26 @@ async def _vectors_page(
         [memory.point_id for memory in rows], collection, with_bm25=True
     )
     writes: list[tuple[UUID, list[int], list[float]]] = []
+    deletes: list[UUID] = []
+    by_point: dict[str, Memory] = {}
     for memory in rows:
         payload = _point_of(points, memory, context_id)
         if payload is None:
-            result.missing_point += 1
+            result.count_row(_MISSING, memory.id)
             continue
         if owns_resource_point(memory):
             text = _resource_text(payload)
             if text is None:
-                result.missing_point += 1
+                result.count_row(_MISSING, memory.id)
                 continue
             tokens = tokenize_for_search(text)
             if getattr(memory, RESOURCE_LENGTH_COLUMN) != token_count(tokens):
-                result.skipped += 1
+                result.count_row(_SKIPPED, memory.id)
                 continue
             indices, values = build_resource_sparse_vector(text, resource_avgdl, tokens=tokens)
         else:
             if not _memory_lengths_match(memory, payload):
-                result.skipped += 1
+                result.count_row(_SKIPPED, memory.id)
                 continue
             indices, values = build_document_sparse_vector(
                 summary_tokens=str(payload.get("summary_tokens") or ""),
@@ -295,15 +430,26 @@ async def _vectors_page(
                 summary_reading=str(payload.get("summary_reading") or ""),
                 stats=stats,
             )
+        record = points.get(str(memory.point_id))
+        by_point[str(memory.point_id)] = memory
         if not indices:
-            result.unchanged += 1
+            # No token left: the point carries no bm25 vector, as a writer leaves it.
+            stored = _stored_bm25(record)
+            if stored is not None and len(stored.indices):
+                deletes.append(memory.point_id)
+            else:
+                result.unchanged += 1
             continue
-        if _same_vector(points.get(str(memory.point_id)), indices, values):
+        if _same_vector(record, indices, values):
             result.unchanged += 1
             continue
         writes.append((memory.point_id, indices, values))
-    await write_keyword_points(collection, vectors=writes)
-    result.vectors_written += len(writes)
+    gone = await _write_points(collection, vectors=writes, delete_vectors=deletes)
+    for point_id in gone:
+        result.count_row(_MISSING, by_point[point_id].id)
+    result.vectors_written += sum(
+        1 for point_id in [*(w[0] for w in writes), *deletes] if str(point_id) not in gone
+    )
 
 
 async def _walk(
@@ -318,34 +464,57 @@ async def _walk(
     after_id: UUID | None = None
     seen = 0
     while True:
-        ids, rows = await _locked_page(db, context_id, after_id, page_size)
-        if not ids:
+        # The fence first, in the page's transaction: a managed context takes
+        # no write from this page on.
+        state = await _managed_state(db, context_id)
+        if state is not None:
+            await db.rollback()
+            raise _ContextManaged(state)
+        page = await _locked_page(db, context_id, after_id, page_size)
+        if not page.ids:
             await db.commit()
             return
-        result.skipped += len(ids) - len(rows)
-        if rows:
-            await handle(rows)
+        for memory_id in page.not_embedded:
+            result.count_row(_NOT_EMBEDDED, memory_id)
+        taken = {memory.id for memory in page.rows}
+        for memory_id in page.ids:
+            if memory_id not in taken and memory_id not in page.not_embedded:
+                result.count_row(_SKIPPED, memory_id)
+        if page.rows:
+            await handle(page.rows)
         # Ends the page's transaction: the locks go, the lengths commit.
         await db.commit()
         db.expunge_all()
-        after_id = ids[-1]
-        seen += len(ids)
+        after_id = page.ids[-1]
+        seen += len(page.ids)
         if progress is not None:
             progress(f"context {context_id} {label}: {seen} rows")
 
 
-async def _lance_page(collection: str, rows: Sequence[Memory], result: KeywordRebuild) -> None:
-    """Pass 1 on the LanceDB store: every summary point gets the row's token fields."""
+async def _lance_page(
+    context_id: UUID, collection: str, rows: Sequence[Memory], result: KeywordRebuild
+) -> None:
+    """Pass 1 on the LanceDB store: a summary point gets the row's token fields."""
+    summary_rows = [memory for memory in rows if not owns_resource_point(memory)]
     for memory in rows:
         if owns_resource_point(memory):
-            result.skipped += 1
+            # The resource indexer's points are not in the LanceDB store.
+            result.count_row(_MISSING, memory.id)
+    points = await retrieve_keyword_points([memory.point_id for memory in summary_rows], collection)
+    for memory in summary_rows:
+        payload = _point_of(points, memory, context_id)
+        if payload is None:
+            result.count_row(_MISSING, memory.id)
             continue
         fields = memory_keyword_tokens(memory).payload_fields()
-        # The store rebuilds the point's full-text column from the merged payload.
-        await update_memory_payload_in_qdrant(
-            memory.point_id, dict(fields), collection, cascade_chunks=False
-        )
-        result.tokens_rewritten += 1
+        if any(payload.get(key) != value for key, value in fields.items()):
+            # The store rebuilds the point's full-text column from the merged payload.
+            await update_memory_payload_in_qdrant(
+                memory.point_id, dict(fields), collection, cascade_chunks=False
+            )
+            result.tokens_rewritten += 1
+        else:
+            result.unchanged += 1
         if apply_keyword_lengths(memory, memory_keyword_lengths(fields)):
             result.lengths_written += 1
 
@@ -363,7 +532,7 @@ async def _rebuild_context(
     if result.store == "lance":
 
         async def lance(rows: Sequence[Memory]) -> None:
-            await _lance_page(collection, rows, result)
+            await _lance_page(context_id, collection, rows, result)
             await db.flush()
 
         await _walk(db, context_id, page_size, result, lance, progress, "tokens")
@@ -417,8 +586,19 @@ async def run_keyword_rebuild(
         if dry_run:
             await _plan_context(db, current, result)
         else:
-            await _rebuild_context(db, current, page_size, result, progress)
-            logger.info("keyword_rebuild_context_done", context_id=str(current))
+            result.next_context()
+            try:
+                await _rebuild_context(db, current, page_size, result, progress)
+                logger.info("keyword_rebuild_context_done", context_id=str(current))
+            except _ContextManaged as managed:
+                result.managed_contexts += 1
+                logger.info(
+                    "keyword_rebuild_context_managed",
+                    context_id=str(current),
+                    state=managed.state,
+                )
+                if progress is not None:
+                    progress(f"context {current} left: managed ({managed.state})")
         result.contexts += 1
         result.last_context = current
     if more:

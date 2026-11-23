@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from qdrant_client import AsyncQdrantClient
-from sqlalchemy import select
+from qdrant_client.models import PointVectors, SparseVector
+from sqlalchemy import select, update
 
 from db import qdrant as qdrant_module
 from db.qdrant import ensure_kagura_memories_collection, get_collection_name
@@ -218,3 +220,147 @@ async def test_written_equals_rebuilt_and_the_rebuild_is_idempotent(db_session, 
 
     plan = await run_keyword_rebuild(db_session, context_id=context.id)
     assert (plan.rows, plan.rows_without_lengths) == (len(rows), 0)
+
+
+async def _memory(db_session, context: Context, summary: str, content: str) -> Memory:
+    memory = Memory(
+        id=uuid4(),
+        user_id=_USER,
+        workspace_id=context.workspace_id,
+        context_id=context.id,
+        summary=summary,
+        context_summary=None,
+        content=content,
+        client="test",
+        type="note",
+        importance=0.5,
+        embedding_status="success",
+    )
+    db_session.add(memory)
+    await db_session.commit()
+    return memory
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_point_deleted_before_the_page_write_is_counted_and_the_run_goes_on(
+    db_session, qdrant, routed, monkeypatch
+):
+    """Qdrant fails the page's batch for a point that is gone; the rebuild
+    writes the page point by point, counts that one and goes on."""
+    from tasks import keyword_rebuild as task
+
+    context, collection = routed
+    gone = await _memory(db_session, context, "認証エラーの対処", "トークンを更新する。")
+    kept = await _memory(db_session, context, "移行の手順", "バックアップを取ってから移行する。")
+    for memory in (gone, kept):
+        await _write(db_session, memory, context, collection)
+    # Raw weights, as before #2984, so both points need a new vector.
+    for memory in (gone, kept):
+        vector = _bm25(await _point(qdrant, collection, memory))
+        await qdrant.update_vectors(
+            collection_name=collection,
+            points=[
+                PointVectors(
+                    id=str(memory.id),
+                    vector={
+                        "bm25": SparseVector(
+                            indices=list(vector), values=[v * 3 for v in vector.values()]
+                        )
+                    },
+                )
+            ],
+        )
+    real_retrieve = task.retrieve_keyword_points
+
+    async def retrieve_then_delete(point_ids, collection_name, *, with_bm25=False):
+        found = await real_retrieve(point_ids, collection_name, with_bm25=with_bm25)
+        if with_bm25 and str(gone.id) in found:
+            await qdrant.delete(collection_name=collection_name, points_selector=[str(gone.id)])
+        return found
+
+    monkeypatch.setattr(task, "retrieve_keyword_points", retrieve_then_delete)
+
+    applied = await run_keyword_rebuild(db_session, context_id=context.id, dry_run=False)
+
+    assert applied.missing_point == 1
+    assert applied.vectors_written == 1
+    assert applied.managed_contexts == 0
+    assert await qdrant.retrieve(collection_name=collection, ids=[str(gone.id)]) == []
+    monkeypatch.setattr(task, "retrieve_keyword_points", real_retrieve)
+    again = await run_keyword_rebuild(db_session, context_id=context.id, dry_run=False)
+    assert again.vectors_written == 0
+    assert again.unchanged == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_point_without_tokens_loses_a_stale_bm25_vector(db_session, qdrant, routed):
+    context, collection = routed
+    memory = await _memory(db_session, context, "", "")
+    await _write(db_session, memory, context, collection)
+    written = await _point(qdrant, collection, memory)
+    assert "bm25" not in (written.vector or {})
+    await qdrant.update_vectors(
+        collection_name=collection,
+        points=[
+            PointVectors(
+                id=str(memory.id), vector={"bm25": SparseVector(indices=[7], values=[2.0])}
+            )
+        ],
+    )
+
+    applied = await run_keyword_rebuild(db_session, context_id=context.id, dry_run=False)
+
+    assert applied.vectors_written == 1
+    record = await _point(qdrant, collection, memory)
+    assert "bm25" not in (record.vector or {})
+    assert record.vector["dense"] == written.vector["dense"]
+    again = await run_keyword_rebuild(db_session, context_id=context.id, dry_run=False)
+    assert again.written == 0
+    assert again.unchanged == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_migration_keeps_lengths_a_newer_write_stored(db_session, routed):
+    """``reembed_context`` stores a page's lengths after its unlocked read: an
+    edit or a pipeline write since then keeps its own lengths."""
+    from services.embedding_migration_service import _store_keyword_lengths
+
+    context, _ = routed
+    edited = await _memory(db_session, context, "古い要約", "古い本文")
+    reembedded = await _memory(db_session, context, "要約", "本文")
+    untouched = await _memory(db_session, context, "そのまま", "本文")
+    ids = [edited.id, reembedded.id, untouched.id]
+    read = {
+        m.id: m
+        for m in (await db_session.execute(select(Memory).where(Memory.id.in_(ids)))).scalars()
+    }
+    db_session.expunge_all()
+    await db_session.commit()
+
+    # After the page's read: an edit (stamps updated_at) and a pipeline success
+    # write (sets the digest), each storing the lengths of its own point.
+    newer = dict.fromkeys(keyword_stats.LENGTH_COLUMNS, None) | {"keyword_summary_len": 42}
+    await db_session.execute(
+        update(Memory)
+        .where(Memory.id == edited.id)
+        .values(updated_at=datetime(2030, 1, 1), summary="新しい要約", **newer)
+    )
+    await db_session.execute(
+        update(Memory)
+        .where(Memory.id == reembedded.id)
+        .values(embedded_text_digest="0" * 32, **newer)
+    )
+    await db_session.commit()
+
+    stale = dict.fromkeys(keyword_stats.LENGTH_COLUMNS, None) | {"keyword_summary_len": 1}
+    await _store_keyword_lengths(db_session, dict.fromkeys(ids, stale), read)
+
+    stored = {
+        m.id: m.keyword_summary_len
+        for m in (
+            await db_session.execute(
+                select(Memory).where(Memory.id.in_(ids)).execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    assert stored == {edited.id: 42, reembedded.id: 42, untouched.id: 1}

@@ -20,12 +20,21 @@ with a ``resume`` line (``--after <context id>``, the last context finished) to
 go on from. Stopping a run mid-context (Ctrl-C) is safe: a rerun of that
 context redoes it, and points already rebuilt are reported ``unchanged``.
 
-Rows another writer is busy with (locked, re-queued, being embedded) are
-skipped and counted (``skipped``); their writer weights them. With the LanceDB
-vector store (no sparse vectors: its own full-text index scores with BM25) it
-rewrites every summary point's token fields from the row, which rebuilds the
-point's full-text column, and stores the lengths: run it there too after an
-upgrade that changes the tokenization (#2986).
+Rows another writer holds (locked, or changed between the two passes) are
+skipped and counted (``skipped``); live rows that are not embedded (pending,
+being embedded, failed) are counted as ``not_embedded``; their writers weight
+them. A row whose point is gone is counted as ``missing_point``. Each row is
+counted once. A feed-managed context (a sync feed, or one stopping) is left
+and counted (``managed_contexts``).
+
+With the LanceDB vector store (no sparse vectors: its own full-text index
+scores with BM25) it rewrites a summary point's token fields from the row when
+they differ from the stored ones, which rebuilds the point's full-text column,
+and stores the lengths: run it there too after an upgrade that changes the
+tokenization (#2986).
+
+Other API processes keep their cached averages for up to 5 minutes after a
+run, so the weighting of new writes settles within 5 minutes of it.
 
 Exit codes: 0 ok · 1 error · 2 usage.
 """
@@ -62,7 +71,9 @@ def _print_applied(result: KeywordRebuild) -> None:
     print(f"vectors_written   {result.vectors_written}")
     print(f"unchanged         {result.unchanged}")
     print(f"skipped           {result.skipped}")
+    print(f"not_embedded      {result.not_embedded}")
     print(f"missing_point     {result.missing_point}")
+    print(f"managed_contexts  {result.managed_contexts}")
     print(f"seconds           {result.seconds:.1f}")
     _print_resume(result)
 
