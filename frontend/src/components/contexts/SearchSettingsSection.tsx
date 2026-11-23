@@ -649,7 +649,9 @@ export function SearchSettingsSection({
     ...(fusionDirty ? [t("unsavedFieldFusion")] : []),
   ];
   // #2980: what `auto` resolves to now (server-computed for the stored
-  // config), named only while the stored choice is auto.
+  // config), named only while the stored choice is auto and neither the
+  // weights nor the fusion have unsaved edits (the stored value says nothing
+  // about staged ones).
   const effectiveFusionLabel =
     config?.fusion_effective === "rrf"
       ? t("fusion.effectiveRrf")
@@ -659,7 +661,10 @@ export function SearchSettingsSection({
           ? t("fusion.effectiveWeighted")
           : null;
   const autoFusionLabel =
-    config?.fusion === "auto" && effectiveFusionLabel !== null
+    config?.fusion === "auto" &&
+    effectiveFusionLabel !== null &&
+    !weightsDirty &&
+    !fusionDirty
       ? t("fusion.autoCurrent", { effective: effectiveFusionLabel })
       : t("fusion.auto");
   const unsavedBadge = (

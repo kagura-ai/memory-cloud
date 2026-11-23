@@ -13,9 +13,11 @@ Locks: ``ADD COLUMN`` and ``ADD CONSTRAINT ... NOT VALID`` take a brief
 takes ``SHARE UPDATE EXCLUSIVE`` on it (reads and writes go on). No other
 table is locked (the foreign key to ``contexts`` is not touched).
 
-The previous release never names the column: its INSERTs get ``auto`` from
-the server default, which the CHECK accepts, and its SELECTs list their
-columns. Code and migration may therefore be deployed in either order.
+Order: run this migration BEFORE starting the new code. The new code
+selects and inserts the column on every search-config read and context
+creation. The previous release never names the column (its INSERTs get
+``auto`` from the server default, which the CHECK accepts, and its SELECTs
+list their columns), so it keeps working against the migrated schema.
 Re-runnable (``IF NOT EXISTS`` / ``DROP CONSTRAINT IF EXISTS``).
 
 Downgrade drops the CHECK and the column; every context then fuses by the

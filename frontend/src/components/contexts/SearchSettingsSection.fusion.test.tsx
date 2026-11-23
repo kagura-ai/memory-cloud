@@ -195,6 +195,29 @@ describe("fusion select — presence", () => {
     ).toBeTruthy();
   });
 
+  it("drops the effective value while a weight edit is staged, and brings it back on discard", async () => {
+    await renderWith(AUTO);
+    const current = "fusion.autoCurrent(effective=fusion.effectiveRrf)";
+    expect(screen.getByText(current)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("semanticWeightLabel"), {
+      target: { value: "0.8" },
+    });
+    // The stored effective value says nothing about the staged weights.
+    expect(screen.queryByText(current)).toBeNull();
+    expect(screen.getByText("fusion.auto")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "discardChanges" }));
+    await waitFor(() => expect(screen.getByText(current)).toBeTruthy());
+  });
+
+  it("drops the effective value while the fusion select has a staged edit", async () => {
+    await renderWith(AUTO);
+    fireEvent.change(fusionSelect(), { target: { value: "weighted" } });
+    expect(
+      screen.queryByText("fusion.autoCurrent(effective=fusion.effectiveRrf)"),
+    ).toBeNull();
+    expect(screen.getByText("fusion.auto")).toBeTruthy();
+  });
+
   it("names the keyword floor when auto resolves to it", async () => {
     await renderWith({ ...AUTO, fusion_effective: "keyword_floor" });
     expect(
