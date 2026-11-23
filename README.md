@@ -34,7 +34,7 @@
 
 ## Keep the context. Change the conversation.
 
-> **DolphinBench: 455 of 600 tasks (75.8%), self-tested.** With Hermes and GPT 5.6 Luna, Kagura Memory Cloud passed more tasks than each memory system in the benchmark's published Hermes + Luna results (Mem0 424, Hindsight 417, Honcho 411). The run is self-reported and awaits the maintainers' review: [run record](https://github.com/mem0ai/dolphinbench/pull/16) · [evidence](https://github.com/kagura-ai/dolphinbench/releases/tag/kagura-memory-cloud-hermes-20261123) · [comparison](#dolphinbench-memory-for-an-agent-that-acts).
+> **DolphinBench: 455 of 600 tasks (75.8%), self-tested on November 23, 2026.** With Hermes and GPT 5.6 Luna, Kagura Memory Cloud passed more tasks than each memory system in the benchmark's published Hermes + Luna results (Mem0 424, Hindsight 417, Honcho 411). The run is self-reported and awaits the maintainers' review: [run record](https://github.com/mem0ai/dolphinbench/pull/16) · [evidence](https://github.com/kagura-ai/dolphinbench/releases/tag/kagura-memory-cloud-hermes-20261123) · [comparison](#dolphinbench-memory-for-an-agent-that-acts).
 
 > **OpenAI Plugin released:** [Kagura Memory Cloud is available in ChatGPT](https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade). Add the plugin and sign in to Kagura to save and recall memories in your conversations. See [supported platforms](#supported-platforms) for the other ways to connect.
 

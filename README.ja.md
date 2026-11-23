@@ -34,7 +34,7 @@
 
 ## 会話が変わっても、仕事の経緯は引き継げる
 
-> **DolphinBench：600タスク中455（75.8%）、自社測定。** HermesとGPT 5.6 Lunaの組み合わせで、Kagura Memory Cloudは、ベンチマークが公開しているHermes + Lunaのどの記憶システムよりも多くのタスクに合格しました（Mem0 424、Hindsight 417、Honcho 411）。自己申告の結果で、メンテナーの審査待ちです：[実行記録](https://github.com/mem0ai/dolphinbench/pull/16) · [証拠](https://github.com/kagura-ai/dolphinbench/releases/tag/kagura-memory-cloud-hermes-20261123) · [比較](#dolphinbench行動するエージェントの記憶)。
+> **DolphinBench：600タスク中455（75.8%）、自社測定（2026年11月23日）。** HermesとGPT 5.6 Lunaの組み合わせで、Kagura Memory Cloudは、ベンチマークが公開しているHermes + Lunaのどの記憶システムよりも多くのタスクに合格しました（Mem0 424、Hindsight 417、Honcho 411）。自己申告の結果で、メンテナーの審査待ちです：[実行記録](https://github.com/mem0ai/dolphinbench/pull/16) · [証拠](https://github.com/kagura-ai/dolphinbench/releases/tag/kagura-memory-cloud-hermes-20261123) · [比較](#dolphinbench行動するエージェントの記憶)。
 
 > **OpenAI Plugin公開済み：** [ChatGPTにKagura Memory Cloudを追加](https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade)して、Kaguraにサインインすれば、会話の中で記憶を保存・検索できます。他のAIとの接続方法は[対応プラットフォーム](#対応プラットフォーム)をご覧ください。
 
