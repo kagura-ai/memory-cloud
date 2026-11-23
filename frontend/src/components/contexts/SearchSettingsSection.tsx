@@ -73,10 +73,10 @@ import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { UnsavedChangesBar } from "@/components/contexts/UnsavedChangesBar";
 import { SearchPurposeSelect } from "@/components/contexts/SearchPurposeSelect";
 import {
+  PRESET_SEARCH_PURPOSES,
   SEARCH_PURPOSE_PRESETS,
-  SEARCH_PURPOSES,
   matchSearchPurpose,
-  type SearchPurpose,
+  type PresetSearchPurpose,
 } from "@/lib/searchPurposes";
 import { cn } from "@/styles/design-tokens";
 
@@ -400,11 +400,12 @@ export function SearchSettingsSection({
 
   /**
    * #2983: a purpose stages its weights and fusion through the same staging
-   * a manual edit uses, so Save and Discard work unchanged. Custom stages
-   * nothing. A backend that predates the fusion setting gets the weights only.
+   * a manual edit uses, so Save and Discard work unchanged. Custom is not a
+   * choice (the select shows it for values that match no purpose). A backend
+   * that predates the fusion setting gets the weights only.
    */
-  const handlePurposeChange = (purpose: SearchPurpose) => {
-    if (purpose === "custom" || !config) return;
+  const handlePurposeChange = (purpose: PresetSearchPurpose) => {
+    if (!config) return;
     const preset = SEARCH_PURPOSE_PRESETS[purpose];
     setEditedConfig({
       ...editedConfig,
@@ -773,7 +774,8 @@ export function SearchSettingsSection({
                     ? getCurrentValue("fusion")
                     : undefined,
               })}
-              purposes={SEARCH_PURPOSES}
+              purposes={PRESET_SEARCH_PURPOSES}
+              withCustom
               onChange={handlePurposeChange}
               hint={t("purpose.settingsHint")}
             />

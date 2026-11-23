@@ -32,13 +32,7 @@ export const SEARCH_PURPOSE_PRESETS: Readonly<
 /** The purpose a new context gets: today's defaults. */
 export const DEFAULT_SEARCH_PURPOSE: PresetSearchPurpose = "conversation";
 
-/** The order the select lists them in. */
-export const SEARCH_PURPOSES: readonly SearchPurpose[] = [
-  "conversation",
-  "documents",
-  "custom",
-];
-
+/** The purposes that can be chosen, in the order the select lists them. */
 export const PRESET_SEARCH_PURPOSES: readonly PresetSearchPurpose[] = [
   "conversation",
   "documents",
@@ -47,8 +41,35 @@ export const PRESET_SEARCH_PURPOSES: readonly PresetSearchPurpose[] = [
 const round2 = (value: number) => Math.round(value * 100) / 100;
 
 /**
+ * The weights at which `auto` follows the deployment's fusion; at any other
+ * weights (compared at two places) it resolves to `weighted`, as the server
+ * does (#2980).
+ */
+const AUTO_DEPLOYMENT_WEIGHTS = { semantic_weight: 0.6, bm25_weight: 0.4 };
+
+/**
+ * Whether `fusion` searches as the preset's fusion does at the preset's
+ * weights: the same value, or `weighted` for an `auto` preset whose weights
+ * make `auto` resolve to `weighted`.
+ */
+function fusionMatches(
+  preset: Readonly<SearchPurposeValues>,
+  fusion: ContextFusion,
+): boolean {
+  if (fusion === preset.fusion) return true;
+  return (
+    preset.fusion === "auto" &&
+    fusion === "weighted" &&
+    (preset.semantic_weight !== AUTO_DEPLOYMENT_WEIGHTS.semantic_weight ||
+      preset.bm25_weight !== AUTO_DEPLOYMENT_WEIGHTS.bm25_weight)
+  );
+}
+
+/**
  * The purpose whose values equal the given ones, else Custom. Weights are
- * compared after rounding to two places, the fusion exactly. A `fusion` of
+ * compared after rounding to two places, the fusion exactly, except that a
+ * preset whose weights make `auto` resolve to `weighted` (Documents) also
+ * matches an explicit `weighted`: the search is the same. A `fusion` of
  * `undefined` (a server that does not report it) matches on the weights only.
  */
 export function matchSearchPurpose(values: {
@@ -61,7 +82,7 @@ export function matchSearchPurpose(values: {
     if (
       round2(values.semantic_weight) === preset.semantic_weight &&
       round2(values.bm25_weight) === preset.bm25_weight &&
-      (values.fusion === undefined || values.fusion === preset.fusion)
+      (values.fusion === undefined || fusionMatches(preset, values.fusion))
     ) {
       return purpose;
     }

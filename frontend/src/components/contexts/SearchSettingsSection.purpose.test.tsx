@@ -1,10 +1,11 @@
 /**
  * SearchSettingsSection — the Purpose select (#2983).
  *
- * A select above the weights: conversation and work history, documents and
- * manuals, or custom. Choosing a purpose stages its weights and fusion on the
- * save bar (nothing is sent until Save); the select shows the purpose whose
- * values equal the current ones, else Custom. A backend that predates the
+ * A select above the weights: conversation and work history, or documents
+ * and manuals; Custom is listed, not selectable, and names values that match
+ * no purpose. Choosing a purpose stages its weights and fusion on the save
+ * bar (nothing is sent until Save); the select shows the purpose whose values
+ * equal the current ones, else Custom. A backend that predates the
  * fusion setting matches and stages the weights only.
  *
  * The Radix select is swapped for a native one (jsdom has no pointer events).
@@ -67,8 +68,18 @@ vi.mock("@/components/ui/select", () => ({
   SelectTrigger: ({ children }: { children?: ReactNode }) => <>{children}</>,
   SelectValue: () => null,
   SelectContent: ({ children }: { children?: ReactNode }) => <>{children}</>,
-  SelectItem: ({ value, children }: { value: string; children: ReactNode }) => (
-    <option value={value}>{children}</option>
+  SelectItem: ({
+    value,
+    disabled,
+    children,
+  }: {
+    value: string;
+    disabled?: boolean;
+    children: ReactNode;
+  }) => (
+    <option value={value} disabled={disabled}>
+      {children}
+    </option>
   ),
 }));
 
@@ -122,6 +133,7 @@ vi.mock("@/lib/api/base", () => ({
 }));
 
 import { SearchSettingsSection } from "./SearchSettingsSection";
+import { SearchPurposeSelect } from "./SearchPurposeSelect";
 import { SEARCH_PURPOSE_PRESETS } from "@/lib/searchPurposes";
 
 const BASE = {
@@ -193,8 +205,14 @@ describe("purpose select — presence", () => {
   it("renders above the weights with the three purposes and their guidance", async () => {
     await renderWith(CURRENT);
     expect(screen.getByText("purpose.label")).toBeTruthy();
-    const options = Array.from(purposeSelect().options).map((o) => o.value);
-    expect(options).toEqual(["conversation", "documents", "custom"]);
+    const options = Array.from(purposeSelect().options);
+    expect(options.map((o) => o.value)).toEqual([
+      "conversation",
+      "documents",
+      "custom",
+    ]);
+    // Custom is a state the values are in, not a choice.
+    expect(options.map((o) => o.disabled)).toEqual([false, false, true]);
     expect(
       screen.getByText("purpose.conversationGuidance(semantic=0.6,keyword=0.4)"),
     ).toBeTruthy();
@@ -221,7 +239,11 @@ describe("purpose select — matching the stored values", () => {
     ["custom", { semantic_weight: 0.7, bm25_weight: 0.3, fusion: "auto" }],
     // A non-auto fusion is Custom even with a purpose's weights.
     ["custom", { semantic_weight: 0.6, bm25_weight: 0.4, fusion: "rrf" }],
-    ["custom", { semantic_weight: 0.8, bm25_weight: 0.2, fusion: "weighted" }],
+    // At the documents weights auto resolves to weighted: the same search.
+    ["documents", { semantic_weight: 0.8, bm25_weight: 0.2, fusion: "weighted" }],
+    // At 0.6 / 0.4 auto follows the deployment: weighted is another search.
+    ["custom", { semantic_weight: 0.6, bm25_weight: 0.4, fusion: "weighted" }],
+    ["custom", { semantic_weight: 0.8, bm25_weight: 0.2, fusion: "rrf" }],
   ])("shows %s for %j", async (expected, values) => {
     await renderWith({ ...CURRENT, ...values });
     expect(purposeSelect().value).toBe(expected);
@@ -316,11 +338,22 @@ describe("purpose select — staging", () => {
     await waitFor(() => expect(screen.getByText(current)).toBeTruthy());
   });
 
-  it("choosing Custom stages nothing", async () => {
-    await renderWith({ ...CURRENT, semantic_weight: 0.7, bm25_weight: 0.3 });
+  it("Custom names unmatched values and cannot be chosen", async () => {
+    await renderWith(CURRENT);
+    expect(purposeSelect().value).toBe("conversation");
     fireEvent.change(purposeSelect(), { target: { value: "custom" } });
     expect(saveBar()).toBeNull();
-    expect(purposeSelect().value).toBe("custom");
+    expect(purposeSelect().value).toBe("conversation");
+  });
+
+  it("ignores a value that is not a purpose", async () => {
+    await renderWith(CURRENT);
+    fireEvent.change(purposeSelect(), { target: { value: "" } });
+    expect(saveBar()).toBeNull();
+    expect(purposeSelect().value).toBe("conversation");
+    expect(
+      (screen.getByLabelText("semanticWeightLabel") as HTMLInputElement).value,
+    ).toBe("0.6");
   });
 });
 
@@ -346,5 +379,44 @@ describe("purpose select — a backend that predates the fusion setting", () => 
       bm25_weight: 0.2,
     });
     expect(body).not.toHaveProperty("fusion");
+  });
+});
+
+describe("SearchPurposeSelect — what reaches onChange", () => {
+  it("passes a purpose and ignores Custom and a value that is not a purpose", () => {
+    const onChange = vi.fn();
+    render(
+      <SearchPurposeSelect
+        id="p"
+        value="custom"
+        purposes={["conversation", "documents"]}
+        withCustom
+        onChange={onChange}
+      />,
+    );
+    const select = screen.getByRole("combobox");
+    fireEvent.change(select, { target: { value: "" } });
+    fireEvent.change(select, { target: { value: "custom" } });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.change(select, { target: { value: "documents" } });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("documents");
+  });
+
+  it("lists no Custom without withCustom", () => {
+    render(
+      <SearchPurposeSelect
+        id="p"
+        value="conversation"
+        purposes={["conversation", "documents"]}
+        onChange={vi.fn()}
+      />,
+    );
+    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual([
+      "conversation",
+      "documents",
+    ]);
+    expect(screen.queryByText("purpose.customGuidance")).toBeNull();
   });
 });
