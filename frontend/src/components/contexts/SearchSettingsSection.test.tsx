@@ -306,7 +306,12 @@ describe("SearchSettingsSection reranking off on this deployment (#1580)", () =>
     expect(screen.queryByText("enableReranking")).not.toBeInTheDocument();
     expect(screen.queryByText("noRerankerKeys")).not.toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
-    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+    // The purpose select (#2983) is not a reranker control.
+    expect(
+      screen
+        .queryAllByRole("combobox")
+        .filter((el) => el.id !== "search_purpose"),
+    ).toHaveLength(0);
   });
 
   it("makes no external-keys request when features.reranking is false", async () => {

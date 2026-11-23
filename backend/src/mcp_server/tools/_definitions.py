@@ -1173,7 +1173,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     "fusion": {
                         "type": "string",
                         "enum": ["auto", "rrf", "weighted"],
-                        "description": "How hybrid recall fuses the two legs. 'auto' (default): 'weighted' if the weights are not 0.6/0.4, else the deployment's. 'rrf' suits conversation and work history; 'weighted' with a higher semantic_weight suits documents and manuals.",
+                        "description": "How hybrid recall fuses the two legs. 'auto' (default, suits most contexts): 'weighted' if the weights are not 0.6/0.4, else the deployment's. 'rrf' or 'weighted' pins it whatever the deployment uses.",
                     },
                     "fetch_factor": {
                         "type": "integer",

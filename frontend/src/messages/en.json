@@ -1972,7 +1972,10 @@
     "contextUnlockedSuccess": "Context unlocked",
     "failedToUpdateLock": "Failed to update lock status",
     "cannotDeleteLocked": "Cannot delete \"{name}\" — context is locked. Unlock it first.",
-    "deleteContextUnlocked": "This will permanently delete \"{name}\" and all memories in this context. This action cannot be undone."
+    "deleteContextUnlocked": "This will permanently delete \"{name}\" and all memories in this context. This action cannot be undone.",
+    "searchPurposeHint": "Sets the context's search weights and fusion. You can change them later in the context's search settings.",
+    "searchPurposeNotApplied": "The context was created, but its search purpose was not applied. You can change it in the context's search settings.",
+    "searchPurposeNotAppliedReason": "The context was created, but its search purpose was not applied ({reason}). You can change it in the context's search settings."
   },
   "memories": {
     "title": "Memories",
@@ -2603,7 +2606,7 @@
     "fusion": {
       "label": "Fusion",
       "description": "How a hybrid search combines its semantic and keyword results.",
-      "guidance": "Conversation and work history: rank fusion. Documents and manuals: weighted, with a higher semantic weight.",
+      "guidance": "Both purposes above use Auto, which follows the deployment's setting and the weights (see below). Rank fusion (rrf) or Weighted pins this context to that fusion, whatever the deployment uses.",
       "autoDesc": "Auto uses weighted when the weights above differ from 0.6 / 0.4, and the deployment's default otherwise.",
       "auto": "Auto",
       "autoCurrent": "Auto (currently {effective})",
@@ -2684,6 +2687,16 @@
       "inactiveCap": "LLM result selection is on for this context but inactive: the plan's limit is exceeded ({inUse} of {limit} in use) and earlier-enabled contexts come first.",
       "inactiveCapNoCount": "LLM result selection is on for this context but inactive: the plan's limit is exceeded and earlier-enabled contexts come first.",
       "inactiveNote": "Recall returns the ranked results without selection meanwhile. It applies again after an upgrade or once a slot frees up."
+    },
+    "purpose": {
+      "label": "Purpose",
+      "conversation": "Conversation and work history",
+      "documents": "Documents and manuals",
+      "custom": "Custom",
+      "conversationGuidance": "for conversations, session notes and work history. Semantic {semantic} / keyword {keyword}, fusion auto.",
+      "documentsGuidance": "for documents, manuals and FAQs. Semantic {semantic} / keyword {keyword}, fusion auto.",
+      "customGuidance": "for mixed content, or values you tuned yourself: set the weights and the fusion below.",
+      "settingsHint": "Choosing a purpose fills the weights and the fusion below as unsaved changes. Every value stays editable."
     }
   },
   "externalKeys": {
