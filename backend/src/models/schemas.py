@@ -2090,10 +2090,11 @@ class ContextSearchConfigUpdate(BaseModel):
     fusion: Literal["auto", "rrf", "weighted"] = Field(
         default="auto",
         description="How a hybrid search fuses its semantic and keyword legs. auto "
-        "(default): weighted when semantic_weight / bm25_weight differ from 0.6 / 0.4, "
-        "else the deployment's HYBRID_FUSION. rrf: reciprocal rank fusion, the "
-        "weights unused (suits conversation and work history). weighted: the "
-        "weighted blend (suits documents and manuals, with a higher semantic_weight)",
+        "(default, for conversation and work history as for documents): weighted "
+        "when semantic_weight / bm25_weight differ from 0.6 / 0.4, else the "
+        "deployment's HYBRID_FUSION. rrf (reciprocal rank fusion, the weights "
+        "unused) or weighted pins the context to that fusion whatever the "
+        "deployment uses",
     )
     # Issue #2015: optional (default-preserving via exclude_unset in the repo).
     content_chunks_enabled: bool = Field(
