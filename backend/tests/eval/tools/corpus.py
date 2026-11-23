@@ -155,19 +155,43 @@ def load_corpus(path: Path | None = None) -> Corpus:
     return Corpus(meta=raw.get("meta", {}), documents=documents, queries=tuple(queries))
 
 
+def _dictionary_form_tokens(text: str) -> str:
+    """The production tokenizer's segmentation with Sudachi's dictionary form.
+
+    The leakage gate judges how a query was authored (did it reuse its
+    document's words?), not how the keyword leg tokenizes. Since #2986 the
+    keyword leg indexes Japanese in Sudachi's normalized form, which maps a
+    hiragana spelling to the kanji one (そろえる -> 揃える): a query written in
+    hiragana on purpose would read as reusing its document's words. So the
+    gate keeps the dictionary form (the lemma before #2986): same stop
+    parts of speech, non-CJK text lowercased, lowercase text on a Sudachi error.
+    """
+    from utils.tokenizer import _CJK_PATTERN, _STOP_POS, _get_sudachi
+
+    if not text:
+        return ""
+    if not _CJK_PATTERN.search(text):
+        return text.lower()
+    try:
+        return " ".join(
+            token.dictionary_form().lower()
+            for token in _get_sudachi().tokenize(text)
+            if token.part_of_speech()[0] not in _STOP_POS
+        )
+    except Exception:  # noqa: BLE001 — the gate must not depend on Sudachi
+        return text.lower()
+
+
 @lru_cache(maxsize=4096)
 def tokens(text: str) -> tuple[str, ...]:
-    """BM25-aligned token tuple for ``text`` (reuses production tokenizer).
+    """Token tuple for ``text``: the production segmentation, dictionary forms.
 
-    Falls back gracefully when Sudachi is unavailable (the production tokenizer
-    lowercases non-CJK / returns lowercase on error), so the deterministic CI
-    gate does not hard-depend on the Sudachi dictionary being installed.
+    See ``_dictionary_form_tokens`` for why not ``tokenize_for_search``.
+    Falls back gracefully when Sudachi is unavailable (non-CJK lowercased,
+    lowercase text on error), so the deterministic CI gate does not
+    hard-depend on the Sudachi dictionary being installed.
     """
-    # Imported lazily so importing this module (e.g. for the loader alone) does
-    # not pull the tokenizer + its optional Sudachi backend.
-    from utils.tokenizer import tokenize_for_search
-
-    joined = tokenize_for_search(text) or ""
+    joined = _dictionary_form_tokens(text) or ""
     return tuple(t for t in joined.split() if t)
 
 
