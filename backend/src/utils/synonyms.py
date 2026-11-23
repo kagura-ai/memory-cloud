@@ -6,6 +6,11 @@ O(1) synonym lookup for BM25 query expansion.
 Format: CSV with group_id as first column, surface form at column index 8.
 Empty lines separate groups. All surfaces in the same group are synonyms.
 
+#2986: the keyword tokens are Sudachi normalized forms, so each surface is
+normalized once at load (``utils.tokenizer.normalize_term``) and the dictionary
+is keyed by, and expands to, normalized forms: spelling variants in one group
+collapse to one entry, and a token never expands to a variant of itself.
+
 Source: ``src/main/text/synonyms.txt`` of SudachiDict release v20261015
 (tag ``v20261015``, commit 830bf9e1313f6f75235ba87ee041e144dbcad8c1, #2985), the
 release of the locked ``sudachidict-core``:
@@ -42,15 +47,19 @@ def _load_synonyms(path: str | Path | None = None) -> dict[str, list[str]]:
         path: Path to synonyms.txt (default: backend/data/sudachi_synonyms.txt)
 
     Returns:
-        Dict mapping each surface form to its synonym group (including itself)
+        Dict mapping each normalized form to the other normalized forms of its
+        group(s), in file order, without duplicates
     """
+    from utils.tokenizer import normalize_term
+
     filepath = Path(path) if path else _DEFAULT_PATH
     if not filepath.exists():
         logger.warning("sudachi_synonyms_not_found", path=str(filepath))
         return {}
 
-    # Group surfaces by group_id
+    # Group the normalized surfaces by group_id
     groups: dict[str, list[str]] = defaultdict(list)
+    normalized: dict[str, str] = {}
 
     with open(filepath, encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -60,7 +69,11 @@ def _load_synonyms(path: str | Path | None = None) -> dict[str, list[str]]:
             group_id = row[0].strip()
             surface = row[8].strip()
             if group_id and surface:
-                groups[group_id].append(surface)
+                term = normalized.get(surface)
+                if term is None:
+                    term = normalized[surface] = normalize_term(surface)
+                if term and term not in groups[group_id]:
+                    groups[group_id].append(term)
 
     # Build reverse lookup: surface → all synonyms in its group
     synonym_dict: dict[str, list[str]] = {}
@@ -104,7 +117,7 @@ def expand_synonyms(token: str) -> list[str]:
     """Expand a token to include its synonyms.
 
     Args:
-        token: A single token (Sudachi normalized form)
+        token: A single keyword token (``tokenize_for_search``: a normalized form)
 
     Returns:
         List containing the token itself + any synonyms.

@@ -4596,6 +4596,13 @@ summary reading 0.5; a resource document's text 1.0, with averages of its own).
 The constants are not settings. [Concepts](concepts.md#hybrid-search) describes
 the scoring.
 
+The same release (#2986) indexes and searches Japanese words in Sudachi's
+normalized form instead of the dictionary form, so spelling variants of a word
+(引越し / 引っ越し, サーバ / サーバー) become one keyword token. Queries use the
+new tokens as soon as the new code runs; memories written before keep their
+old tokens until the rebuild below rewrites them (or they are written again),
+so a query in one spelling can miss an older memory in another until then.
+
 The field lengths are five nullable columns on `memories` (revision
 `f61_2984_keyword_lengths`), written by every point writer (the embedding
 pipeline, Sleep, the resource indexer, the embedding-model migration). A
@@ -4604,8 +4611,12 @@ API process, so a new memory is weighted with averages up to that old (and
 without itself); the rebuild below brings every point of a context to its
 current averages. A context merge copies the source's points as they are: the
 copies keep the source context's weighting until the rebuild or their next
-write. With the LanceDB store (`KAGURA_VECTOR_BACKEND=lance`) nothing changes: its own
-full-text index already scores with BM25.
+write. With the LanceDB store (`KAGURA_VECTOR_BACKEND=lance`) the weighting
+does not apply (its own full-text index already scores with BM25), but the
+normalized tokens do: run the same rebuild command there after the upgrade. On
+LanceDB it rewrites every memory's token fields from the row, which rebuilds the
+point's full-text column (no vectors are touched), and stores the lengths; it
+compares nothing first, so every run rewrites every row (`tokens_rewritten`).
 
 **Upgrade.** In this order:
 
@@ -4626,8 +4637,9 @@ full-text index already scores with BM25.
    Per context, by id, it stores every live row's field lengths (tokenized
    from the row, as the writer does), then rebuilds every point's `bm25` vector
    with the context's averages read fresh. No embedding call, no dense vector
-   change; a summary point's four token payload fields are rewritten only when
-   they differ from the row's tokenization. Rows another writer holds (locked,
+   change; a summary point's four token payload fields are rewritten when they
+   differ from the row's tokenization (after this upgrade: every point with a
+   Japanese spelling the normalized form changes). Rows another writer holds (locked,
    re-queued, being embedded) are skipped and counted, never an error: their
    writer weights them. A second run over unchanged rows writes nothing
    (`unchanged`). `--context <uuid>` rebuilds one context; `--limit N` stops

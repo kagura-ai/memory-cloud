@@ -58,8 +58,10 @@ def test_no_resume_line_when_the_run_finished(capsys):
     assert "resume" not in capsys.readouterr().out
 
 
-def test_lance_has_nothing_to_rebuild(capsys):
-    result = KeywordRebuild(dry_run=True, store="lance", rows=5)
+def test_lance_plan_says_what_it_rewrites(capsys):
+    result = KeywordRebuild(dry_run=True, store="lance", contexts=1, rows=5)
     cli._print_plan(result)
-    assert "LanceDB" in capsys.readouterr().out
-    assert cli._changes(result) == 0
+    out = capsys.readouterr().out
+    assert "LanceDB (token fields and full-text column only, no vectors)" in out
+    assert "embedded rows                 5" in out
+    assert cli._changes(result) == 5

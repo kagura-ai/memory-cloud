@@ -26,22 +26,21 @@ class TestLoadSynonyms:
         assert len(synonym_dict) > 0
 
     def test_groups_are_bidirectional(self, synonym_dict):
-        """If A→B then B→A."""
-        if "曖昧" in synonym_dict:
-            assert "あいまい" in synonym_dict["曖昧"]
-        if "あいまい" in synonym_dict:
-            assert "曖昧" in synonym_dict["あいまい"]
+        """If A→B then B→A (on normalized forms, #2986: あいまい is 曖昧)."""
+        assert "不明確" in synonym_dict["曖昧"]
+        assert "曖昧" in synonym_dict["不明確"]
+        assert "あいまい" not in synonym_dict
 
 
 class TestExpandSynonyms:
     """Test single-token synonym expansion."""
 
     def test_known_synonym(self):
-        """Known word returns synonyms."""
-        result = expand_synonyms("引越し")
-        assert "引越し" in result
+        """Known word returns synonyms (the normalized token 引っ越し, #2986)."""
+        result = expand_synonyms("引っ越し")
+        assert result[0] == "引っ越し"
         assert len(result) > 1
-        assert any("引っ越し" in s or "ひっこす" in s for s in result)
+        assert "転居" in result
 
     def test_unknown_word(self):
         """Unknown word returns just itself."""
@@ -64,9 +63,9 @@ class TestExpandQueryTokens:
 
     def test_basic_expansion(self):
         """Multiple tokens are all expanded."""
-        result = expand_query_tokens("引越し 費用")
+        result = expand_query_tokens("引っ越し 費用")
         tokens = result.split()
-        assert "引越し" in tokens
+        assert "引っ越し" in tokens
         assert "費用" in tokens
         assert len(tokens) > 2
 

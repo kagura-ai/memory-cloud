@@ -304,15 +304,41 @@ async def test_a_row_without_a_point_in_the_context_is_counted_not_written():
 
 
 @pytest.mark.asyncio
-async def test_lance_store_writes_nothing():
-    db = _db()
+async def test_lance_store_rewrites_token_fields_and_skips_vectors():
+    """#2986: LanceDB's full-text column is built from the token fields; the
+    store's payload update rebuilds it. No vector pass, no resource points."""
+    context_id = uuid4()
+    memory, resource = _row(context_id), _resource_row(context_id)
+    updates: list[tuple] = []
+
+    async def update(point_id, fields, collection, *, cascade_chunks):
+        updates.append((point_id, fields, collection, cascade_chunks))
+
     with (
         patch.object(task, "_active_store", return_value=object()),
-        patch.object(task, "_contexts", AsyncMock()) as contexts,
+        patch.object(task, "_contexts", AsyncMock(return_value=([context_id], False))),
+        patch.object(task, "resolve_collection_name", AsyncMock(return_value="coll")),
+        patch.object(
+            task,
+            "_locked_page",
+            side_effect=_pages([([memory.id, resource.id], [memory, resource])]),
+        ),
+        patch.object(task, "update_memory_payload_in_qdrant", side_effect=update),
+        patch.object(task, "retrieve_keyword_points", AsyncMock()) as retrieve,
+        patch.object(task, "write_keyword_points", AsyncMock()) as write,
+        patch.object(task, "memory_field_stats", AsyncMock()) as stats,
     ):
-        result = await task.run_keyword_rebuild(db, dry_run=False)
+        result = await task.run_keyword_rebuild(_db(), context_id=context_id, dry_run=False)
+
     assert result.store == "lance"
-    contexts.assert_not_awaited()
+    fields = memory_keyword_tokens(memory).payload_fields()
+    assert updates == [(memory.point_id, fields, "coll", False)]
+    assert result.tokens_rewritten == 1
+    assert result.skipped == 1  # the resource row
+    assert memory.keyword_summary_len == len(fields["summary_tokens"].split())
+    retrieve.assert_not_awaited()
+    write.assert_not_awaited()
+    stats.assert_not_awaited()
 
 
 @pytest.mark.asyncio

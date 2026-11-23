@@ -22,8 +22,10 @@ context redoes it, and points already rebuilt are reported ``unchanged``.
 
 Rows another writer is busy with (locked, re-queued, being embedded) are
 skipped and counted (``skipped``); their writer weights them. With the LanceDB
-vector store the command prints that it has nothing to do (LanceDB's own FTS
-scores with BM25).
+vector store (no sparse vectors: its own full-text index scores with BM25) it
+rewrites every summary point's token fields from the row, which rebuilds the
+point's full-text column, and stores the lengths: run it there too after an
+upgrade that changes the tokenization (#2986).
 
 Exit codes: 0 ok · 1 error · 2 usage.
 """
@@ -46,8 +48,7 @@ from tasks.keyword_rebuild import KeywordRebuild, run_keyword_rebuild  # noqa: E
 
 def _print_plan(result: KeywordRebuild) -> None:
     if result.store == "lance":
-        print("vector store: LanceDB, which keeps no keyword vectors; nothing to rebuild")
-        return
+        print("vector store: LanceDB (token fields and full-text column only, no vectors)")
     print(f"contexts                      {result.contexts}")
     print(f"embedded rows                 {result.rows}")
     print(f"rows without keyword lengths  {result.rows_without_lengths}")
@@ -72,8 +73,6 @@ def _print_resume(result: KeywordRebuild) -> None:
 
 
 def _changes(result: KeywordRebuild) -> int:
-    if result.store == "lance":
-        return 0
     return result.rows if result.dry_run else result.written
 
 

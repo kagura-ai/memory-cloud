@@ -7,6 +7,10 @@ context's current averages, and a memory written again after it, with the same
 averages, gets exactly the vector the rebuild wrote. A second rebuild writes
 nothing. The dense vectors and the other payload keys stay as they were.
 
+#2986: a point indexed with the dictionary-form tokens of spelling variants
+(引越し, 届出, ...) gets the row's normalized tokens from the rebuild, the same
+tokens and vector a write after the upgrade gives it.
+
 Skipped when ``QDRANT_URL`` is unreachable (and by ``db_session`` when Postgres
 is). Run with::
 
@@ -31,13 +35,15 @@ from models.auth import Context, Workspace, WorkspaceMember, WorkspaceRole
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from services import keyword_stats
-from services.memory_service import write_memory_point
+from services.memory_service import memory_keyword_tokens, write_memory_point
 from tasks.keyword_rebuild import run_keyword_rebuild
 
 _DIM = 8
 _USER = "keyword_owner"
 
 _TEXTS = [
+    # #2986: spelling variants; rows[0] is the one written again after the rebuild.
+    ("引越しの届出", "打合せの議事録", "附属のサーバの設定を変更する。"),
     ("認証エラーの対処", "トークンの期限切れ", "期限切れのトークンで認証エラーが出たら更新する。"),
     (
         "データベース移行の手順",
@@ -164,6 +170,13 @@ async def test_written_equals_rebuilt_and_the_rebuild_is_idempotent(db_session, 
         assert stored[memory.id].keyword_summary_len == len(payload["summary_tokens"].split()) > 0
         assert stored[memory.id].keyword_content_len == len(payload["content_tokens"].split())
         assert stored[memory.id].keyword_fulltext_len is None
+    # As written before #2986: the variant row's point carries dictionary forms.
+    legacy = {
+        "summary_tokens": "引越し 届出",
+        "context_summary_tokens": "打合せ 議事録",
+        "content_tokens": "附属 サーバ 設定 変更 する",
+    }
+    await qdrant.set_payload(collection_name=collection, payload=legacy, points=[str(rows[0].id)])
     before = {m.id: await _point(qdrant, collection, m) for m in rows}
 
     applied = await run_keyword_rebuild(db_session, context_id=context.id, dry_run=False)
@@ -173,16 +186,27 @@ async def test_written_equals_rebuilt_and_the_rebuild_is_idempotent(db_session, 
     assert applied.vectors_written >= 1
     assert applied.skipped == applied.missing_point == 0
     rebuilt = {m.id: await _point(qdrant, collection, m) for m in rows}
+    assert applied.tokens_rewritten == 1
+    variant = memory_keyword_tokens(stored[rows[0].id]).payload_fields()
+    assert variant["summary_tokens"].split()[:1] == ["引っ越し"]
+    assert "届け出" in variant["summary_tokens"].split()
+    assert "打ち合わせ" in variant["context_summary_tokens"].split()
+    assert {"付属", "サーバー"} <= set(variant["content_tokens"].split())
     for memory in rows:
         assert rebuilt[memory.id].vector["dense"] == before[memory.id].vector["dense"]
-        assert rebuilt[memory.id].payload == before[memory.id].payload
+        expected_payload = dict(before[memory.id].payload)
+        if memory.id == rows[0].id:
+            expected_payload.update(variant)
+        assert rebuilt[memory.id].payload == expected_payload
 
     # Written again with the same averages: the vector the rebuild wrote.
     keyword_stats.clear_keyword_stats_cache()
     target = rows[0]
     fresh = (await db_session.execute(select(Memory).where(Memory.id == target.id))).scalar_one()
     await _write(db_session, fresh, context, collection)
-    written = _bm25(await _point(qdrant, collection, target))
+    written_point = await _point(qdrant, collection, target)
+    assert {k: written_point.payload[k] for k in variant} == variant
+    written = _bm25(written_point)
     expected = _bm25(rebuilt[target.id])
     assert written.keys() == expected.keys()
     for index, value in expected.items():

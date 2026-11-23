@@ -23,14 +23,15 @@ class TestTokenizeForSearch:
         assert "認証" in tokens
         assert "エラー" in tokens
         assert "修正" in tokens
-        assert "する" in tokens  # 修正した → 修正 + する (lemmatized)
+        # 修正した → 修正 + する, lemmatized to the normalized form 為る (#2986)
+        assert "為る" in tokens
 
     def test_japanese_verb_conjugation(self):
         result = tokenize_for_search("走ったことがある")
         tokens = result.split()
         assert "走る" in tokens  # 走った → 走る
         assert "こと" in tokens
-        assert "ある" in tokens
+        assert "有る" in tokens  # ある, as its normalized form (#2986)
 
     def test_stop_words_removed(self):
         result = tokenize_for_search("データベースのテーブルを変更した")

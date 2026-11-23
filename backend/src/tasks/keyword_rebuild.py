@@ -33,8 +33,12 @@ payload does not have the lengths the row records (a writer came between the
 passes) is skipped as well. A skipped row is counted, never an error: its
 writer weights it.
 
-LanceDB keeps no sparse vector (its FTS scores with BM25 itself): the run
-stops with ``store="lance"`` and writes nothing.
+LanceDB keeps no sparse vector (its FTS scores with BM25 itself), but its
+full-text column is built from a point's token fields, so a tokenizer change
+(#2986) needs it rebuilt as well: with the LanceDB store the run does pass 1
+only, writing every row's token fields through the store's payload update
+(which rebuilds the point's ``search_text``), without comparing first. Its
+resource points are not in the LanceDB store; resource rows are skipped.
 """
 
 from __future__ import annotations
@@ -54,6 +58,7 @@ from db.qdrant import (
     QDRANT_TOKEN_PAYLOAD_FIELDS,
     _active_store,
     retrieve_keyword_points,
+    update_memory_payload_in_qdrant,
     write_keyword_points,
 )
 from models.auth import Context
@@ -94,7 +99,7 @@ class KeywordRebuild:
     """What a run planned or did."""
 
     dry_run: bool
-    #: ``"lance"`` when the run stopped because the active store is LanceDB.
+    #: ``"lance"`` with the LanceDB store (token fields and full-text column only).
     store: str = "qdrant"
     contexts: int = 0
     #: Plan: live embedded rows of the contexts, and those without lengths yet.
@@ -329,6 +334,22 @@ async def _walk(
             progress(f"context {context_id} {label}: {seen} rows")
 
 
+async def _lance_page(collection: str, rows: Sequence[Memory], result: KeywordRebuild) -> None:
+    """Pass 1 on the LanceDB store: every summary point gets the row's token fields."""
+    for memory in rows:
+        if owns_resource_point(memory):
+            result.skipped += 1
+            continue
+        fields = memory_keyword_tokens(memory).payload_fields()
+        # The store rebuilds the point's full-text column from the merged payload.
+        await update_memory_payload_in_qdrant(
+            memory.point_id, dict(fields), collection, cascade_chunks=False
+        )
+        result.tokens_rewritten += 1
+        if apply_keyword_lengths(memory, memory_keyword_lengths(fields)):
+            result.lengths_written += 1
+
+
 async def _rebuild_context(
     db: AsyncSession,
     context_id: UUID,
@@ -338,6 +359,15 @@ async def _rebuild_context(
 ) -> None:
     collection = await resolve_collection_name(db, context_id)
     await db.commit()
+
+    if result.store == "lance":
+
+        async def lance(rows: Sequence[Memory]) -> None:
+            await _lance_page(collection, rows, result)
+            await db.flush()
+
+        await _walk(db, context_id, page_size, result, lance, progress, "tokens")
+        return
 
     async def lengths(rows: Sequence[Memory]) -> None:
         await _lengths_page(db, context_id, collection, rows, result)
@@ -382,7 +412,6 @@ async def run_keyword_rebuild(
     result = KeywordRebuild(dry_run=dry_run)
     if _active_store() is not None:
         result.store = "lance"
-        return result
     contexts, more = await _contexts(db, context_id, after, limit)
     for current in contexts:
         if dry_run:
