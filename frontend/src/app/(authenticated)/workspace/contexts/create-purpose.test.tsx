@@ -28,6 +28,7 @@ const mockGetContexts = vi.fn();
 const mockCreateContext = vi.fn();
 const mockGetConfig = vi.fn();
 const mockUpdateConfig = vi.fn();
+const mockGetEmbeddingModels = vi.fn();
 
 vi.mock("@/lib/api/contexts", () => ({
   getContexts: (...a: unknown[]) => mockGetContexts(...a),
@@ -35,8 +36,7 @@ vi.mock("@/lib/api/contexts", () => ({
   getContextStats: vi.fn(),
   getContextSearchConfig: (...a: unknown[]) => mockGetConfig(...a),
   updateContextSearchConfig: (...a: unknown[]) => mockUpdateConfig(...a),
-  getEmbeddingModels: () =>
-    Promise.resolve({ models: [], default_model: "small" }),
+  getEmbeddingModels: (...a: unknown[]) => mockGetEmbeddingModels(...a),
 }));
 
 vi.mock("@/lib/api/memory-health", () => ({
@@ -199,6 +199,10 @@ beforeEach(() => {
   mockCreateContext.mockResolvedValue({ id: "new-ctx", name: "my-docs" });
   mockGetConfig.mockResolvedValue(STORED);
   mockUpdateConfig.mockResolvedValue(STORED);
+  mockGetEmbeddingModels.mockResolvedValue({
+    models: [],
+    default_model: "small",
+  });
 });
 
 afterEach(() => cleanup());
@@ -275,8 +279,9 @@ describe("create dialog — search purpose", () => {
     fireEvent.change(purposeSelect(dialog), { target: { value: "documents" } });
     await submit(dialog);
     await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
+    // The server's message says why.
     expect(mockToast.mock.calls[0][0]).toMatchObject({
-      description: "searchPurposeNotApplied",
+      description: 'searchPurposeNotAppliedReason {"reason":"boom"}',
       variant: "destructive",
     });
     // No rollback: the dialog closed as on any successful create, the list
@@ -284,6 +289,70 @@ describe("create dialog — search purpose", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(mockCreateContext).toHaveBeenCalledTimes(1);
     expect(mockGetContexts.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a failure without a message still says the purpose was not applied", async () => {
+    mockGetConfig.mockRejectedValue("offline");
+    const dialog = await openDialog();
+    fireEvent.change(purposeSelect(dialog), { target: { value: "documents" } });
+    await submit(dialog);
+    await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
+    expect(mockToast.mock.calls[0][0]).toMatchObject({
+      description: "searchPurposeNotApplied",
+      variant: "destructive",
+    });
+    expect(mockUpdateConfig).not.toHaveBeenCalled();
+  });
+
+  it("the follow-up does not keep the create busy", async () => {
+    // The read behind the purpose never answers.
+    mockGetConfig.mockReturnValue(new Promise(() => {}));
+    const dialog = await openDialog();
+    fireEvent.change(purposeSelect(dialog), { target: { value: "documents" } });
+    await submit(dialog);
+    await waitFor(() => expect(mockGetConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^advancedCreate$/i }),
+    );
+    const again = await screen.findByRole("dialog");
+    const button = within(again)
+      .getAllByRole("button")
+      .find((b) => b.textContent === "create");
+    expect(button).toBeTruthy();
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("a successful create resets the embedding model for the next context", async () => {
+    mockGetEmbeddingModels.mockResolvedValue({
+      models: [
+        { name: "small", dimensions: 1536, provider: "openai", available: true },
+        { name: "large", dimensions: 3072, provider: "openai", available: true },
+      ],
+      default_model: "small",
+    });
+    const modelSelect = (dialog: HTMLElement) => {
+      const found = (
+        within(dialog).getAllByRole("combobox") as HTMLSelectElement[]
+      ).filter((s) => Array.from(s.options).some((o) => o.value === "large"));
+      expect(found).toHaveLength(1);
+      return found[0];
+    };
+    let dialog = await openDialog();
+    fireEvent.change(await waitFor(() => modelSelect(dialog)), {
+      target: { value: "large" },
+    });
+    await submit(dialog);
+    await waitFor(() => expect(mockCreateContext).toHaveBeenCalledTimes(1));
+    expect(mockCreateContext.mock.calls[0][0]).toMatchObject({
+      embedding_model: "large",
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^advancedCreate$/i }),
+    );
+    dialog = await screen.findByRole("dialog");
+    expect(modelSelect(dialog).value).toBe("");
   });
 
   it("a failed create sends no update", async () => {

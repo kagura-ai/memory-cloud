@@ -524,7 +524,11 @@ export default function ContextsPage() {
       setNewContextSummary("");
       setNewContextUsageGuide("");
       setIsPrivate(true);
+      setNewEmbeddingModel("");
       setNewSearchPurpose(DEFAULT_SEARCH_PURPOSE);
+      // The create is done: the follow-up below does not hold the dialog's
+      // busy state.
+      setCreating(false);
       fetchContexts();
       // #2983: the default purpose is the create's own defaults, so only
       // another purpose needs the search-config update. The context exists
@@ -536,10 +540,13 @@ export default function ContextsPage() {
             created.id,
             searchPurposeUpdate(purpose, stored),
           );
-        } catch {
+        } catch (err: unknown) {
+          const reason = err instanceof Error ? err.message : "";
           toast({
             title: tCommon("error"),
-            description: t("searchPurposeNotApplied"),
+            description: reason
+              ? t("searchPurposeNotAppliedReason", { reason })
+              : t("searchPurposeNotApplied"),
             variant: "destructive",
           });
         }

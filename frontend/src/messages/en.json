@@ -1974,7 +1974,8 @@
     "cannotDeleteLocked": "Cannot delete \"{name}\" — context is locked. Unlock it first.",
     "deleteContextUnlocked": "This will permanently delete \"{name}\" and all memories in this context. This action cannot be undone.",
     "searchPurposeHint": "Sets the context's search weights and fusion. You can change them later in the context's search settings.",
-    "searchPurposeNotApplied": "The context was created, but its search purpose was not applied. You can change it in the context's search settings."
+    "searchPurposeNotApplied": "The context was created, but its search purpose was not applied. You can change it in the context's search settings.",
+    "searchPurposeNotAppliedReason": "The context was created, but its search purpose was not applied ({reason}). You can change it in the context's search settings."
   },
   "memories": {
     "title": "Memories",
