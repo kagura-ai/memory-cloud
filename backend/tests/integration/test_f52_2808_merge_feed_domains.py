@@ -83,6 +83,23 @@ def _snapshot(engine, tables=_TABLES):
         }
 
 
+def _assert_same_on_older_columns(newer, older):
+    """Every row of the older-schema snapshot equals the newer snapshot's row
+    projected onto the older row's columns.
+
+    Revisions after f52 add columns to these tables (``last_proof_via`` on
+    ``public_mcp_domains``, f60), which exist only on the newer schema; every
+    column the older schema has is still compared in full.
+    """
+    for table, rows in older.items():
+        projected = [
+            {key: row.get(key, "<absent>") for key in old}
+            for row, old in zip(newer[table], rows, strict=False)
+        ]
+        assert len(newer[table]) == len(rows), table
+        assert projected == rows, table
+
+
 @pytest.mark.parametrize("starting_heads", [(COMMON,), (MANAGED,), (DOMAINS,), (MANAGED, DOMAINS)])
 def test_upgrade_and_unmerge_retain_managed_state_and_domain_claims(async_engine, starting_heads):
     engine = _sync_engine()
@@ -103,7 +120,7 @@ def test_upgrade_and_unmerge_retain_managed_state_and_domain_claims(async_engine
         before = _snapshot(engine, tables)
         _migrate(command.upgrade, "head")
         after = _snapshot(engine)
-        assert all(after[table] == rows for table, rows in before.items())
+        _assert_same_on_older_columns(after, before)
         if not had_managed:
             _seed_managed(engine, ids)
         if not had_domain:
@@ -117,7 +134,7 @@ def test_upgrade_and_unmerge_retain_managed_state_and_domain_claims(async_engine
                     MANAGED,
                     DOMAINS,
                 }
-            assert _snapshot(engine) == expected
+            _assert_same_on_older_columns(expected, _snapshot(engine))
             _assert_preserved(engine, ids, sync=False, budget=False)
             _migrate(command.upgrade, "head")
             with engine.connect() as conn:
