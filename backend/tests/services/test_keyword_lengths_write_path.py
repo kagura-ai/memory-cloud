@@ -13,6 +13,7 @@ and stores the lengths it indexed on the row.
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -223,12 +224,17 @@ async def test_the_model_migration_stores_each_pages_lengths():
     db.execute = AsyncMock()
     db.commit = AsyncMock()
     first, second = uuid4(), uuid4()
+    read = {
+        first: SimpleNamespace(updated_at=datetime(2026, 3, 4, 5, 6, 7), embedded_text_digest="ab"),
+        second: SimpleNamespace(updated_at=None, embedded_text_digest=None),
+    }
     await svc._store_keyword_lengths(
         db,
         {
             first: keyword_stats.memory_keyword_lengths({"summary_tokens": "a b"}),
             second: keyword_stats.resource_keyword_lengths("x y z"),
         },
+        read,
     )
     statements = [
         str(c.args[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
@@ -236,6 +242,10 @@ async def test_the_model_migration_stores_each_pages_lengths():
     ]
     assert len(statements) == 2
     assert f"WHERE memories.id = '{first}'" in statements[0]
+    # Fenced on what the page read: a newer edit or pipeline write wins.
+    assert "memories.updated_at IS NOT DISTINCT FROM '2026-03-04 05:06:07'" in statements[0]
+    assert "memories.embedded_text_digest IS NOT DISTINCT FROM 'ab'" in statements[0]
+    assert "memories.updated_at IS NOT DISTINCT FROM NULL" in statements[1]
     assert "keyword_summary_len=2" in statements[0]
     assert "keyword_fulltext_len=NULL" in statements[0]
     assert f"WHERE memories.id = '{second}'" in statements[1]
@@ -272,8 +282,9 @@ async def test_the_model_migration_weights_with_the_averages_and_collects_length
     assert dict(zip(kwargs["sparse_indices"], kwargs["sparse_values"], strict=True)) == dict(
         zip(indices, values, strict=True)
     )
-    (lengths,) = [c.args[1] for c in stored.await_args_list]
+    ((lengths, read),) = [c.args[1:] for c in stored.await_args_list]
     assert lengths == {note.id: keyword_stats.memory_keyword_lengths(kwargs["payload"])}
+    assert read == {note.id: note}
 
 
 class TestResourceIndexerRow:

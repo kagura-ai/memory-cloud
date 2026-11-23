@@ -458,17 +458,26 @@ async def _can_rebuild(indexer: ResourceIndexer, memory: Memory, collection_name
 
 
 async def _store_keyword_lengths(
-    db: AsyncSession, lengths: dict[UUID, dict[str, int | None]]
+    db: AsyncSession,
+    lengths: dict[UUID, dict[str, int | None]],
+    read: dict[UUID, Memory],
 ) -> None:
     """Store the keyword lengths of the points a page wrote (#2984), one short transaction.
 
-    The rows were expunged; a row edited meanwhile is re-embedded by the
-    pipeline, which writes its lengths again.
+    The page read its rows without a lock and they were expunged, so each
+    UPDATE is fenced on what the page read: ``updated_at`` (an edit stamps it)
+    and ``embedded_text_digest`` (the pipeline's success write sets it). A row
+    edited or re-embedded since keeps the lengths its newer write stored.
     """
     for memory_id, values in lengths.items():
+        row = read[memory_id]
         await db.execute(
             update(Memory)
-            .where(Memory.id == memory_id)
+            .where(
+                Memory.id == memory_id,
+                Memory.updated_at.is_not_distinct_from(row.updated_at),
+                Memory.embedded_text_digest.is_not_distinct_from(row.embedded_text_digest),
+            )
             .values(**values)
             .execution_options(synchronize_session=False)
         )
@@ -699,7 +708,7 @@ async def reembed_context(
             await db.commit()
 
         if lengths:
-            await _store_keyword_lengths(db, lengths)
+            await _store_keyword_lengths(db, lengths, {memory.id: memory for memory in rows})
         batches += 1
         last_id = rows[-1].id
         if progress is not None:
