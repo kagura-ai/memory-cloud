@@ -33,6 +33,14 @@ def _point_writer_lock():
 
 
 @pytest.fixture(autouse=True)
+def _keyword_lengths_stored():
+    """#2984: the re-embed stores each page's keyword lengths in a short write of
+    its own; the scripted sessions here do not script it (TestKeywordLengths)."""
+    with patch.object(svc, "_store_keyword_lengths", new=AsyncMock()) as stored:
+        yield stored
+
+
+@pytest.fixture(autouse=True)
 def _no_content_chunks():
     """#2015: the context has content_chunks_enabled off and the target holds
     no chunk points, unless a test says otherwise (TestContentChunks). The
@@ -447,7 +455,10 @@ class TestReembed:
         # collection, with the TARGET model's service.
         indexer_cls.assert_called_once_with(db)
         indexer.rebuild_point.assert_awaited_once_with(
-            doc, collection_name=plan.target_collection, embedding_service=service
+            doc,
+            collection_name=plan.target_collection,
+            embedding_service=service,
+            keyword_lengths={},
         )
         assert result.embedded == 3
         assert result.unrebuildable == []
@@ -703,7 +714,7 @@ class TestVerify:
         client.retrieve = AsyncMock(return_value=[MagicMock(id=str(note.id))])
         embedded: list[str] = []
 
-        async def _rebuild(memory, *, collection_name, embedding_service):
+        async def _rebuild(memory, *, collection_name, embedding_service, keyword_lengths=None):
             if memory is gone:
                 raise ResourceRebuildError("Resource 'res' has no schema")
             # A row the indexer can rebuild gets as far as embedding.

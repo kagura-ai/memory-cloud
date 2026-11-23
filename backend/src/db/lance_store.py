@@ -69,8 +69,10 @@ logger = get_logger(__name__)
 DEFAULT_COLLECTION = "kagura_memories"
 
 # Field weights for the combined FTS column, expressed as token repetition.
-# Mirrors utils/sparse_vector.build_document_sparse_vector (summary 2.0 /
-# context_summary 2.0 / content 1.0, plus the reading fallback).
+# Mirrors the field weights of utils/sparse_vector.build_document_sparse_vector
+# (summary 2.0 / context_summary 2.0 / content 1.0, plus the reading fallback).
+# The BM25 saturation and length normalisation that builder applies (#2984) are
+# not repeated here: LanceDB's own FTS scores with BM25.
 _FIELD_REPEATS: tuple[tuple[str, str, int], ...] = (
     ("summary_tokens", "summary", 2),
     ("context_summary_tokens", "context_summary", 2),
@@ -967,6 +969,42 @@ class LanceVectorStore:
             return await asyncio.to_thread(_run)
         except Exception as e:
             raise QdrantError(f"Failed to read vectors from LanceDB: {e}") from e
+
+    async def retrieve_payloads(
+        self, collection_name: str, point_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """The stored payload of each row, a chunk of ids per read (#2986).
+
+        The keyword rebuild compares a point's token fields before it rewrites
+        them. A row that does not exist is absent; no ids read nothing.
+        """
+        ids = [str(pid) for pid in point_ids]
+        if not ids:
+            return {}
+
+        def _run() -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return out
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start : start + 500]
+                    rows = (
+                        tbl.search()
+                        .where(f"id IN ({', '.join(_sql_str(pid) for pid in chunk)})")
+                        .select(["id", "payload_json"])
+                        .limit(len(chunk))
+                        .to_list()
+                    )
+                    for row in rows:
+                        out[str(row["id"])] = json.loads(row["payload_json"] or "{}")
+            return out
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as e:
+            raise QdrantError(f"Failed to read payloads from LanceDB: {e}") from e
 
     async def erasure_point_identities(
         self, collection: str

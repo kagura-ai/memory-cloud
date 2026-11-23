@@ -46,6 +46,11 @@ from models.memory import (  # Issue #262: Memory model for resource data storag
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.context_routing import resolve_context_routing
 from services.embedding_service import EmbeddingService
+from services.keyword_stats import (
+    apply_keyword_lengths,
+    resource_fulltext_avgdl,
+    resource_keyword_lengths,
+)
 from services.memory_counts import count_live_memories
 from services.plan_suspension import ingest_suspended
 from services.quota_service import QuotaService
@@ -54,6 +59,7 @@ from utils.exceptions import QdrantError
 from utils.logger import get_logger
 from utils.sparse_vector import build_resource_sparse_vector
 from utils.text import normalize_for_search
+from utils.tokenizer import tokenize_for_search
 
 logger = get_logger(__name__)
 
@@ -605,6 +611,8 @@ def build_resource_point(
     memory_type: str | None = None,
     context_summary: str | None = None,
     location: dict[str, float] | None = None,
+    fulltext_tokens: str | None = None,
+    keyword_avgdl: float | None = None,
 ) -> PointStruct:
     """Build the point of one resource document version.
 
@@ -632,11 +640,19 @@ def build_resource_point(
             without a location has none). They are merged under the
             indexer's keys, so they can never shadow the identity or
             isolation keys.
+        fulltext_tokens: ``tokenize_for_search(content)`` when the caller
+            has it (it stores the token count on the row, #2984); tokenized
+            here otherwise.
+        keyword_avgdl: The context's average fulltext length of its resource
+            points (``services.keyword_stats.resource_fulltext_avgdl``);
+            ``None`` = saturation only.
     """
     # Issue #335: sparse BM25 vector from the same text as the dense
     # embedding, so resource points participate in hybrid search instead of
-    # scoring zero on BM25.
-    sparse_indices, sparse_values = build_resource_sparse_vector(content)
+    # scoring zero on BM25. #2984: BM25-weighted with the context's average.
+    sparse_indices, sparse_values = build_resource_sparse_vector(
+        content, keyword_avgdl, tokens=fulltext_tokens
+    )
 
     # kagura_memories collections are configured with named vectors
     # (dense + sparse bm25); anonymous vectors are rejected at upsert.
@@ -1572,6 +1588,10 @@ class ResourceIndexer:
             "location": location_payload_from_details(new_details),
         }
 
+        # #2984: the fulltext is tokenized once, for the point's BM25 vector
+        # and for the length the row keeps (the context's average).
+        fulltext_tokens = tokenize_for_search(content)
+        keyword_lengths = resource_keyword_lengths(fulltext_tokens)
         point = build_resource_point(
             context=context,
             resource_id=event.resource_id,
@@ -1585,6 +1605,8 @@ class ResourceIndexer:
             # #2481: the author of the row the point names, as the rebuild
             # writes it (``rebuild_point``); erasure finds a point by it.
             user_id=existing_memory.user_id if existing_memory is not None else None,
+            fulltext_tokens=fulltext_tokens,
+            keyword_avgdl=await resource_fulltext_avgdl(self.db, context.id),
             **row_metadata,
         )
 
@@ -1674,6 +1696,7 @@ class ResourceIndexer:
                 previous_point = existing_memory.summary_embedding_id
                 # Bugfix: Use UUID format for summary_embedding_id
                 existing_memory.summary_embedding_id = point_id_uuid
+                apply_keyword_lengths(existing_memory, keyword_lengths)
 
                 if previous_values != (
                     existing_memory.summary,
@@ -1728,6 +1751,7 @@ class ResourceIndexer:
                     # Bugfix: Use UUID format for summary_embedding_id
                     summary_embedding_id=point_id_uuid,
                     embedding_status="success",
+                    **keyword_lengths,
                 )
 
                 self.db.add(memory)
@@ -2004,6 +2028,7 @@ class ResourceIndexer:
         embedding_service: EmbeddingService,
         usage: dict[str, int] | None = None,
         canonical_rebuild: bool = False,
+        keyword_lengths: dict[str, int | None] | None = None,
     ) -> UUID:
         """Write the point of a resource-ingested row again, from the row (#1870).
 
@@ -2037,6 +2062,10 @@ class ResourceIndexer:
                 the row holds its own unchanged canonical content, checked
                 under the feed fence before the embedding and again before the
                 upsert; without it any feed-managed row is refused.
+            keyword_lengths: #2984: filled with the point's keyword lengths
+                (``Memory.keyword_*_len``) once it is written, for the caller
+                to store (the row is not touched here). The point is
+                BM25-weighted with the context's cached fulltext average.
 
         Returns:
             The id of the point written, equal to ``memory.point_id``.
@@ -2115,6 +2144,7 @@ class ResourceIndexer:
             )
         ).scalar_one_or_none()
 
+        fulltext_tokens = tokenize_for_search(content)
         point = build_resource_point(
             context=context,
             resource_id=resource_id,
@@ -2123,6 +2153,8 @@ class ResourceIndexer:
             content=content,
             projected=projected,
             embedding=embedding,
+            fulltext_tokens=fulltext_tokens,
+            keyword_avgdl=await resource_fulltext_avgdl(self.db, context.id),
             updated_at=ingested_at or memory.updated_at or memory.created_at or utcnow(),
             memory_id=memory.id,
             # #2160: the row's editable metadata, so a rebuilt point agrees
@@ -2146,6 +2178,8 @@ class ResourceIndexer:
             await self._upsert_point(collection_name, point, _dense_dimensions(point))
         except Exception as e:
             raise QdrantError(f"Failed to upsert point: {e}") from e
+        if keyword_lengths is not None:
+            keyword_lengths.update(resource_keyword_lengths(fulltext_tokens))
 
         await reconcile_erased_writer(self.db, memory)
         logger.info(

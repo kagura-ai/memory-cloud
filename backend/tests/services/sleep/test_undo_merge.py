@@ -571,7 +571,12 @@ async def test_re_embed_rebuilds_the_indexer_point_of_a_resource_row() -> None:
     indexer_cls.assert_called_once_with(db)
     # #2908: a Sleep restore never takes the feed pipeline's restore.
     indexer.rebuild_point.assert_awaited_once_with(
-        memory, collection_name="coll", embedding_service=svc, usage=None, canonical_rebuild=False
+        memory,
+        collection_name="coll",
+        embedding_service=svc,
+        usage=None,
+        canonical_rebuild=False,
+        keyword_lengths={},
     )
     upsert.assert_not_awaited()
     write.assert_not_awaited()

@@ -146,6 +146,10 @@ class VectorStore(Protocol):
         self, collection_name: str, point_ids: Sequence[str]
     ) -> dict[str, list[float]]: ...
 
+    async def retrieve_payloads(
+        self, collection_name: str, point_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]: ...
+
 
 # Cached resolution. ``None`` is a valid resolved value (default Qdrant path),
 # so a separate ``_resolved`` flag distinguishes "not yet resolved" from

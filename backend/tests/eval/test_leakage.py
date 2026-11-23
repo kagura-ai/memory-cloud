@@ -58,3 +58,15 @@ def test_rare_term_rule_gated_off_below_scale():
     assert not [f for f in flags if f.rule == "rare_term"], (
         "below the doc threshold the rare-term rule must be gated off by run_leakage_check"
     )
+
+
+def test_the_gate_judges_authoring_with_dictionary_forms():
+    """#2986: the keyword leg normalizes そろえる to 揃える; the gate does not, so a
+    query written in hiragana on purpose does not read as reusing its doc's kanji."""
+    from tests.eval.tools.corpus import tokens
+    from utils.tokenizer import tokenize_for_search
+
+    assert "揃える" in tokenize_for_search("そろえる")
+    assert tokens("そろえる") == ("そろえる",)
+    assert tokens("揃える") == ("揃える",)
+    assert tokens("Server Migration") == ("server", "migration")

@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     from models.memory import Memory
     from services.resource_indexer import ResourceIndexer
     from services.supersede_verify import JudgeLane
+    from utils.sparse_vector import MemoryFieldStats
 
 # Issue #886: upper bound for the always-load cap, matching the REST schema's
 # ``LoadPinnedRequest.cap`` le=1000. The MCP path sends the raw arg with no
@@ -11093,7 +11094,69 @@ def embedding_clock_before(cutoff: datetime):
     return or_(Memory.embedding_attempted_at.is_(None), Memory.embedding_attempted_at < cutoff)
 
 
-def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[float]]:
+@dataclass(frozen=True)
+class MemoryKeywordTokens:
+    """A memory row's keyword (BM25) fields as its summary point indexes them."""
+
+    normalized_summary: str
+    normalized_context_summary: str | None
+    summary_tokens: str
+    context_summary_tokens: str
+    content_tokens: str
+    summary_reading: str
+
+    def payload_fields(self) -> dict[str, str]:
+        """The four token payload fields (``QDRANT_TOKEN_PAYLOAD_FIELDS``)."""
+        return {
+            "summary_tokens": self.summary_tokens,
+            "context_summary_tokens": self.context_summary_tokens,
+            "content_tokens": self.content_tokens,
+            "summary_reading": self.summary_reading,
+        }
+
+    def sparse_vector(self, stats: MemoryFieldStats | None) -> tuple[list[int], list[float]]:
+        """The point's ``bm25`` vector under the context's averages ``stats`` (#2984)."""
+        from utils.sparse_vector import build_document_sparse_vector
+
+        return build_document_sparse_vector(
+            summary_tokens=self.summary_tokens,
+            context_summary_tokens=self.context_summary_tokens,
+            content_tokens=self.content_tokens,
+            summary_reading=self.summary_reading,
+            stats=stats,
+        )
+
+
+def memory_keyword_tokens(memory: Memory) -> MemoryKeywordTokens:
+    """Tokenize ``memory``'s keyword fields from the row, as its point indexes them.
+
+    The one tokenization of a summary point: ``build_memory_point`` and the
+    keyword vector rebuild (``tasks.keyword_rebuild``, #2984) both use it, so
+    a rebuilt point carries what a written one does.
+    """
+    from utils.text import normalize_for_search
+    from utils.tokenizer import tokenize_and_reading, tokenize_for_search
+
+    normalized_summary = normalize_for_search(memory.summary) or memory.summary
+    normalized_ctx = normalize_for_search(memory.context_summary)
+    content_text = (memory.content or "")[:2000]
+
+    summary_tokens, summary_reading, _ = tokenize_and_reading(normalized_summary)
+    ctx_tokens = tokenize_for_search(normalized_ctx or "")
+    content_tokens = tokenize_for_search(content_text) if content_text else ""
+    return MemoryKeywordTokens(
+        normalized_summary=normalized_summary,
+        normalized_context_summary=normalized_ctx,
+        summary_tokens=summary_tokens,
+        context_summary_tokens=ctx_tokens,
+        content_tokens=content_tokens,
+        summary_reading=summary_reading,
+    )
+
+
+def build_memory_point(
+    memory: Memory, stats: MemoryFieldStats | None = None
+) -> tuple[dict[str, Any], list[int], list[float]]:
     """Build the Qdrant payload and BM25 sparse vector for a memory row.
 
     The single definition of "what a memory looks like as a point". Used by
@@ -11103,39 +11166,27 @@ def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[
     drop-in for the old one. Only the dense vector differs between the two
     callers; it is not built here.
 
+    Args:
+        memory: The row.
+        stats: The context's keyword field averages (#2984,
+            ``services.keyword_stats.memory_field_stats``); ``None`` weights
+            each field with its own length (saturation only).
+
     Returns:
         ``(payload, sparse_indices, sparse_values)``. The payload does NOT yet
         carry the isolation fields — ``add_memory_to_qdrant`` adds
         ``workspace_id`` / ``context_id`` / ``user_id`` itself.
     """
-    from utils.sparse_vector import build_document_sparse_vector
-    from utils.text import normalize_for_search
-    from utils.tokenizer import tokenize_and_reading, tokenize_for_search
-
-    # Tokenize for BM25
-    normalized_summary = normalize_for_search(memory.summary) or memory.summary
-    normalized_ctx = normalize_for_search(memory.context_summary)
-    content_text = (memory.content or "")[:2000]
-
-    summary_tokens, summary_reading, _ = tokenize_and_reading(normalized_summary)
-    ctx_tokens = tokenize_for_search(normalized_ctx or "")
-    content_tokens = tokenize_for_search(content_text) if content_text else ""
-
-    sparse_indices, sparse_values = build_document_sparse_vector(
-        summary_tokens=summary_tokens,
-        context_summary_tokens=ctx_tokens,
-        content_tokens=content_tokens,
-        summary_reading=summary_reading,
-    )
+    keyword = memory_keyword_tokens(memory)
+    normalized_summary = keyword.normalized_summary
+    normalized_ctx = keyword.normalized_context_summary
+    sparse_indices, sparse_values = keyword.sparse_vector(stats)
 
     payload: dict[str, Any] = {
         "user_id": memory.user_id,
         "summary": normalized_summary,
         "context_summary": normalized_ctx,
-        "summary_tokens": summary_tokens,
-        "context_summary_tokens": ctx_tokens,
-        "content_tokens": content_tokens,
-        "summary_reading": summary_reading,
+        **keyword.payload_fields(),
         "type": memory.type,
         "importance": memory.importance,
         "tags": memory.tags or [],
@@ -11183,6 +11234,7 @@ async def write_memory_point(
     resource_indexer: ResourceIndexer | None = None,
     embed_scope: tuple[Any, Any] | None = None,
     canonical_rebuild: bool = False,
+    keyword_lengths: dict[str, int | None] | None = None,
 ) -> tuple[list[float], dict[str, Any]] | None:
     """Write ``memory``'s own vector point: the one place that picks how (#2065).
 
@@ -11216,6 +11268,13 @@ async def write_memory_point(
             point back when it holds its own unchanged canonical content
             (``ResourceIndexer.rebuild_point``). Without it, and for every
             other row, a feed-managed row is refused with ``SYNC-LOCKED``.
+        keyword_lengths: #2984: the point's keyword field lengths
+            (``Memory.keyword_*_len``) are put here instead of on ``memory``,
+            for a caller that writes them in its own UPDATE (the embedding
+            pipeline, in its success write). Without it they are set on the
+            ORM row, flushed with the caller's transaction. Untouched when no
+            point was written. The point is BM25-weighted with the context's
+            cached averages (``services.keyword_stats``).
 
     Returns:
         ``(vector, payload)`` of the summary point written, or ``None`` for a
@@ -11236,6 +11295,22 @@ async def write_memory_point(
     ):
         return None
 
+    from services.keyword_stats import (
+        apply_keyword_lengths,
+        memory_field_stats,
+        memory_keyword_lengths,
+    )
+
+    lengths: dict[str, int | None] = {}
+
+    def _keep_lengths() -> None:
+        if not lengths:
+            return
+        if keyword_lengths is not None:
+            keyword_lengths.update(lengths)
+        else:
+            apply_keyword_lengths(memory, lengths)
+
     if resource_row:
         if on_write is not None:
             on_write()
@@ -11246,7 +11321,9 @@ async def write_memory_point(
             embedding_service=embedding_service,
             usage=usage,
             canonical_rebuild=canonical_rebuild,
+            keyword_lengths=lengths,
         )
+        _keep_lengths()
         return None
 
     embed_workspace_id, embed_context_id = (
@@ -11269,8 +11346,11 @@ async def write_memory_point(
     if not await embedding_author_current(db, memory):
         return None
     # Payload + BM25 sparse vector (#1525: the same point every writer builds;
-    # the upsert replaces the whole point, #2053).
-    payload, sparse_indices, sparse_values = build_memory_point(memory)
+    # the upsert replaces the whole point, #2053), weighted with the context's
+    # keyword averages (#2984; ``db`` is None only for a Sleep restore called
+    # without a session: no averages then).
+    stats = await memory_field_stats(db, memory.context_id) if db is not None else None
+    payload, sparse_indices, sparse_values = build_memory_point(memory, stats)
     if on_write is not None:
         on_write()
     await add_memory_to_qdrant(
@@ -11284,6 +11364,8 @@ async def write_memory_point(
         sparse_values=sparse_values,
         collection_name=collection_name,
     )
+    lengths.update(memory_keyword_lengths(payload))
+    _keep_lengths()
     if await reconcile_erased_writer(db, memory):
         return None
     return vector, payload
@@ -11535,6 +11617,11 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 nonlocal wrote_points
                 wrote_points = True
 
+            # #2984: the point's keyword field lengths, written by the success
+            # UPDATE below (fenced on this run's claim) rather than flushed
+            # from the ORM row, which would hold the row's lock through the
+            # chunk writes.
+            keyword_lengths: dict[str, int | None] = {}
             written = await write_memory_point(
                 db,
                 memory,
@@ -11548,6 +11635,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 # #2908: a feed row is restored from its unchanged canonical
                 # content even while the target is feed-managed.
                 canonical_rebuild=True,
+                keyword_lengths=keyword_lengths,
             )
             vector: list[float] | None = None
             if written is not None:
@@ -11606,6 +11694,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     embedding_retry_count=0,
                     # #2092: the only writer of the column.
                     embedded_text_digest=embedded_digest,
+                    **keyword_lengths,
                 )
             )
             await db.commit()

@@ -2,6 +2,13 @@
 
 Uses Sudachi for morphological analysis with lemmatization.
 Falls back to simple word splitting for non-CJK text.
+
+#2986: a Japanese morpheme's lemma is Sudachi's normalized form, which maps
+spelling variants of one word to one spelling (引越し / 引っ越し -> 引っ越し,
+サーバ / サーバー -> サーバー) and inflections to the dictionary form. Documents
+and queries share ``_lemma``, so they always agree. A morpheme without a CJK
+character (a Latin word inside Japanese text) keeps its dictionary form,
+lowercased, as the same word gets on the non-CJK path; readings are unchanged.
 """
 
 import re
@@ -19,6 +26,13 @@ _STOP_POS = frozenset({"助詞", "助動詞", "補助記号", "空白"})
 
 # Lazy-loaded Sudachi tokenizer
 _sudachi_tokenizer = None
+
+
+def _lemma(token: Any) -> str:
+    """The keyword token of one Sudachi morpheme (#2986)."""
+    if _CJK_PATTERN.search(token.surface()):
+        return token.normalized_form().lower()
+    return token.dictionary_form().lower()
 
 
 def _get_sudachi():
@@ -89,7 +103,7 @@ def tokenize_and_reading(text: str) -> tuple[str, str, Any | None]:
         for token in tokens:
             if token.part_of_speech()[0] in _STOP_POS:
                 continue
-            lemmas.append(token.dictionary_form().lower())
+            lemmas.append(_lemma(token))
             readings.append(token.reading_form())
         return " ".join(lemmas), " ".join(readings), tokens
     except Exception as e:
@@ -177,7 +191,8 @@ def tokenize_for_search(text: str) -> str:
     """Tokenize text for BM25 search. Returns space-separated lemmas.
 
     For Japanese text: uses Sudachi morphological analysis to produce
-    dictionary-form tokens (e.g., "走った" → "走る").
+    normalized dictionary-form tokens (e.g., "走った" → "走る", "引越し" →
+    "引っ越し", #2986).
 
     For non-CJK text: returns lowercase text as-is (Qdrant's word
     tokenizer handles English well).
@@ -194,7 +209,26 @@ def tokenize_for_search(text: str) -> str:
     if not _CJK_PATTERN.search(text):
         return text.lower()
 
-    return _sudachi_extract(text, lambda t: t.dictionary_form().lower(), "tokenization")
+    return _sudachi_extract(text, _lemma, "tokenization")
+
+
+def normalize_term(text: str) -> str:
+    """One term (a synonym dictionary entry) in the form the keyword tokens use (#2986).
+
+    The lemmas of all of its morphemes, joined without a space: a one-morpheme
+    term becomes the token documents and queries carry for it. Non-CJK text
+    is lowercased, as ``tokenize_for_search`` does. On a Sudachi failure the
+    lowercased text.
+    """
+    if not text:
+        return ""
+    if not _CJK_PATTERN.search(text):
+        return text.lower()
+    try:
+        return "".join(_lemma(token) for token in _get_sudachi().tokenize(text))
+    except Exception as e:
+        logger.warning("sudachi_normalize_failed", text_length=len(text), error=str(e))
+        return text.lower()
 
 
 def build_fulltext_query(query: str) -> str:

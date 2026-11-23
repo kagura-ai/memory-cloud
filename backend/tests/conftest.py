@@ -556,3 +556,35 @@ def _erasure_fences_need_a_session(monkeypatch):
     gate(vector_erasure, "embedding_author_current", True)
     gate(vector_erasure, "reconcile_erased_writer", False)
     gate(vector_erasure, "has_vector_erasure_scope", False)
+
+
+@pytest.fixture(autouse=True)
+def _keyword_stats_need_a_session(monkeypatch):
+    """#2984: the keyword averages are read from a real session only.
+
+    The point writers read the context's averages (one SELECT, cached). Like
+    _erasure_fences_need_a_session, a scripted unit DB (a bare MagicMock)
+    keeps its prior statement sequence: it gets no averages (each field
+    weighted with its own length). Actual sessions and ``AsyncSession`` specs
+    run the real read (tests/services/test_keyword_stats.py, the DB tests).
+    """
+    from services import keyword_stats, resource_indexer
+    from utils.sparse_vector import MemoryFieldStats
+
+    real_memory = keyword_stats.memory_field_stats
+    real_resource = keyword_stats.resource_fulltext_avgdl
+
+    async def memory_stats(db, *args, **kwargs):
+        if isinstance(db, AsyncSession):
+            return await real_memory(db, *args, **kwargs)
+        return MemoryFieldStats()
+
+    async def resource_avgdl(db, *args, **kwargs):
+        if isinstance(db, AsyncSession):
+            return await real_resource(db, *args, **kwargs)
+        return None
+
+    monkeypatch.setattr(keyword_stats, "memory_field_stats", memory_stats)
+    monkeypatch.setattr(keyword_stats, "resource_fulltext_avgdl", resource_avgdl)
+    monkeypatch.setattr(resource_indexer, "resource_fulltext_avgdl", resource_avgdl)
+    keyword_stats.clear_keyword_stats_cache()

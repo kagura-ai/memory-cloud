@@ -4585,6 +4585,94 @@ resolved from the context's setting; `HYBRID_FUSION` when no search ran) and
 `leg_ranks`: for each result of the page, in page order, its rank in the
 semantic and in the keyword leg (`null` where that leg did not return it).
 
+### Keyword scoring (BM25) — Issue #2984
+
+The keyword leg of recall scores like Okapi BM25 with field weights: each
+point's `bm25` sparse vector carries, per field, the term-frequency saturation
+(`k1` 1.2) and the length normalisation (`b` 0.75) against that field's average
+length in the memory's context; Qdrant applies the IDF at query time as before.
+The field weights are unchanged (summary 2.0, context summary 2.0, content 1.0,
+summary reading 0.5; a resource document's text 1.0, with averages of its own).
+The constants are not settings. [Concepts](concepts.md#hybrid-search) describes
+the scoring.
+
+The same release (#2986) indexes and searches Japanese words in Sudachi's
+normalized form instead of the dictionary form, so spelling variants of a word
+(引越し / 引っ越し, サーバ / サーバー) become one keyword token. Queries use the
+new tokens as soon as the new code runs; memories written before keep their
+old tokens until the rebuild below rewrites them (or they are written again),
+so a query in one spelling can miss an older memory in another until then.
+
+The field lengths are five nullable columns on `memories` (revision
+`f61_2984_keyword_lengths`), written by every point writer (the embedding
+pipeline, Sleep, the resource indexer, the embedding-model migration). A
+context's averages are read from its live rows and cached for 5 minutes in each
+API process, so a new memory is weighted with averages up to that old (and
+without itself); the rebuild below brings every point of a context to its
+current averages. A context merge copies the source's points as they are: the
+copies keep the source context's weighting until the rebuild or their next
+write. With the LanceDB store (`KAGURA_VECTOR_BACKEND=lance`) the weighting
+does not apply (its own full-text index already scores with BM25), but the
+normalized tokens do: run the same rebuild command there after the upgrade. On
+LanceDB it rewrites every memory's token fields from the row, which rebuilds the
+point's full-text column (no vectors are touched), and stores the lengths. It
+rewrites only the rows whose stored tokens differ (`tokens_rewritten`); a
+second run counts every row `unchanged`.
+
+**Upgrade.** In this order:
+
+1. `alembic upgrade head` (it adds the five columns: a brief `ACCESS EXCLUSIVE`
+   lock on `memories`, held for the migration's one transaction, no rewrite,
+   no backfill, no other table locked). Run it before starting the new code, which selects the columns;
+   the previous release keeps working against the migrated schema.
+2. Deploy the new code. From then on every point written is weighted the new
+   way. Points written before keep raw term frequencies, so keyword ranking
+   mixes the two until step 3 finished.
+3. Rebuild the keyword vectors, where the API runs, from `backend/`:
+
+   ```bash
+   python -m src.cli.rebuild_keyword_vectors --all                # plan: rows per state
+   python -m src.cli.rebuild_keyword_vectors --all --apply --yes
+   ```
+
+   Per context, by id, it stores every live row's field lengths (tokenized
+   from the row, as the writer does), then rebuilds every point's `bm25` vector
+   with the context's averages read fresh. No embedding call, no dense vector
+   change; a summary point's four token payload fields are rewritten when they
+   differ from the row's tokenization (after this upgrade: every point with a
+   Japanese spelling the normalized form changes). The report counts each row
+   once: `skipped` = another writer holds it (locked, or changed between the
+   two passes), `not_embedded` = a live row that is not embedded (pending,
+   being embedded, failed), `missing_point` = its point is not in the vector
+   store (or was removed during the run); none of these is an error, the
+   row's writer weights it. A feed-managed context (a sync feed, or one
+   stopping) is left untouched and counted in `managed_contexts`. A second run
+   over unchanged rows writes nothing (`unchanged`). `--context <uuid>`
+   rebuilds one context; `--limit N` stops after N contexts and prints
+   `resume --after <context id>` to go on from; an interrupted run is safe to
+   start again (a context is redone, already rebuilt points count as
+   `unchanged`). Each API process keeps its cached averages for up to 5
+   minutes, so the weighting of new writes, and with it the ranking, settles
+   within 5 minutes after the run.
+
+   Time: about 10 seconds per 10,000 memories, measured with a local Postgres
+   and Qdrant (loopback, one WSL2 machine) on one context of 10,000 generated
+   mixed Japanese / English memories (summaries of 4-12 words, content of 20-400
+   words); a second run over the same rows took about 7 seconds. Expect it to
+   take several times longer where the database and the vector store are
+   reached over a network, and longer for long resource documents (their text
+   is tokenized in both passes).
+
+Run the rebuild again for a context whose size changed a lot (an import, a big
+cleanup): new writes follow its averages, earlier points keep the averages of
+their write time.
+
+In keyword-only recall (`search_mode="keyword"`) the scores are the BM25 scores
+themselves; their spread is narrower than with raw term frequencies, so the
+`confidence` level computed from it (when the semantic leg returns no rows) can
+differ from before for the same query. Hybrid recall normalises each leg and is
+not affected by the scale.
+
 ### Self-hosted recipe (keyless reranking as standard equipment)
 
 Serve a reranker behind `/v1/rerank` and make it the default for new contexts:
