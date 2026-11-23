@@ -34,6 +34,8 @@
 
 ## Keep the context. Change the conversation.
 
+> **DolphinBench: 455 of 600 tasks (75.8%), self-tested on November 23, 2026.** With Hermes and GPT 5.6 Luna, Kagura Memory Cloud passed more tasks than each memory system in the benchmark's published Hermes + Luna results (Mem0 424, Hindsight 417, Honcho 411). The run is self-reported and awaits the maintainers' review: [run record](https://github.com/mem0ai/dolphinbench/pull/16) · [evidence](https://github.com/kagura-ai/dolphinbench/releases/tag/kagura-memory-cloud-hermes-20261123) · [comparison](#dolphinbench-memory-for-an-agent-that-acts).
+
 > **OpenAI Plugin released:** [Kagura Memory Cloud is available in ChatGPT](https://chatgpt.com/plugins/plugin_asdk_app_6adacc9eaf5481919a85fad2aaa7aade). Add the plugin and sign in to Kagura to save and recall memories in your conversations. See [supported platforms](#supported-platforms) for the other ways to connect.
 
 You explained the project yesterday. Today you open a new chat, switch AI tools, or hand work to a teammate. The decisions and their reasons should come with you.
@@ -134,6 +136,29 @@ How much history does an assistant need to answer well? Our [public benchmark re
 These are developer-run, preregistered results from November 10, 2026, excluding adversarial questions. Costs exclude memory construction and service fees. The tradeoff includes lower accuracy than full-history input; these are not official full-dataset scores or a guarantee for your workload.
 
 A November 12 rerun of **v0.156.0** scored **91.3% with lenient grading / 83.7% with strict grading**. It reused the same conversations after tuning and was not preregistered. Keep it separate from the original run and its cost measurements.
+
+### DolphinBench: memory for an agent that acts
+
+[DolphinBench](https://github.com/mem0ai/dolphinbench) gives an agent three people's histories (13,539 messages) and then 600 tasks in simulated apps; a task passes only if the agent acts correctly on what it should remember. We ran it with the benchmark's Hermes setup and GPT 5.6 Luna, with Kagura Memory Cloud as the memory.
+
+| Memory (Hermes + GPT 5.6 Luna) | Tasks passed, of 600 | Source |
+|---|---:|---|
+| **Kagura Memory Cloud v0.156.0** | **455 (75.8%)** | Self-tested, November 23, 2026; [under review](https://github.com/mem0ai/dolphinbench/pull/16) |
+| Mem0 | 424 (70.7%) | Published by the benchmark |
+| Hindsight | 417 (69.5%) | Published by the benchmark |
+| Honcho | 411 (68.5%) | Published by the benchmark |
+| Hermes built-in memory | 394 (65.7%) | Published by the benchmark |
+| Supermemory | 355 (59.2%) | Published by the benchmark |
+
+Read the comparison with these limits:
+
+- **Self-tested.** The benchmark's maintainers have not verified our run. The published rows are theirs.
+- **Not held out.** We chose the plugin's recall settings after reading failures on the public tasks.
+- **Judge route.** The judge is the benchmark's model, settings and prompts, sent through the OpenAI API instead of Azure.
+- **Cost.** $97.90 of agent tokens at the benchmark's prices. The memory server's own models ran self-hosted and are not included.
+- **Other self-tested runs** awaiting review report 451 to 504 tasks, most with a different harness.
+
+Everything needed to check the score is public: the [run record and method note](https://github.com/kagura-ai/dolphinbench/blob/kagura-memory-cloud-hermes-20261123/docs/submissions/kagura-memory-cloud-hermes-20261123.md), the [evidence ZIP](https://github.com/kagura-ai/dolphinbench/releases/tag/kagura-memory-cloud-hermes-20261123) with all 600 task conversations and saved judge answers, and the plugin and adapter source at the same tag.
 
 **Evaluation is ongoing.** We are running additional evaluations and working to improve memory retrieval and answer accuracy. The published results above reflect the tested versions and conditions.
 
