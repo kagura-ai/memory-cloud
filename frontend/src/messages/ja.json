@@ -1972,7 +1972,9 @@
     "contextUnlockedSuccess": "コンテキストのロックを解除しました",
     "failedToUpdateLock": "ロック状態の更新に失敗しました",
     "cannotDeleteLocked": "「{name}」を削除できません — コンテキストがロックされています。先にロックを解除してください。",
-    "deleteContextUnlocked": "「{name}」とこのコンテキスト内のすべてのメモリーが完全に削除されます。この操作は取り消せません。"
+    "deleteContextUnlocked": "「{name}」とこのコンテキスト内のすべてのメモリーが完全に削除されます。この操作は取り消せません。",
+    "searchPurposeHint": "コンテキストの検索の重みと融合方式を設定します。作成後もコンテキストの検索設定で変更できます。",
+    "searchPurposeNotApplied": "コンテキストは作成されましたが、検索の用途は適用されませんでした。コンテキストの検索設定で変更できます。"
   },
   "memories": {
     "title": "メモリー",
@@ -2684,6 +2686,16 @@
       "inactiveCap": "このコンテキストでは LLM による結果の選別がオンですが停止中です: プランの上限を超えており（{limit} 件中 {inUse} 件使用中）、先に有効にしたコンテキストが優先されます。",
       "inactiveCapNoCount": "このコンテキストでは LLM による結果の選別がオンですが停止中です: プランの上限を超えており、先に有効にしたコンテキストが優先されます。",
       "inactiveNote": "その間、リコールは選別せずにランキング済みの結果を返します。アップグレード後または枠が空くと再び適用されます。"
+    },
+    "purpose": {
+      "label": "用途",
+      "conversation": "会話・作業履歴",
+      "documents": "ドキュメント・マニュアル",
+      "custom": "カスタム",
+      "conversationGuidance": "会話、セッションのメモ、作業履歴向け。セマンティック {semantic} / キーワード {keyword}、融合方式は自動。",
+      "documentsGuidance": "ドキュメント、マニュアル、FAQ 向け。セマンティック {semantic} / キーワード {keyword}、融合方式は自動。",
+      "customGuidance": "内容が混在している場合や、値を自分で調整した場合向け。下の重みと融合方式を設定します。",
+      "settingsHint": "用途を選ぶと、下の重みと融合方式に未保存の変更として値が入ります。どの値もその後も変更できます。"
     }
   },
   "externalKeys": {

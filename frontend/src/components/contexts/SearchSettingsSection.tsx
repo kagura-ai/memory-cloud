@@ -71,6 +71,13 @@ import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { UnsavedChangesBar } from "@/components/contexts/UnsavedChangesBar";
+import { SearchPurposeSelect } from "@/components/contexts/SearchPurposeSelect";
+import {
+  SEARCH_PURPOSE_PRESETS,
+  SEARCH_PURPOSES,
+  matchSearchPurpose,
+  type SearchPurpose,
+} from "@/lib/searchPurposes";
 import { cn } from "@/styles/design-tokens";
 
 interface TelemetryServiceStatus {
@@ -388,6 +395,22 @@ export function SearchSettingsSection({
       ...editedConfig,
       semantic_weight: clamped,
       bm25_weight: parseFloat((1.0 - clamped).toFixed(2)),
+    });
+  };
+
+  /**
+   * #2983: a purpose stages its weights and fusion through the same staging
+   * a manual edit uses, so Save and Discard work unchanged. Custom stages
+   * nothing. A backend that predates the fusion setting gets the weights only.
+   */
+  const handlePurposeChange = (purpose: SearchPurpose) => {
+    if (purpose === "custom" || !config) return;
+    const preset = SEARCH_PURPOSE_PRESETS[purpose];
+    setEditedConfig({
+      ...editedConfig,
+      semantic_weight: preset.semantic_weight,
+      bm25_weight: preset.bm25_weight,
+      ...(config.fusion !== undefined ? { fusion: preset.fusion } : {}),
     });
   };
 
@@ -738,6 +761,23 @@ export function SearchSettingsSection({
             <CardDescription>{t("hybridSearchWeightsDesc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
+            {/* #2983: the purpose of the CURRENT values (staged, else
+                stored); not stored itself. */}
+            <SearchPurposeSelect
+              id="search_purpose"
+              value={matchSearchPurpose({
+                semantic_weight: getCurrentValue("semantic_weight"),
+                bm25_weight: getCurrentValue("bm25_weight"),
+                fusion:
+                  config.fusion !== undefined
+                    ? getCurrentValue("fusion")
+                    : undefined,
+              })}
+              purposes={SEARCH_PURPOSES}
+              onChange={handlePurposeChange}
+              hint={t("purpose.settingsHint")}
+            />
+
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <Label htmlFor="semantic_weight">

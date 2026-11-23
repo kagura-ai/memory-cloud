@@ -148,8 +148,17 @@ const STORED_FIELDS = {
   reranker_model: "rerank-2",
 };
 
+/** The fusion selects (#2983 added the purpose select beside it). */
+function fusionSelects(): HTMLSelectElement[] {
+  return (screen.queryAllByRole("combobox") as HTMLSelectElement[]).filter(
+    (s) => Array.from(s.options).some((o) => o.value === "rrf"),
+  );
+}
+
 function fusionSelect(): HTMLSelectElement {
-  return screen.getByRole("combobox") as HTMLSelectElement;
+  const found = fusionSelects();
+  expect(found).toHaveLength(1);
+  return found[0];
 }
 
 function saveBar() {
@@ -236,7 +245,7 @@ describe("fusion select — presence", () => {
   it("is not shown by a backend that predates the field", async () => {
     await renderWith(BASE);
     expect(screen.queryByText("fusion.label")).toBeNull();
-    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+    expect(fusionSelects()).toHaveLength(0);
   });
 });
 

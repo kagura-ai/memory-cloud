@@ -20,6 +20,13 @@ import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { SleepModeBadge } from "@/components/contexts/SleepModeBadge";
 import { CurrentContextBadge } from "@/components/contexts/CurrentContextBadge";
 import { ContextPrivacyChoice } from "@/components/contexts/ContextPrivacyChoice";
+import { SearchPurposeSelect } from "@/components/contexts/SearchPurposeSelect";
+import {
+  DEFAULT_SEARCH_PURPOSE,
+  PRESET_SEARCH_PURPOSES,
+  searchPurposeUpdate,
+  type PresetSearchPurpose,
+} from "@/lib/searchPurposes";
 import {
   MemoryHealthReport,
   MemoryHealthStatusBadge,
@@ -223,6 +230,10 @@ export default function ContextsPage() {
   // Note: Embedding model is now fixed via EMBEDDING_MODEL env var (single collection mode)
   const [isPrivate, setIsPrivate] = useState(true); // Issue #165: Privacy control
   const [newEmbeddingModel, setNewEmbeddingModel] = useState<string>(""); // Issue #49: empty = default
+  // #2983: applied after the create; the default is today's defaults.
+  const [newSearchPurpose, setNewSearchPurpose] = useState<PresetSearchPurpose>(
+    DEFAULT_SEARCH_PURPOSE,
+  );
   const [createError, setCreateError] = useState<string | null>(null);
   // #1646 (Q2): the refusal behind `createError`, so a quota refusal renders
   // as the gate notice (CreateErrorNotice). Cleared with every new attempt.
@@ -495,7 +506,7 @@ export default function ContextsPage() {
     try {
       setCreating(true);
       setCreateError(null);
-      await createContext({
+      const created = await createContext({
         expected_workspace_id: currentWorkspace?.id,
         name: newContextName.trim(),
         display_name: newContextDisplayName.trim() || undefined,
@@ -505,6 +516,7 @@ export default function ContextsPage() {
         embedding_model: newEmbeddingModel || undefined,
         is_private: isPrivate, // Issue #165
       });
+      const purpose = newSearchPurpose;
       setCreateDialogOpen(false);
       setNewContextName("");
       setNewContextDisplayName("");
@@ -512,7 +524,26 @@ export default function ContextsPage() {
       setNewContextSummary("");
       setNewContextUsageGuide("");
       setIsPrivate(true);
+      setNewSearchPurpose(DEFAULT_SEARCH_PURPOSE);
       fetchContexts();
+      // #2983: the default purpose is the create's own defaults, so only
+      // another purpose needs the search-config update. The context exists
+      // either way: a failed update is reported, not rolled back.
+      if (purpose !== DEFAULT_SEARCH_PURPOSE) {
+        try {
+          const stored = await getContextSearchConfig(created.id);
+          await updateContextSearchConfig(
+            created.id,
+            searchPurposeUpdate(purpose, stored),
+          );
+        } catch {
+          toast({
+            title: tCommon("error"),
+            description: t("searchPurposeNotApplied"),
+            variant: "destructive",
+          });
+        }
+      }
     } catch (err: unknown) {
       setCreateRefusal(err);
       const errorMessage =
@@ -963,6 +994,15 @@ export default function ContextsPage() {
                 </p>
               </div>
             )}
+
+            {/* Search purpose - #2983 */}
+            <SearchPurposeSelect
+              id="new_context_search_purpose"
+              value={newSearchPurpose}
+              purposes={PRESET_SEARCH_PURPOSES}
+              onChange={setNewSearchPurpose}
+              hint={t("searchPurposeHint")}
+            />
 
             {/* Privacy Control - Issue #182 */}
             <div className="space-y-2">
