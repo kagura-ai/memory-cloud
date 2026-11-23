@@ -6,8 +6,13 @@ O(1) synonym lookup for BM25 query expansion.
 Format: CSV with group_id as first column, surface form at column index 8.
 Empty lines separate groups. All surfaces in the same group are synonyms.
 
-Source: https://github.com/WorksApplications/SudachiDict/blob/develop/src/main/text/synonyms.txt
-License: Apache 2.0
+Source: ``src/main/text/synonyms.txt`` of SudachiDict release v20261015
+(tag ``v20261015``, commit 830bf9e1313f6f75235ba87ee041e144dbcad8c1, #2985), the
+release of the locked ``sudachidict-core``:
+https://github.com/WorksApplications/SudachiDict/blob/v20261015/src/main/text/synonyms.txt
+Compare against a newer release's file before replacing it.
+License: Apache License 2.0 (SudachiDict, Works Applications Co., Ltd.), the
+license of the Sudachi dictionary itself.
 """
 
 from __future__ import annotations

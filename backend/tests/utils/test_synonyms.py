@@ -96,3 +96,20 @@ class TestExpandQueryTokens:
         # All 5 original tokens must be present
         for original in query.split():
             assert original in tokens
+
+
+class TestSynonymFileRelease:
+    """#2985: the file is SudachiDict v20261015's synonyms.txt."""
+
+    def test_a_group_added_after_the_previous_copy_expands(self, synonym_dict):
+        """Group 026180 (岩木山 / 津軽富士) is not in the April 2026 copy."""
+        assert "津軽富士" in synonym_dict["岩木山"]
+        assert "岩木山" in expand_synonyms("津軽富士")
+
+    def test_the_file_loads_without_a_warning(self, monkeypatch):
+        from utils import synonyms
+
+        warnings: list[str] = []
+        monkeypatch.setattr(synonyms.logger, "warning", lambda event, **_: warnings.append(event))
+        assert len(synonyms._load_synonyms()) > 0
+        assert warnings == []
