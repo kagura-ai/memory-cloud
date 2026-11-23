@@ -181,3 +181,18 @@ def test_apply_reports_whether_a_length_changed():
     assert apply_keyword_lengths(row, lengths) is True
     assert row.keyword_fulltext_len == 2
     assert apply_keyword_lengths(row, lengths) is False
+
+
+@pytest.mark.asyncio
+async def test_the_lancedb_store_reads_no_averages(monkeypatch):
+    """LanceDB keeps no sparse vector (its own FTS scores with BM25): the
+    writers there get no averages and nothing is read."""
+    import db.qdrant as qdrant
+
+    monkeypatch.setattr(qdrant, "_active_store", lambda: object())
+    db = _session(one=(4.5, 1.0, 120.0, 7.25), scalar=300.0)
+
+    assert await memory_field_stats(db, uuid4()) == MemoryFieldStats()
+    assert await resource_fulltext_avgdl(db, uuid4()) is None
+    db.execute.assert_not_awaited()
+    db.scalar.assert_not_awaited()

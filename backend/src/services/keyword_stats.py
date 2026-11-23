@@ -125,6 +125,14 @@ def _as_float(value: Any) -> float | None:
     return float(value) if value is not None else None
 
 
+def _sparse_vectors_used() -> bool:
+    """False with the LanceDB store: it keeps no sparse vector (its own FTS
+    scores with BM25), so the averages would weight nothing."""
+    from db.qdrant import _active_store
+
+    return _active_store() is None
+
+
 async def memory_field_stats(
     db: AsyncSession, context_id: UUID | None, *, fresh: bool = False
 ) -> MemoryFieldStats:
@@ -133,13 +141,14 @@ async def memory_field_stats(
     Args:
         db: A session (one read).
         context_id: The context; ``None`` (a context-less row) = no averages.
+            The LanceDB store reads none either (no sparse vectors).
         fresh: Read the aggregate even when a cached one is current (the
             rebuild CLI); the result is cached either way.
 
     Returns:
         ``MemoryFieldStats``; a field no live row has indexed is ``None``.
     """
-    if not isinstance(context_id, UUID):
+    if not isinstance(context_id, UUID) or not _sparse_vectors_used():
         return MemoryFieldStats()
     key = (context_id, _MEMORY)
     if not fresh:
@@ -173,7 +182,7 @@ async def resource_fulltext_avgdl(
 
     Args: as ``memory_field_stats``.
     """
-    if not isinstance(context_id, UUID):
+    if not isinstance(context_id, UUID) or not _sparse_vectors_used():
         return None
     key = (context_id, _RESOURCE)
     if not fresh:
