@@ -78,7 +78,12 @@ async def test_a_resource_row_gets_the_indexer_point_back() -> None:
 
     assert written is None
     indexer.rebuild_point.assert_awaited_once_with(
-        memory, collection_name="coll", embedding_service=svc, usage=usage, canonical_rebuild=False
+        memory,
+        collection_name="coll",
+        embedding_service=svc,
+        usage=usage,
+        canonical_rebuild=False,
+        keyword_lengths={},
     )
     assert order == ["on_write", "rebuild"]
     upsert.assert_not_awaited()

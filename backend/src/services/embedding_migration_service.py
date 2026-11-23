@@ -457,6 +457,24 @@ async def _can_rebuild(indexer: ResourceIndexer, memory: Memory, collection_name
     return True
 
 
+async def _store_keyword_lengths(
+    db: AsyncSession, lengths: dict[UUID, dict[str, int | None]]
+) -> None:
+    """Store the keyword lengths of the points a page wrote (#2984), one short transaction.
+
+    The rows were expunged; a row edited meanwhile is re-embedded by the
+    pipeline, which writes its lengths again.
+    """
+    for memory_id, values in lengths.items():
+        await db.execute(
+            update(Memory)
+            .where(Memory.id == memory_id)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+    await db.commit()
+
+
 def _group_by_user(rows: list[Memory]) -> Iterator[tuple[str, list[Memory]]]:
     """Consecutive runs of the same ``user_id``.
 
@@ -560,6 +578,12 @@ async def reembed_context(
     unrebuildable: list[UUID] = []
     indexer: ResourceIndexer | None = None
     last_id: UUID | None = None
+    # #2984: the points are BM25-weighted with the context's keyword averages,
+    # read once for the run (the page loop's commit ends that read), and each
+    # row keeps the lengths its point indexed.
+    from services.keyword_stats import memory_field_stats, memory_keyword_lengths
+
+    keyword_stats = await memory_field_stats(db, plan.context_id)
     while True:
         stmt = select(Memory).where(
             Memory.context_id == plan.context_id,
@@ -585,6 +609,7 @@ async def reembed_context(
         resource_row_ids = {memory.id for memory in resource_rows}
         plain_rows = [memory for memory in rows if memory.id not in resource_row_ids]
         payloads: dict[UUID, dict[str, Any]] = {}
+        lengths: dict[UUID, dict[str, int | None]] = {}
 
         for user_id, group in _group_by_user(plain_rows):
             vectors = await service.embed_batch(
@@ -605,7 +630,7 @@ async def reembed_context(
 
                 if not await embedding_author_current(db, memory):
                     continue
-                payload, sparse_indices, sparse_values = build_memory_point(memory)
+                payload, sparse_indices, sparse_values = build_memory_point(memory, keyword_stats)
                 payloads[memory.id] = payload
                 await add_memory_to_qdrant(
                     user_id=memory.user_id,
@@ -621,6 +646,7 @@ async def reembed_context(
                 if await reconcile_erased_writer(db, memory):
                     payloads.pop(memory.id, None)
                     continue
+                lengths[memory.id] = memory_keyword_lengths(payload)
                 embedded += 1
 
         plain_rows = [memory for memory in plain_rows if memory.id in payloads]
@@ -640,9 +666,15 @@ async def reembed_context(
             if indexer is None:
                 indexer = ResourceIndexer(db)
             try:
+                resource_lengths: dict[str, int | None] = {}
                 await indexer.rebuild_point(
-                    memory, collection_name=plan.target_collection, embedding_service=service
+                    memory,
+                    collection_name=plan.target_collection,
+                    embedding_service=service,
+                    keyword_lengths=resource_lengths,
                 )
+                if resource_lengths:
+                    lengths[memory.id] = resource_lengths
                 embedded += 1
             except ResourceRebuildError as exc:
                 # Not a reason to stop the migration: the row has no usable
@@ -666,6 +698,8 @@ async def reembed_context(
             # as the page loop does.
             await db.commit()
 
+        if lengths:
+            await _store_keyword_lengths(db, lengths)
         batches += 1
         last_id = rows[-1].id
         if progress is not None:

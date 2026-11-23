@@ -291,6 +291,19 @@ class Memory(Base):
     # text: chunk backfill, model switch, repair re-queue) from a first embed
     # or an edit; written only by its success write.
     embedded_text_digest: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # #2984: the token counts of the keyword (BM25) fields as the row's point
+    # was last indexed, written by the code that writes the point
+    # (``write_memory_point``, the resource indexer, the embedding-model
+    # migration, ``python -m src.cli.rebuild_keyword_vectors``). A summary
+    # point fills the first four (summary, context_summary, ``content[:2000]``,
+    # the summary's reading), a resource point the fulltext one; the others
+    # are NULL. NULL = no point written since the columns exist: the row is
+    # left out of its context's averages (``services.keyword_stats``).
+    keyword_summary_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    keyword_context_summary_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    keyword_content_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    keyword_reading_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    keyword_fulltext_len: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Layer 2: 文脈説明
     context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

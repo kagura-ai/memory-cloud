@@ -1751,7 +1751,9 @@ async def search_memories_fulltext(
             logger.debug("bm25_query_empty_after_tokenization", query=query[:50])
             return []
 
-        # Native BM25 search via sparse vector (Qdrant handles IDF + length norm)
+        # Native BM25 search via sparse vector: Qdrant applies the IDF
+        # (Modifier.IDF); the term saturation and length normalisation are in
+        # the document values (utils.sparse_vector, #2984).
         results = await client.query_points(
             collection_name=collection_name,
             query=SparseVector(indices=query_indices, values=query_values),

@@ -69,8 +69,10 @@ logger = get_logger(__name__)
 DEFAULT_COLLECTION = "kagura_memories"
 
 # Field weights for the combined FTS column, expressed as token repetition.
-# Mirrors utils/sparse_vector.build_document_sparse_vector (summary 2.0 /
-# context_summary 2.0 / content 1.0, plus the reading fallback).
+# Mirrors the field weights of utils/sparse_vector.build_document_sparse_vector
+# (summary 2.0 / context_summary 2.0 / content 1.0, plus the reading fallback).
+# The BM25 saturation and length normalisation that builder applies (#2984) are
+# not repeated here: LanceDB's own FTS scores with BM25.
 _FIELD_REPEATS: tuple[tuple[str, str, int], ...] = (
     ("summary_tokens", "summary", 2),
     ("context_summary_tokens", "context_summary", 2),
