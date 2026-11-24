@@ -29,7 +29,9 @@ from mcp_server.tools._helpers import (
     _format_validation_error,
     _resolve_context_id,
     reset_mcp_capacity_policy,
+    reset_mcp_charge_workspace,
     set_mcp_capacity_policy,
+    set_mcp_charge_workspace,
 )
 from services.plan_headroom import (
     QuotaReading,
@@ -258,6 +260,44 @@ def takes_default_context(tool_name: str) -> bool:
 def _names_a_context(args: dict[str, Any]) -> bool:
     """An explicit ``context_id`` (or recall's ``context_ids`` list) is in the arguments."""
     return args.get("context_id") is not None or isinstance(args.get("context_ids"), list)
+
+
+def _call_context_id(tool_name: str, args: dict[str, Any]) -> UUID | None:
+    """The context a call names, or the URL / credential default it will get (no I/O).
+
+    An agent binding is not looked up: an agent-bound key is workspace-scoped,
+    so its calls are charged to the key's workspace anyway.
+    """
+    from mcp_server.tools._helpers import (
+        get_mcp_credential_default_context,
+        get_mcp_default_context_selection,
+    )
+    from mcp_server.tools._workspace_binding import effective_default_context
+
+    raw = args.get("context_id")
+    if raw is not None:
+        try:
+            return UUID(str(raw))
+        except ValueError:
+            return None
+    if not takes_default_context(tool_name) or isinstance(args.get("context_ids"), list):
+        return None
+    context_id, _source = effective_default_context(
+        get_mcp_default_context_selection(), get_mcp_credential_default_context()
+    )
+    return context_id
+
+
+async def _charge_workspace(
+    tool_name: str, args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> UUID | None:
+    """The workspace this call counts against (``_workspace_binding.charge_workspace``)."""
+    from mcp_server.tools._helpers import get_mcp_key_workspace_scope
+    from mcp_server.tools._workspace_binding import charge_workspace
+
+    return await charge_workspace(
+        user_id, workspace_id, _call_context_id(tool_name, args), get_mcp_key_workspace_scope()
+    )
 
 
 async def _apply_default_context(
@@ -678,11 +718,17 @@ async def _execute_tool_call(
     # handler constructs its pydantic request model.
     args = coerce_mcp_arguments(tool_name, args)
 
+    # #3001: the workspace this call counts against — the context's workspace
+    # when the call names a context of a workspace the caller is a member of,
+    # else the connection's (always the key's under a workspace-scoped key).
+    # The rate limit, the headroom figure and the usage row all use it.
+    charge_workspace_id = await _charge_workspace(tool_name, args, user_id, workspace_id)
+
     # Rate limit check (exempt read-only info tools)
     mcp_calls: QuotaReading | None = None
-    if workspace_id and tool_name not in _RATE_LIMIT_EXEMPT_TOOLS:
+    if charge_workspace_id and tool_name not in _RATE_LIMIT_EXEMPT_TOOLS:
         try:
-            allowed, used, limit = await _check_rate_limit(workspace_id)
+            allowed, used, limit = await _check_rate_limit(charge_workspace_id)
             if not allowed:
                 return _error_response(
                     "rate_limit_exceeded",
@@ -693,7 +739,7 @@ async def _execute_tool_call(
                     "Upgrade your plan for higher limits.",
                 )
             # #2615: the count the plan headroom notice reuses.
-            mcp_calls = mcp_calls_reading(workspace_id, used, limit)
+            mcp_calls = mcp_calls_reading(charge_workspace_id, used, limit)
         except Exception as e:
             # Don't block tool execution if rate limit check fails
             logger.warning(f"rate_limit_check_failed: {e}")
@@ -770,6 +816,7 @@ async def _execute_tool_call(
     # #2615: the quota checks the handler's writes run record what they count
     # here, for the plan headroom notice; reset in ``finally`` with the policy.
     headroom_token = open_plan_headroom_counts(mcp_calls)
+    charge_token = set_mcp_charge_workspace(charge_workspace_id)
     try:
         result = await handler(args, user_id, workspace_id)
         return _with_manual_help(
@@ -804,6 +851,7 @@ async def _execute_tool_call(
         # ``{"error": str(e)}``; the exception text stays in the server log.
         return _tool_exception_response(tool_name, e)
     finally:
+        reset_mcp_charge_workspace(charge_token)
         close_plan_headroom_counts(headroom_token)
         reset_mcp_capacity_policy(capacity_token)
 

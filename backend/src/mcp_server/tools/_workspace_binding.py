@@ -181,3 +181,49 @@ async def resolve_default_context_binding(
                 logger.info("mcp_workspace_binding_fallback: reason=%s source=%s", reason, source)
             return workspace_id
     return None  # pragma: no cover - get_db always yields
+
+
+async def charge_workspace(
+    user_id: str,
+    connection_workspace_id: UUID | None,
+    context_id: UUID | None,
+    key_workspace_id: UUID | None,
+) -> UUID | None:
+    """The workspace a tool call counts against (#3001): limit, headroom and row.
+
+    A call on a context counts in the context's workspace when the caller is a
+    member there, else in the connection's workspace. Under a workspace-scoped
+    key it is always the key's workspace (no read). One indexed read, only
+    when the call names a context. A failed read falls back to the
+    connection's workspace (logged): metering never fails a call.
+    """
+    if key_workspace_id is not None:
+        return key_workspace_id
+    if context_id is None:
+        return connection_workspace_id
+    from sqlalchemy import and_, select
+
+    from db.base import get_db
+    from models.auth import Context, WorkspaceMember
+
+    try:
+        async with contextlib.aclosing(get_db()) as sessions:
+            async for db in sessions:
+                workspace_id = (
+                    await db.execute(
+                        select(Context.workspace_id)
+                        .join(
+                            WorkspaceMember,
+                            and_(
+                                WorkspaceMember.workspace_id == Context.workspace_id,
+                                WorkspaceMember.user_id == user_id,
+                            ),
+                        )
+                        .where(Context.id == context_id, Context.deleted_at.is_(None))
+                    )
+                ).scalar_one_or_none()
+                await db.commit()
+                return workspace_id if workspace_id is not None else connection_workspace_id
+    except Exception as e:  # noqa: BLE001 - metering falls back, never fails the call
+        logger.warning("mcp_charge_workspace_failed: reason=%s", type(e).__name__)
+    return connection_workspace_id

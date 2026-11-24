@@ -4,28 +4,15 @@ Provides unified logging for both HTTP API and MCP tool calls.
 Issue #48 - Usage Statistics - Plan Limits & Usage Tracking
 """
 
-from typing import Any
-from uuid import UUID
-
-from sqlalchemy import and_, func, insert, select
+from sqlalchemy import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import Context, UsageStats, WorkspaceMember
+from models.auth import UsageStats
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-def _as_uuid(value: str | None) -> UUID | None:
-    """``value`` as a UUID, ``None`` when it spells none."""
-    if value is None:
-        return None
-    try:
-        return UUID(str(value))
-    except ValueError:
-        return None
 
 
 async def log_usage(
@@ -38,8 +25,6 @@ async def log_usage(
     context_id: str | None = None,  # Bugfix: Add context_id for stats tracking
     workspace_id: str | None = None,  # Bugfix: Add workspace_id for stats tracking
     api_key_id: int | None = None,  # Issue #626: per-key attribution
-    *,
-    attribute_to_context_workspace: bool = False,
 ) -> bool:
     """Log API or MCP tool usage to usage_stats table.
 
@@ -59,11 +44,6 @@ async def log_usage(
         api_key_id: API key integer ID (Issue #626). Set on public endpoint
             access attributed to a public-bound key. Soft reference — survives
             key deletion.
-        attribute_to_context_workspace: #3001 (MCP tools). The row goes to
-            ``context_id``'s workspace when ``user_id`` is a member of it, else
-            to ``workspace_id``: a call on a context of another of the user's
-            workspaces counts there, not on the connection's. Resolved in the
-            INSERT itself (a scalar subquery), so it costs no extra round trip.
 
     Example usage:
         # HTTP API (from middleware)
@@ -92,22 +72,6 @@ async def log_usage(
     now = utcnow()
 
     async def _insert(ctx_id: str | None) -> None:
-        workspace_value: Any = workspace_id
-        context_uuid = _as_uuid(ctx_id) if attribute_to_context_workspace else None
-        if context_uuid is not None:
-            workspace_value = func.coalesce(
-                select(Context.workspace_id)
-                .join(
-                    WorkspaceMember,
-                    and_(
-                        WorkspaceMember.workspace_id == Context.workspace_id,
-                        WorkspaceMember.user_id == user_id,
-                    ),
-                )
-                .where(Context.id == context_uuid)
-                .scalar_subquery(),
-                _as_uuid(workspace_id),
-            )
         await db.execute(
             insert(UsageStats).values(
                 user_id=user_id,
@@ -118,7 +82,7 @@ async def log_usage(
                 created_at=now,
                 date=now.date(),
                 context_id=ctx_id,  # Bugfix: Add context_id
-                workspace_id=workspace_value,  # Bugfix: Add workspace_id
+                workspace_id=workspace_id,  # Bugfix: Add workspace_id
                 api_key_id=api_key_id,  # Issue #626
             )
         )
