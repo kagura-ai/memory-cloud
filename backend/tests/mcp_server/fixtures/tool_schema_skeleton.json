@@ -318,6 +318,13 @@
             "full"
           ],
           "default": "compact"
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "relevance",
+            "date"
+          ]
         }
       },
       "additionalProperties": false
