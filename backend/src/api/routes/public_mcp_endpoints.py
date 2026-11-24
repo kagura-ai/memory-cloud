@@ -39,6 +39,7 @@ from services.public_usage_budget import read_public_usage_budget
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
+from utils.query_bounds import NO_NUL_PATTERN
 
 logger = get_logger(__name__)
 
@@ -59,14 +60,22 @@ class PublicMcpEndpointCreate(BaseModel):
     """Approved public text for a new publication."""
 
     public_name: str = Field(
-        ..., min_length=1, max_length=PUBLIC_NAME_MAX_CHARS, description="Approved public name"
+        ...,
+        min_length=1,
+        max_length=PUBLIC_NAME_MAX_CHARS,
+        pattern=NO_NUL_PATTERN,
+        description="Approved public name",
     )
     public_description: str | None = Field(
-        None, max_length=PUBLIC_DESCRIPTION_MAX_CHARS, description="Approved public description"
+        None,
+        max_length=PUBLIC_DESCRIPTION_MAX_CHARS,
+        pattern=NO_NUL_PATTERN,
+        description="Approved public description",
     )
     public_usage_guide: str | None = Field(
         None,
         max_length=PUBLIC_USAGE_GUIDE_MAX_CHARS,
+        pattern=NO_NUL_PATTERN,
         description="Approved public usage guide, returned by get_context_info",
     )
 
@@ -74,9 +83,16 @@ class PublicMcpEndpointCreate(BaseModel):
 class PublicMcpEndpointUpdate(BaseModel):
     """Edit of the approved public text; omitted fields keep their value."""
 
-    public_name: str | None = Field(None, min_length=1, max_length=PUBLIC_NAME_MAX_CHARS)
-    public_description: str | None = Field(None, max_length=PUBLIC_DESCRIPTION_MAX_CHARS)
-    public_usage_guide: str | None = Field(None, max_length=PUBLIC_USAGE_GUIDE_MAX_CHARS)
+    # #2995: a NUL is refused here (400), never at the database flush.
+    public_name: str | None = Field(
+        None, min_length=1, max_length=PUBLIC_NAME_MAX_CHARS, pattern=NO_NUL_PATTERN
+    )
+    public_description: str | None = Field(
+        None, max_length=PUBLIC_DESCRIPTION_MAX_CHARS, pattern=NO_NUL_PATTERN
+    )
+    public_usage_guide: str | None = Field(
+        None, max_length=PUBLIC_USAGE_GUIDE_MAX_CHARS, pattern=NO_NUL_PATTERN
+    )
 
 
 class PublicMcpEndpointResponse(TZAwareBaseModel):
@@ -112,17 +128,17 @@ class PublicMcpEndpointResponse(TZAwareBaseModel):
 
 
 async def _live_endpoint(
-    db: AsyncSession, workspace_id: UUID, resource_id: str
+    db: AsyncSession, workspace_id: UUID, resource_id: str, *, for_update: bool = False
 ) -> PublicMcpEndpoint | None:
-    return (
-        await db.execute(
-            select(PublicMcpEndpoint).where(
-                PublicMcpEndpoint.workspace_id == workspace_id,
-                PublicMcpEndpoint.resource_id == resource_id,
-                PublicMcpEndpoint.revoked_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
+    """The resource's live endpoint; ``for_update`` locks the row (waiting) until commit."""
+    statement = select(PublicMcpEndpoint).where(
+        PublicMcpEndpoint.workspace_id == workspace_id,
+        PublicMcpEndpoint.resource_id == resource_id,
+        PublicMcpEndpoint.revoked_at.is_(None),
+    )
+    if for_update:
+        statement = statement.with_for_update().execution_options(populate_existing=True)
+    return (await db.execute(statement)).scalar_one_or_none()
 
 
 async def _response(db: AsyncSession, row: PublicMcpEndpoint) -> PublicMcpEndpointResponse:
@@ -234,7 +250,9 @@ async def update_public_mcp_endpoint(
     be cleared.
     """
     user_id, workspace_id = owner
-    row = await _live_endpoint(db, workspace_id, resource_id)
+    # #2995: locked, so the changed fields are computed against the row this
+    # transaction writes (the application's command edits it too, NOWAIT).
+    row = await _live_endpoint(db, workspace_id, resource_id, for_update=True)
     if row is None:
         raise NotFoundException("Public MCP endpoint")
     fields = body.model_fields_set

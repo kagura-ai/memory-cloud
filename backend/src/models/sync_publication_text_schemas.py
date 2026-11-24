@@ -19,6 +19,7 @@ from models.api_base import TZAwareBaseModel
 from models.public_mcp import PUBLIC_DESCRIPTION_MAX_CHARS, PUBLIC_USAGE_GUIDE_MAX_CHARS
 from models.sync_feed_schemas import StrictBody
 from models.sync_publication_domain_schemas import PublicationBindingExpectation
+from utils.query_bounds import NO_NUL_PATTERN
 
 PublicTextField = Literal["description", "usage_guide"]
 
@@ -32,8 +33,12 @@ class PublicationTextUpdate(StrictBody):
     """
 
     expected: PublicationBindingExpectation
-    public_description: Annotated[str | None, Field(max_length=PUBLIC_DESCRIPTION_MAX_CHARS)] = None
-    public_usage_guide: Annotated[str | None, Field(max_length=PUBLIC_USAGE_GUIDE_MAX_CHARS)] = None
+    public_description: Annotated[
+        str | None, Field(max_length=PUBLIC_DESCRIPTION_MAX_CHARS, pattern=NO_NUL_PATTERN)
+    ] = None
+    public_usage_guide: Annotated[
+        str | None, Field(max_length=PUBLIC_USAGE_GUIDE_MAX_CHARS, pattern=NO_NUL_PATTERN)
+    ] = None
 
     @model_validator(mode="after")
     def _one_field_at_least(self) -> PublicationTextUpdate:

@@ -181,6 +181,9 @@ _STRICT_CASES = [
     ("", _body(public_description="d" * (PUBLIC_DESCRIPTION_MAX_CHARS + 1)), 400),
     ("", _body(public_usage_guide="g" * (PUBLIC_USAGE_GUIDE_MAX_CHARS + 1)), 400),
     ("", _body(public_description=7), 400),
+    # #2995: a NUL is refused here, never at the database flush (a retryable 503).
+    ("", _body(public_description="a\x00b"), 400),
+    ("", _body(public_usage_guide="\x00"), 400),
     ("?installation_id=x", _body(), 400),
     ("", _body(public_usage_guide="x" * 99_000), 413),
 ]

@@ -10344,6 +10344,7 @@
             "anyOf": [
               {
                 "maxLength": 2000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -10354,12 +10355,14 @@
           "public_name": {
             "maxLength": 200,
             "minLength": 1,
+            "pattern": "^[^\\x00]*$",
             "type": "string"
           },
           "public_usage_guide": {
             "anyOf": [
               {
                 "maxLength": 4000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -10405,6 +10408,7 @@
             "anyOf": [
               {
                 "maxLength": 2000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -10417,6 +10421,7 @@
               {
                 "maxLength": 200,
                 "minLength": 1,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -10428,6 +10433,7 @@
             "anyOf": [
               {
                 "maxLength": 4000,
+                "pattern": "^[^\\x00]*$",
                 "type": "string"
               },
               {
@@ -44062,6 +44068,7 @@
                     "anyOf": [
                       {
                         "maxLength": 2000,
+                        "pattern": "^[^\\x00]*$",
                         "type": "string"
                       },
                       {
@@ -44073,6 +44080,7 @@
                     "anyOf": [
                       {
                         "maxLength": 4000,
+                        "pattern": "^[^\\x00]*$",
                         "type": "string"
                       },
                       {
