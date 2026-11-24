@@ -555,12 +555,13 @@ export function SettingsTabPanel({
                 <AlertCircle className="h-4 w-4" />
                 <AlertTitle>{t("publicEndpointNote.title")}</AlertTitle>
                 <AlertDescription>
-                  {context.feed_management_mode === "feed" ||
-                  context.feed_management_mode === "stopping"
-                    ? t("publicEndpointNote.managed")
-                    : t("publicEndpointNote.owner", {
-                        resourceId: context.resource_id ?? "",
-                      })}
+                  {t(
+                    context.feed_management_mode === "feed" ||
+                      context.feed_management_mode === "stopping"
+                      ? "publicEndpointNote.managed"
+                      : "publicEndpointNote.owner",
+                    { resourceId: context.resource_id ?? "" },
+                  )}
                 </AlertDescription>
               </Alert>
             )}

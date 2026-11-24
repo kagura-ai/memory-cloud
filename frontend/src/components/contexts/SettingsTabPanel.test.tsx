@@ -33,6 +33,8 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsTabPanel } from "./SettingsTabPanel";
+import en from "@/messages/en.json";
+import ja from "@/messages/ja.json";
 import type { Context } from "@/lib/types/context";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -954,5 +956,16 @@ describe("SettingsTabPanel — public endpoint note (#2995)", () => {
         "publicEndpointNote.owner",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("both variants name the owner's PATCH route with the real resource id", () => {
+    for (const messages of [en, ja]) {
+      const note = messages.contextSettings.publicEndpointNote;
+      for (const text of [note.owner, note.managed]) {
+        expect(text).toContain(
+          "PATCH /api/v1/resources/{resourceId}/public-mcp",
+        );
+      }
+    }
   });
 });
