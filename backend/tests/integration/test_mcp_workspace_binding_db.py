@@ -16,6 +16,7 @@ transport's credential check and the post-commit embedding task are stubbed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
@@ -1130,3 +1131,153 @@ async def test_a_session_re_initializes_when_its_workspace_binding_changes(
         monkeypatch, w["user_id"], ping, session_id, credential_default=w["b_shared"]
     )
     assert gone.status == 404
+
+
+# ================================================================ fix round 2
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_context_counts_in_the_workspace_it_names(world, db_session, monkeypatch):
+    """A has used its whole day: create_context(workspace_id=B) still runs and
+    is counted in B. Without workspace_id an unbound create counts in A."""
+    w = world
+    await _cap_workspace_calls(db_session, w["wa"], 1, w["user_id"])
+    created = await _asgi_call(
+        monkeypatch,
+        w["user_id"],
+        "create_context",
+        {"name": f"in-b-{w['tag']}", "is_private": False, "workspace_id": str(w["wb"])},
+    )
+    assert created["status"] == "success", created
+    assert created["workspace"]["id"] == str(w["wb"])
+    assert await _usage_workspaces(db_session, w["user_id"], "mcp:create_context") == [w["wb"]]
+    refused = await _asgi_call(
+        monkeypatch, w["user_id"], "create_context", {"name": f"in-a-{w['tag']}"}
+    )
+    assert refused["error"] == "rate_limit_exceeded", refused
+    # A workspace the user is not a member of is never charged.
+    outside = await _asgi_call(
+        monkeypatch,
+        w["user_id"],
+        "create_context",
+        {"name": f"in-e-{w['tag']}", "is_private": False, "workspace_id": str(w["we"])},
+    )
+    assert outside["error"] == "rate_limit_exceeded", outside
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_deleted_context_is_charged_to_the_connection_workspace(
+    world, db_session, monkeypatch
+):
+    w = world
+    await db_session.execute(
+        Context.__table__.update()
+        .where(Context.id == w["b_dup"])
+        .values(deleted_at=datetime.now(UTC).replace(tzinfo=None))
+    )
+    await db_session.commit()
+    reply = await _asgi_call(
+        monkeypatch, w["user_id"], "get_context_info", {"context_id": str(w["b_dup"])}
+    )
+    assert reply["error"] == "context_not_found", reply
+    assert await _usage_workspaces(db_session, w["user_id"], "mcp:get_context_info") == [w["wa"]]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_database_error_in_one_workspace_skips_it_and_lists_the_others(
+    world, db_session, monkeypatch
+):
+    """A real Postgres error while listing the first workspace: it is skipped,
+    the session stays usable for the others and for the usage row."""
+    from services.permission_service import PermissionService
+
+    w = world
+    original = PermissionService.get_accessible_contexts
+
+    async def failing_in_a(self, user_id, workspace_id):
+        if workspace_id == w["wa"]:
+            await self.db.execute(text("SELECT 1/0"))
+        return await original(self, user_id, workspace_id)
+
+    monkeypatch.setattr(PermissionService, "get_accessible_contexts", failing_in_a)
+    listed = await _asgi_call(monkeypatch, w["user_id"], "list_contexts", {})
+    assert listed["status"] == "success", listed
+    assert _ids(listed) == _s(w["b_shared"], w["b_dup"], w["c_allowed"])
+    assert {"id": str(w["wa"]), "name": w["wa_name"], "reason": "internal_error"} in listed[
+        "skipped_workspaces"
+    ]
+    assert await _usage_workspaces(db_session, w["user_id"], "mcp:list_contexts") == [w["wa"]]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_timeout_in_one_workspace_is_a_skipped_entry(world, monkeypatch):
+    from services.permission_service import PermissionService
+
+    w = world
+    original = PermissionService.get_accessible_contexts
+
+    async def slow_in_b(self, user_id, workspace_id):
+        if workspace_id == w["wb"]:
+            await asyncio.sleep(5)
+        return await original(self, user_id, workspace_id)
+
+    monkeypatch.setattr(PermissionService, "get_accessible_contexts", slow_in_b)
+    # The per-workspace listing's own timeout, cut short for the test.
+    monkeypatch.setattr("mcp_server.tools._helpers.get_tool_timeout", lambda _name: 0.5)
+    payload = await _list(w)
+    assert payload["status"] == "success", payload
+    assert {"id": str(w["wb"]), "name": w["wb_name"], "reason": "timeout"} in payload[
+        "skipped_workspaces"
+    ]
+    assert _ids(payload) == _s(w["a_shared"], w["a_private"], w["a_dup"], w["c_allowed"])
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_default_context_in_a_suspended_workspace_does_not_bind(
+    world, db_session, monkeypatch, caplog
+):
+    from models.workspace_slots import WorkspaceSlotSuspension
+
+    w = world
+    db_session.add(
+        WorkspaceSlotSuspension(
+            workspace_id=w["wb"],
+            owner_user_id=w["other_id"],
+            cause="billing_snapshot",
+            suspended_at=datetime(2031, 5, 1, 12, 0, 0),
+        )
+    )
+    await db_session.commit()
+    with (
+        patch("services.workspace_slots.workspace_slot_mode", return_value="enforce"),
+        caplog.at_level("INFO", logger="mcp_server.tools._workspace_binding"),
+    ):
+        listed = await _asgi_call(
+            monkeypatch, w["user_id"], "list_contexts", {}, credential_default=w["b_shared"]
+        )
+    assert listed["status"] == "success", listed
+    # Unbound: every usable workspace, B named as skipped.
+    assert _ids(listed) == _s(w["a_shared"], w["a_private"], w["a_dup"], w["c_allowed"])
+    assert any(
+        "reason=workspace_suspended" in r.getMessage()
+        for r in caplog.records
+        if "mcp_workspace_binding_fallback" in r.getMessage()
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_default_context_where_the_user_has_no_seat_does_not_bind(world, db_session):
+    from mcp_server.tools._workspace_binding import default_context_workspace
+
+    w = world
+    # D is a free (one-seat) workspace whose seat is the owner's.
+    await db_session.execute(
+        WorkspaceMember.__table__.update()
+        .where(WorkspaceMember.workspace_id == w["wd"], WorkspaceMember.user_id == w["user_id"])
+        .values(role=WorkspaceRole.VIEWER)
+    )
+    await db_session.commit()
+    assert await default_context_workspace(db_session, w["user_id"], w["d1"]) == (
+        None,
+        "feature_not_available",
+    )

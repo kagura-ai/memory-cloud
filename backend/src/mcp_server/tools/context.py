@@ -1015,14 +1015,14 @@ def _workspaces_hint(other_workspaces: int) -> str:
     )
 
 
-# #2972: create_context creates in the connection's workspace, so a listing of
-# another workspace offers no create step there and no quota figures; an empty
-# one says where its contexts are created. Names no tool (also the google view).
+# #2972: a listing of another workspace carries no quota figures; an empty one
+# says how a context gets there. #3002: create_context(workspace_id=) creates
+# in it directly. The tool is named in its own sentence, so the google view's
+# scrub drops that sentence and keeps the first.
 def _other_workspace_empty_hint(workspace_id: UUID) -> str:
     return (
-        "No contexts of that workspace are visible to you. Contexts there are created "
-        f"from a connection to that workspace (/mcp/w/{workspace_id}), or ask its owner "
-        "or an admin for access."
+        "No contexts of that workspace are visible to you; ask its owner or an admin "
+        f'for access. create_context(workspace_id="{workspace_id}") creates one there.'
     )
 
 
@@ -1277,6 +1277,8 @@ async def _list_contexts_across_workspaces(
     ``skipped_workspaces`` with the error code ``list_contexts(workspace_id=)``
     would answer for it; one such workspace never fails the listing.
     """
+    from sqlalchemy.exc import SQLAlchemyError
+
     from db.base import get_db
     from mcp_server.tools.workspaces import account_workspaces
     from services.context_service import ContextListingFailedError, ContextService
@@ -1297,19 +1299,25 @@ async def _list_contexts_across_workspaces(
             for workspace in workspaces:
                 refusal = workspace.refusal
                 if refusal is None:
+                    # One SAVEPOINT per workspace: a failure in one rolls back
+                    # to it, so the next workspaces and the usage row still
+                    # run on a usable session.
                     try:
-                        contexts = await execute_with_timeout(
-                            context_service.list_contexts(
-                                user_id, workspace_id=workspace.id, raise_on_lookup_error=True
-                            ),
-                            operation_name="list_contexts",
-                        )
+                        async with db.begin_nested():
+                            contexts = await execute_with_timeout(
+                                context_service.list_contexts(
+                                    user_id, workspace_id=workspace.id, raise_on_lookup_error=True
+                                ),
+                                operation_name="list_contexts",
+                            )
                     except WorkspaceSlotSuspendedError:
                         refusal = "workspace_suspended"
                     except FeatureNotAvailableError:
                         refusal = "feature_not_available"
-                    except ContextListingFailedError as e:
-                        logger.warning("list_contexts_lookup_failed: %s", str(e))
+                    except TimeoutError:
+                        refusal = "timeout"
+                    except (ContextListingFailedError, SQLAlchemyError) as e:
+                        logger.warning("list_contexts_lookup_failed: %s", type(e).__name__)
                         refusal = "internal_error"
                     else:
                         listed.extend((ctx, workspace) for ctx in contexts)
