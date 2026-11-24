@@ -19,13 +19,14 @@ from services.memory_service import MemoryService
 from utils.datetime import utcnow
 
 
-async def _context(db_session, workspace: Workspace) -> Context:
+async def _context(db_session, workspace: Workspace, resource_id: str | None = None) -> Context:
     context = Context(
         id=uuid4(),
         workspace_id=workspace.id,
         name=f"shared_{uuid4().hex[:8]}",
         display_name="Shared point",
         created_by="shared_point_user",
+        resource_id=resource_id,
     )
     db_session.add(context)
     await db_session.flush()
@@ -80,7 +81,9 @@ class TestDeleteMemoryPointSharedCheck:
         workspace = Workspace(id=uuid4(), name="Shared", owner_user_id="shared_point_user")
         db_session.add(workspace)
         await db_session.flush()
-        first, second = await _context(db_session, workspace), await _context(db_session, workspace)
+        # The forgotten row's context holds the slug: the point is its own.
+        first = await _context(db_session, workspace, resource_id="res_1")
+        second = await _context(db_session, workspace)
         point_id = uuid4()
         forgotten = _resource_memory(first, point_id)
         db_session.add_all(

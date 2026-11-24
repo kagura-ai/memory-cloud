@@ -81,6 +81,10 @@ async def routed(db_session, qdrant: AsyncQdrantClient) -> AsyncIterator[tuple[C
         display_name="Backfill Context",
         created_by=_USER,
         is_private=False,
+        # The context holds the slug, so its rows own their resource points.
+        # Unique per run: the slug index spans live contexts, and these
+        # tests commit.
+        resource_id=f"{_RESOURCE}-{uuid4().hex[:8]}",
     )
     db_session.add(context)
     await db_session.flush()
@@ -121,8 +125,10 @@ async def _seed_row(
         tags=tags or [],
         importance=0.6,
         embedding_status="success",
-        details={"resource_id": _RESOURCE, "doc_id": doc_id, "version": 1},
-        summary_embedding_id=(resource_point_id(_RESOURCE, doc_id, 1) if own_point else memory_id),
+        details={"resource_id": context.resource_id, "doc_id": doc_id, "version": 1},
+        summary_embedding_id=(
+            resource_point_id(context.resource_id, doc_id, 1) if own_point else memory_id
+        ),
         deleted_at=utcnow() if deleted else None,
     )
     db.add(memory)
@@ -143,7 +149,7 @@ async def _write_old_point(qdrant: AsyncQdrantClient, collection: str, context, 
                     "workspace_id": str(context.workspace_id),
                     "context_id": str(context.id),
                     "user_id": _USER,
-                    "resource_id": _RESOURCE,
+                    "resource_id": context.resource_id,
                     "doc_id": memory.details["doc_id"],
                     "version": 1,
                     "content": "x",
@@ -261,6 +267,7 @@ class TestResourcePointMetadataBackfill:
             display_name="Broken Routing",
             created_by=_USER,
             is_private=False,
+            resource_id=f"{_RESOURCE}-{uuid4().hex[:8]}",
         )
         db_session.add(broken)
         await db_session.flush()

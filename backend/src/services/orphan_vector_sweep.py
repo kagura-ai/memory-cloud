@@ -35,7 +35,10 @@ This sweep removes those points. A point is an orphan when:
   would return the memory with that stale text.
 
 Apart from those two cases, a point whose memory row is live is never an
-orphan, whatever else is true.
+orphan, whatever else is true. Neither is a resource point that any live row
+names by ``summary_embedding_id``, in whichever context: its payload says
+which context wrote it last, and a context that released the slug may be gone
+while the context that holds the slug now still serves the point.
 A resource point whose row cannot be decided (no natural key in the payload,
 no context) is kept. Its payload's ``memory_id`` is still not used as a key:
 before #1829 ``ResourceIndexer._apply_upsert`` wrote a fresh ``uuid4()`` there
@@ -47,6 +50,7 @@ It runs daily from ``tasks/neural_tasks.py`` and on demand from
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -254,6 +258,19 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
                         orphans[point_id] = REASON_RESOURCE_LABEL
 
     if resource_contexts:
+        # A point a live row names is never an orphan, whichever context its
+        # payload carries: the payload says who wrote the point last, and a
+        # context that released its slug may be gone while the context that
+        # holds it now still serves the point.
+        named = await _points_live_rows_name(db, resource_contexts)
+        resource_contexts = {
+            point_id: context_id
+            for point_id, context_id in resource_contexts.items()
+            if _as_uuid(point_id) not in named
+        }
+        refs = [ref for ref in refs if not ref.is_resource or ref.point_id in resource_contexts]
+
+    if resource_contexts:
         context_ids = set(resource_contexts.values())
         rows = await db.execute(
             select(Context.id, Context.deleted_at).where(Context.id.in_(context_ids))
@@ -281,12 +298,31 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
     return orphans
 
 
+async def _points_live_rows_name(db: AsyncSession, point_ids: Iterable[str]) -> set[UUID]:
+    """Those of ``point_ids`` a live row names as its point, in any context.
+
+    By ``summary_embedding_id`` alone, the predicate of the partial index
+    idx_memories_summary_embedding_live (#1869).
+    """
+    wanted = [point for point in (_as_uuid(point_id) for point_id in point_ids) if point]
+    if not wanted:
+        return set()
+    rows = await db.execute(
+        select(Memory.summary_embedding_id).where(
+            Memory.summary_embedding_id.in_(wanted),
+            Memory.deleted_at.is_(None),
+        )
+    )
+    return {point for point in rows.scalars().all() if point is not None}
+
+
 async def _classify_resource_rows(
     db: AsyncSession, refs: list[PointRef], cutoff: datetime
 ) -> dict[str, str]:
     """Judge resource points whose context is live by their memory rows (#1829).
 
-    A row found by ``summary_embedding_id``: live → kept; soft-deleted before
+    ``_classify`` has already kept every point a live row names, in any
+    context. A row found by ``summary_embedding_id``: soft-deleted before
     ``cutoff`` → orphan. No row: the point must be older than ``cutoff`` (the
     indexer writes a point before its row commits), and a live row that names
     the same document under another point id — an older row, or one whose
@@ -301,8 +337,9 @@ async def _classify_resource_rows(
     if not point_ids:
         return {}
 
-    # Scoped by the (indexed) context ids as well: summary_embedding_id alone
-    # has no index.
+    # The tombstones of the payload's context: the partial index on
+    # summary_embedding_id covers live rows only, the context ids keep this
+    # lookup on an index.
     context_ids = {c for c in (_as_uuid(ref.context_id) for ref in point_ids.values()) if c}
     rows = await db.execute(
         select(Memory.summary_embedding_id, Memory.deleted_at).where(
