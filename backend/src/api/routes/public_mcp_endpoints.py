@@ -34,6 +34,7 @@ from models.public_mcp import (
 from models.public_usage_budget import PublicUsageBudgetStatus
 from services.operation_history_writer import record_operation
 from services.public_mcp_domains import owner_actor, release_domains_of_endpoint
+from services.public_mcp_text import KEEP, apply_public_text, blank_to_none
 from services.public_usage_budget import read_public_usage_budget
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
@@ -144,10 +145,6 @@ async def _response(db: AsyncSession, row: PublicMcpEndpoint) -> PublicMcpEndpoi
     )
 
 
-def _blank_to_none(value: str | None) -> str | None:
-    return value if value and value.strip() else None
-
-
 @router.post(
     "/{resource_id}/public-mcp",
     response_model=PublicMcpEndpointResponse,
@@ -178,8 +175,8 @@ async def publish_public_mcp_endpoint(
         resource_pk=resource.id,
         resource_id=resource_id,
         public_name=body.public_name.strip(),
-        public_description=_blank_to_none(body.public_description),
-        public_usage_guide=_blank_to_none(body.public_usage_guide),
+        public_description=blank_to_none(body.public_description),
+        public_usage_guide=blank_to_none(body.public_usage_guide),
         created_by=user_id,
         created_at=utcnow(),
     )
@@ -241,37 +238,15 @@ async def update_public_mcp_endpoint(
     if row is None:
         raise NotFoundException("Public MCP endpoint")
     fields = body.model_fields_set
-    previous = (row.public_name, row.public_description, row.public_usage_guide)
-    if "public_name" in fields:
-        if body.public_name is None or not body.public_name.strip():
-            raise ValidationError("public_name must not be blank", field="public_name")
-        row.public_name = body.public_name.strip()
-    if "public_description" in fields:
-        row.public_description = _blank_to_none(body.public_description)
-    if "public_usage_guide" in fields:
-        row.public_usage_guide = _blank_to_none(body.public_usage_guide)
-    changed_fields = [
-        name
-        for name, old, new in zip(
-            ("name", "description", "usage_guide"),
-            previous,
-            (row.public_name, row.public_description, row.public_usage_guide),
-            strict=True,
-        )
-        if old != new
-    ]
-    if changed_fields:
-        row.updated_at = utcnow()
-        record_operation(
-            db,
-            operation="integration.updated",
-            actor_user_id=user_id,
-            workspace_id=workspace_id,
-            context_id=row.context_id,
-            target_id=row.public_id,
-            subject_user_id=row.created_by,
-            changed_fields=changed_fields,
-        )
+    # #2995: one function for both writers of the public text (limits, blanks, record).
+    apply_public_text(
+        db,
+        row,
+        actor_user_id=user_id,
+        name=body.public_name if "public_name" in fields else KEEP,
+        description=body.public_description if "public_description" in fields else KEEP,
+        usage_guide=body.public_usage_guide if "public_usage_guide" in fields else KEEP,
+    )
     await db.flush()
     logger.info(
         "public_mcp_endpoint_updated",

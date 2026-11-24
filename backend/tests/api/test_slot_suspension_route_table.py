@@ -205,6 +205,8 @@ GATE_FUNCTIONS: dict[str, str | None] = {
         "auth.programmatic_workspace_auth:authorize_workspace_management"
     ),
     "sync_authority": "services.sync_authority:sync_authority",
+    # #2995: the installation-bound owner commands' admission (sync_authority inside).
+    "admitted_command": "services.sync_publication_domain_commands:admitted_command",
     "lock_membership": "services.sync_feed_authority:lock_membership",
     "human_feed_boundary": "services.sync_feed_authority:human_feed_boundary",
     "worker_target": "services.sync_feed_authority:worker_target",
@@ -314,6 +316,10 @@ SLOT_SERVICE_GATED: dict[tuple[str, str], str | tuple[str, ...]] = {
     ),
     ("POST", f"{_WS_SYNC}/publication-domains/remove"): (
         "services.sync_publication_domain_commands:remove_publication_domain"
+    ),
+    # #2995: the public text, admitted as the domain commands are.
+    ("POST", f"{_WS_SYNC}/publication-text"): (
+        "services.public_mcp_text:update_installation_public_text"
     ),
     ("DELETE", _WS_SYNC): "services.sync_installations:unlink_installation",
     ("GET", f"{_WS_SYNC}/management"): "services.sync_management:control_mode",

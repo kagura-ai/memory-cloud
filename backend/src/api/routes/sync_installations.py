@@ -34,8 +34,14 @@ from models.sync_publication_domain_schemas import (
     PublicationDomainCommand,
     PublicationDomainCommandResult,
 )
+from models.sync_publication_text_schemas import PublicationTextResult, PublicationTextUpdate
 from models.sync_setup_handoff_schemas import SyncSetupHandoffCreate, SyncSetupHandoffView
-from services.sync_contract import DOMAIN_OPERATIONS_CAPABILITY, sync_configuration
+from services.public_mcp_text import update_installation_public_text
+from services.sync_contract import (
+    DOMAIN_OPERATIONS_CAPABILITY,
+    TEXT_OPERATIONS_CAPABILITY,
+    sync_configuration,
+)
 from services.sync_installations import (
     activate_installation,
     create_authorization,
@@ -123,6 +129,9 @@ Manager = Annotated[SyncPrincipal, Depends(sync_manager)]
 Reader = Annotated[SyncPrincipal, Depends(sync_reader)]
 Database = Annotated[AsyncSession, Depends(get_db)]
 SETUP_BODY_TIMEOUT_SECONDS = 5.0
+# #2995: 6,000 characters at the ``\uXXXX\uXXXX`` worst case of JSON escaping fit;
+# a body within the character limits is never 413.
+PUBLICATION_TEXT_MAX_BYTES = 98_304
 
 
 @router.post(
@@ -280,3 +289,47 @@ async def remove_publication_domain_route(
     exact_query(request)
     body, _size = await bounded_body(request, PublicationDomainCommand)
     return await remove_publication_domain(db, workspace_id, installation_id, principal, body)
+
+
+async def publication_text_operations_enabled() -> None:
+    """#2995: the public-text command answers 404 before authentication while not advertised."""
+    if TEXT_OPERATIONS_CAPABILITY not in sync_configuration(get_settings()).capabilities:
+        raise NotFoundException("Publication text operations")
+
+
+@router.post(
+    "/sync-installations/{installation_id}/publication-text",
+    response_model=PublicationTextResult,
+    dependencies=[Depends(publication_text_operations_enabled)],
+    openapi_extra=json_body(PublicationTextUpdate),
+)
+async def set_publication_text_route(
+    workspace_id: UUID,
+    installation_id: UUID,
+    request: Request,
+    token: Annotated[str, Depends(identity_access_token)],
+    db: Database,
+) -> PublicationTextResult:
+    """Set the public description and usage guide of the installation's endpoint (experimental).
+
+    A managing application acting for the workspace's canonical owner, with
+    ``integrations:manage`` for the installation's browser client. The body
+    carries the binding last read in the installation's observation and the
+    fields to set (omitted keeps, ``""`` or ``null`` clears); the public name
+    is not accepted. The owner API's limits apply and the change is recorded
+    as ``integration.updated`` with the acting client. An unlinked
+    installation, another installation or workspace, or an endpoint that is
+    no longer the binding's is the uniform 404.
+    """
+    exact_query(request)
+    try:
+        body, _size = await asyncio.wait_for(
+            bounded_body(request, PublicationTextUpdate, PUBLICATION_TEXT_MAX_BYTES),
+            timeout=SETUP_BODY_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        raise SyncProtocolError("invalid_request") from None
+    # The bounded body is read before the first SQL, so a slow client holds no
+    # connection; the scoped identity is checked again inside the admission.
+    principal = await load_sync_identity(db, credential_hash(token), "integrations:manage")
+    return await update_installation_public_text(db, workspace_id, installation_id, principal, body)

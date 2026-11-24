@@ -62,6 +62,8 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "internal_sync_installations": NOT_APPLICABLE,  # #2802: provisioning applies its creation gates
     # #2802: control metadata; provisioning checks capacity.
     # #2921: domain commands touch no memory content.
+    # #2995: the public text, like the owner's PATCH (ALLOWED): no memory content;
+    # the public endpoint itself refuses a locked workspace.
     "sync_installations": NOT_APPLICABLE,
     "sync_worker": NOT_APPLICABLE,  # #2806: operational identity only; no memory content
     "invitations": NOT_APPLICABLE,

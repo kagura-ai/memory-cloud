@@ -91,6 +91,15 @@ def rate_limit_operation(path: str) -> str | None:
     if path.startswith("/api/v1/sync/installations/"):
         return "sync-service"
     segments = path.split("/")
+    if (
+        path.startswith("/api/v1/workspaces/")
+        and len(segments) == 8
+        and segments[5] == "sync-installations"
+        and segments[7] == "publication-text"
+    ):
+        # #2995: a managing application's writes of the public text, apart
+        # from the owner's other sync controls.
+        return "publication-text"
     if path.startswith("/api/v1/workspaces/") and (
         "/sync-installations/" in path
         or (len(segments) > 5 and segments[5] in _SYNC_HUMAN_SEGMENTS)

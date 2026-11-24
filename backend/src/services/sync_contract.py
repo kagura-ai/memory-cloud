@@ -9,6 +9,8 @@ from models.sync_feed_schemas import SCHEMA_HASH
 HUMAN_SCOPES = ("openid", "workspaces:read", "integrations:manage", "sync.records:read")
 # #2921: the owner's claim, verify and remove for an installation (experimental, optional).
 DOMAIN_OPERATIONS_CAPABILITY = "public.domains.operations.v1"
+# #2995: the public text of an installation's endpoint (experimental, optional).
+TEXT_OPERATIONS_CAPABILITY = "public.text.operations.v1"
 REQUIRED_SYNC_CAPABILITIES = frozenset(
     {
         "identity.oidc.v1",
@@ -56,6 +58,7 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
         and budget
         and settings.mcp_public_domains_enabled
         and settings.sync_publication_domain_operations_enabled,
+        TEXT_OPERATIONS_CAPABILITY: controls and settings.sync_publication_text_operations_enabled,
     }
     return SyncConfigurationV1(
         protocol="kmc.sync.v1",

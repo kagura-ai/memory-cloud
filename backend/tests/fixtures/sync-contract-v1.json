@@ -3,7 +3,7 @@
     "protocol": "kmc.sync.v1",
     "schema_version": 1,
     "schema_hash": "bdb55d3bdbbbb72a92a33fb96e6a2dc60ccbaf5b09638dcc1f1619d016dfec0d",
-    "capabilities": ["identity.oidc.v1", "workspace.access.v1", "sync.installations.v1", "sync.credentials.v1", "sync.feeds.v1", "sync.managed.v1", "sync.activity.v1", "public.mcp.v1", "public.budget.v1", "public.domains.v1", "public.domains.observation.v1", "public.domains.operations.v1"],
+    "capabilities": ["identity.oidc.v1", "workspace.access.v1", "sync.installations.v1", "sync.credentials.v1", "sync.feeds.v1", "sync.managed.v1", "sync.activity.v1", "public.mcp.v1", "public.budget.v1", "public.domains.v1", "public.domains.observation.v1", "public.domains.operations.v1", "public.text.operations.v1"],
     "human_scopes": ["openid", "workspaces:read", "integrations:manage", "sync.records:read"],
     "service_scope": "resource.sync",
     "assertion_audience": "issuer"
