@@ -2200,6 +2200,57 @@ async def retrieve_dense_vectors(
     return out
 
 
+async def retrieve_vectors_and_contexts(
+    collection_name: str, point_ids: Sequence[str]
+) -> dict[str, tuple[list[float] | None, str | None]]:
+    """Each point's dense vector and the ``context_id`` its payload carries, in one retrieve.
+
+    For a caller that copies a point's vector and must know whose document
+    it holds (``services.resource_indexer.detach_resource_rows``). Both
+    backends: the LanceDB store answers from its vector and payload columns.
+
+    Returns:
+        ``{str(point_id): (vector, context_id)}``; a point that does not
+        exist is absent, a missing vector or key is ``None``.
+
+    Raises:
+        QdrantError: the retrieve failed.
+    """
+    if not point_ids:
+        return {}
+    store = _active_store()
+    if store is not None:
+        vectors = await store.retrieve_dense_vectors(collection_name, point_ids)
+        payloads = await store.retrieve_payloads(collection_name, point_ids)
+        return {
+            point_id: (
+                vectors.get(point_id),
+                str(payload["context_id"]) if payload.get("context_id") else None,
+            )
+            for point_id, payload in payloads.items()
+        }
+    client = get_qdrant_client()
+    try:
+        points = await client.retrieve(
+            collection_name=collection_name,
+            ids=list(point_ids),
+            with_payload=["context_id"],
+            with_vectors=[KAGURA_MEMORIES_VECTOR_NAME],
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to read points: {e}") from e
+    out: dict[str, tuple[list[float] | None, str | None]] = {}
+    for point in points:
+        vectors_ = point.vector
+        dense = vectors_.get(KAGURA_MEMORIES_VECTOR_NAME) if isinstance(vectors_, dict) else None
+        context_id = (point.payload or {}).get("context_id")
+        out[str(point.id)] = (
+            [float(x) for x in dense] if isinstance(dense, list) and dense else None,
+            str(context_id) if context_id else None,
+        )
+    return out
+
+
 async def delete_context_points(
     workspace_id: str, context_id: str, collection_name: str = KAGURA_MEMORIES_COLLECTION
 ) -> int:

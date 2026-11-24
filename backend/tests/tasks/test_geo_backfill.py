@@ -540,12 +540,14 @@ class TestBackfillBatchedSharingLookup:
 
         owner = f"owner-{uuid4().hex[:8]}"
         ws = Workspace(id=uuid4(), name=f"ws-{uuid4().hex[:8]}", owner_user_id=owner)
+        # The context holds the slug its rows' points belong to.
         ctx = Context(
             id=uuid4(),
             workspace_id=ws.id,
             name=f"ctx-{uuid4().hex[:8]}",
             created_by=owner,
             is_private=False,
+            resource_id="reports",
         )
         db_session.add(ws)
         await db_session.flush()

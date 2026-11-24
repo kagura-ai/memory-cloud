@@ -421,11 +421,34 @@ async def metadata_patch_target(
         updates / delete_keys: The metadata patch (``metadata_payload_patch``
             plus ``updated_at``).
 
+    A resource point named by a row whose context no longer holds the slug
+    is the holder's, never this row's: the row is detached first
+    (``detach_resource_rows``), and the patch goes to the row's own point,
+    or nowhere when the row was queued for the embedding pipeline (which
+    writes the whole point).
+
     Returns:
         The target, or ``None`` when the point is shared or nothing is left
         to write to it.
     """
-    from services.resource_indexer import unshared_point_id
+    from services.resource_indexer import (
+        detach_resource_rows,
+        released_resource_rows,
+        unshared_point_id,
+    )
+
+    if point_id != memory_id and memory_id in await released_resource_rows(db, [memory_id]):
+        await detach_resource_rows(db, point_id, holder_context_id=None, memory_ids=[memory_id])
+        own = await db.scalar(
+            select(Memory.id).where(
+                Memory.id == memory_id,
+                Memory.summary_embedding_id == memory_id,
+                Memory.embedding_status == "success",
+            )
+        )
+        if own is None:
+            return None
+        return MetadataPatchTarget(memory_id, updates, list(delete_keys), own_point=True)
 
     target = await unshared_point_id(db, memory_id, point_id)
     if target is None:
@@ -11637,6 +11660,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 canonical_rebuild=True,
                 keyword_lengths=keyword_lengths,
             )
+            # A resource row whose context released the slug was written
+            # under its own id instead (``ResourceIndexer.rebuild_point``).
+            point_id = memory.point_id if owns_resource_point(memory) else memory.id
             vector: list[float] | None = None
             if written is not None:
                 vector, payload = written
