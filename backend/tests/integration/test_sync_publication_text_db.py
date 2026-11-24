@@ -20,7 +20,7 @@ from httpx import Response
 from sqlalchemy import delete, select, text, update
 
 from config.settings import get_settings
-from models.auth import WorkspaceMember
+from models.auth import AuditLog, WorkspaceMember
 from models.operation_history import OperationHistory
 from models.public_mcp import (
     PUBLIC_DESCRIPTION_MAX_CHARS,
@@ -28,6 +28,7 @@ from models.public_mcp import (
     PublicMcpEndpoint,
 )
 from models.workspace_slots import WorkspaceSlotSuspension
+from services.public_mcp_text import TEXT_AUDIT_ACTION
 from tests.integration import sync_installation_fixtures as fixtures
 from tests.integration.test_sync_publication_domain_commands_db import (
     NOT_FOUND,
@@ -53,6 +54,12 @@ async def env(store, monkeypatch):
             await db.execute(
                 delete(OperationHistory).where(
                     OperationHistory.workspace_id.in_([store.wid, store.other])
+                )
+            )
+            await db.execute(
+                delete(AuditLog).where(
+                    AuditLog.action == TEXT_AUDIT_ACTION,
+                    AuditLog.user_id.in_(list(store.users.values())),
                 )
             )
             await db.commit()
@@ -97,6 +104,22 @@ async def history(store) -> list[OperationHistory]:
                         OperationHistory.operation == "integration.updated",
                     )
                     .order_by(OperationHistory.occurred_at)
+                )
+            ).all()
+        )
+
+
+async def audits(store) -> list[AuditLog]:
+    async with store.factory() as db:
+        return list(
+            (
+                await db.scalars(
+                    select(AuditLog)
+                    .where(
+                        AuditLog.action == TEXT_AUDIT_ACTION,
+                        AuditLog.user_id.in_(list(store.users.values())),
+                    )
+                    .order_by(AuditLog.id)
                 )
             ).all()
         )
@@ -149,6 +172,19 @@ async def test_the_owner_sets_the_text_through_scoped_oidc(env):
     assert event.context_id == UUID(target["context_id"])
     assert event.changed_fields == ["description", "usage_guide"]
     assert "Example Shop" not in str(event.__dict__)
+    # The audit row of the command, with the domain commands' fields.
+    (audit,) = await audits(store)
+    assert audit.user_id == store.users["owner"]
+    assert audit.user_email == store.users["owner"] + "@example.test"
+    assert audit.resource == f"public_mcp_endpoint:{target['endpoint_id']}"
+    assert audit.user_metadata == {
+        "client_id": store.client_id,
+        "installation_id": target["installation_id"],
+        "workspace_id": str(store.wid),
+        "endpoint_id": target["endpoint_id"],
+        "changed_fields": ["description", "usage_guide"],
+    }
+    assert "Example Shop" not in str(audit.user_metadata)
 
 
 async def test_omitted_keeps_blank_and_null_clear_and_no_change_records_nothing(env):
@@ -163,6 +199,7 @@ async def test_omitted_keeps_blank_and_null_clear_and_no_change_records_nothing(
     assert again.status_code == 200
     assert again.json()["changed_fields"] == []
     assert len(await history(store)) == 1
+    assert len(await audits(store)) == 1
 
     cleared = await set_text(
         store, target, body(target, public_description="   ", public_usage_guide=None)
@@ -222,6 +259,7 @@ async def test_members_admins_viewers_outsiders_and_a_second_owner_get_one_404(e
         assert (response.status_code, response.content) == (404, NOT_FOUND), role
     assert _text(await endpoint(store, target)) == before
     assert await history(store) == []
+    assert await audits(store) == []
 
 
 async def test_another_workspace_or_installation_is_404(env):
@@ -396,3 +434,15 @@ async def test_the_owner_patch_and_the_command_write_the_same_record_shape(env):
     assert owner_event.actor_user_id == app_event.actor_user_id == store.users["owner"]
     assert owner_event.target_id == app_event.target_id == target["public_id"]
     assert app_event.client_id == store.client_id
+
+
+async def test_a_nul_is_400_and_nothing_is_written(env):
+    store = env
+    target = await installed(store)
+    before = _text(await endpoint(store, target))
+    for field in ("public_description", "public_usage_guide"):
+        response = await set_text(store, target, body(target, **{field: "a\x00b"}))
+        assert (response.status_code, response.json()) == (400, {"error": "invalid_request"})
+    assert _text(await endpoint(store, target)) == before
+    assert await history(store) == []
+    assert await audits(store) == []

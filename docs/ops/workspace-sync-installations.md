@@ -333,7 +333,8 @@ Content-Type: application/json
   `insufficient_scope`; a slot-suspended owner `403` `SLOT-001`. The endpoint
   edited is the one the installation's binding names, never one a request
   names.
-- **Body**: `expected` is the binding last read (all seven fields, as in
+- **Body** (a text containing a NUL character is `400` `invalid_request`, and
+  the owner API answers `422` `VAL-001` for one): `expected` is the binding last read (all seven fields, as in
   "Installation-bound owner operations" of [Public MCP custom
   domains](../public-mcp-domains.md)); a binding that is not the current one is
   `409` `public_mcp_domain_command_stale` (the same code as the domain
@@ -347,7 +348,10 @@ Content-Type: application/json
   `integration.updated` operation record (actor: the owner; `principal_kind`
   `oauth` and the acting OIDC client's `client_id`, stored as `sha256:` plus a
   digest prefix when longer than 48 characters; the changed field names, never
-  the text), the same record the owner API writes. Sending the text it already
+  the text), the same record the owner API writes, and one `audit_logs` row
+  `public_mcp_endpoint.text_updated` with the fields of the domain commands'
+  audit rows (the owner as actor, the full `client_id`, the `installation_id`)
+  and the changed field names. Sending the text it already
   has changes and records nothing (`changed_fields: []`). The owner's edits and
   the application's are last-writer-wins.
 - **Limits**: the route counts in its own OIDC burst bucket,

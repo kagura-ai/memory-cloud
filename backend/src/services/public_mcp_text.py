@@ -23,7 +23,11 @@ creates, republishes or rebinds a publication.
 
 The ``integration.updated`` record names the owner as actor; on the
 application's command it also carries the acting OIDC client
-(``principal_kind="oauth"``, ``client_id``). The text itself is never logged.
+(``principal_kind="oauth"``, ``client_id``), and the same transaction adds one
+``audit_logs`` row, ``public_mcp_endpoint.text_updated``, with the fields the
+custom-domain commands' audit rows carry (the owner as actor, the full
+``client_id``, the ``installation_id``) and the changed field names. The text
+itself is never logged or audited.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.history_principal import set_history_principal
 from auth.sync_identity import SyncPrincipal
+from models.auth import AuditLog
 from models.public_mcp import (
     PUBLIC_DESCRIPTION_MAX_CHARS,
     PUBLIC_NAME_MAX_CHARS,
@@ -50,6 +55,7 @@ from models.sync_publication_text_schemas import (
     PublicTextField,
 )
 from services.operation_history_writer import record_operation
+from services.public_mcp_domains import owner_actor
 from services.sync_publication_domain_commands import DomainCommand, admitted_command
 from utils.datetime import utcnow
 from utils.db_helpers import is_lock_not_available
@@ -62,6 +68,7 @@ logger = get_logger(__name__)
 # operation_history.client_id holds 48 characters; a registered OIDC client id
 # may have up to 128 (cli/oidc_client.py).
 _HISTORY_CLIENT_ID_MAX: Final = 48
+TEXT_AUDIT_ACTION: Final = "public_mcp_endpoint.text_updated"
 
 
 def history_client_id(client_id: str) -> str:
@@ -69,8 +76,8 @@ def history_client_id(client_id: str) -> str:
 
     A longer id is stored as ``sha256:`` and the first hex digits of its
     digest, 48 characters in all: stable per client and never cut into
-    another client's id. The full id stays in the synchronization audit row
-    of the same request.
+    another client's id. The full id is in the request's
+    ``public_mcp_endpoint.text_updated`` audit row.
     """
     if len(client_id) <= _HISTORY_CLIENT_ID_MAX:
         return client_id
@@ -194,6 +201,24 @@ async def update_installation_public_text(
             description=body.public_description if "public_description" in fields else KEEP,
             usage_guide=body.public_usage_guide if "public_usage_guide" in fields else KEEP,
         )
+        if changed:
+            # As the domain commands' rows (InstallationDomainGuard.audit_fields).
+            actor = await owner_actor(db, principal.user_id)
+            db.add(
+                AuditLog(
+                    user_id=actor.user_id,
+                    user_email=actor.email,
+                    action=TEXT_AUDIT_ACTION,
+                    resource=f"public_mcp_endpoint:{row.id}",
+                    user_metadata={
+                        "client_id": principal.client_id,
+                        "installation_id": str(installation_id),
+                        "workspace_id": str(workspace_id),
+                        "endpoint_id": str(row.id),
+                        "changed_fields": changed,
+                    },
+                )
+            )
         await db.flush()
         result = PublicationTextResult(
             endpoint_id=row.id,
@@ -216,6 +241,7 @@ async def update_installation_public_text(
 
 __all__ = [
     "KEEP",
+    "TEXT_AUDIT_ACTION",
     "PublicTextField",
     "apply_public_text",
     "blank_to_none",
