@@ -28,7 +28,7 @@ Keyword recall scores like Okapi BM25 and treats Japanese spelling variants as o
 ### Upgrade
 1. `alembic upgrade head`.
 2. Deploy the new code (backend and frontend).
-3. `python -m src.cli.rebuild_keyword_vectors --all --apply --yes` (LanceDB installs too). Keyword ranking is mixed until it finishes, about 10 seconds per 10,000 memories on a local measurement; API processes use the new averages within 5 minutes.
+3. `python -m src.cli.rebuild_keyword_vectors --all --apply --yes` (LanceDB installs too). Keyword ranking is mixed until it finishes, about a minute per 10,000 memories (it scales with the collection size and the load); API processes use the new averages within 5 minutes.
 
 ## [v0.178.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.178.0) — 2026-11-23
 

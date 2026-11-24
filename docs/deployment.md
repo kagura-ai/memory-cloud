@@ -4655,13 +4655,13 @@ second run counts every row `unchanged`.
    minutes, so the weighting of new writes, and with it the ranking, settles
    within 5 minutes after the run.
 
-   Time: about 10 seconds per 10,000 memories, measured with a local Postgres
-   and Qdrant (loopback, one WSL2 machine) on one context of 10,000 generated
-   mixed Japanese / English memories (summaries of 4-12 words, content of 20-400
-   words); a second run over the same rows took about 7 seconds. Expect it to
-   take several times longer where the database and the vector store are
-   reached over a network, and longer for long resource documents (their text
-   is tokenized in both passes).
+   Time: plan for about a minute per 10,000 memories. It scales with the size
+   of the collections and with the load on the database and the vector store
+   while it runs, and it takes longer for long resource documents (their text
+   is tokenized in both passes). An earlier figure of about 10 seconds per
+   10,000 memories was measured against an otherwise empty local Postgres and
+   Qdrant (loopback, one machine) and is not what a deployment with larger
+   collections and live traffic sees.
 
 Run the rebuild again for a context whose size changed a lot (an import, a big
 cleanup): new writes follow its averages, earlier points keep the averages of
