@@ -3,9 +3,10 @@
 The source owns a resource-indexed row's lifecycle, whatever the context's
 settings: Sleep's archive, its dedup merge and its importance re-evaluation
 leave such a row alone, at the candidate fetch and again at the write.
-``resource_owned_predicate`` is the SQL counterpart of ``owns_resource_point``;
-the first class pins that the two agree on every row shape the writers
-produce. Rows are real (``db_session``); the vector store is not touched.
+``resource_owned_predicate`` is the one rule; the first class pins what it
+decides on each row shape, and where ``owns_resource_point`` (the uuid5 check
+the indexer's point addressing needs) answers differently. Rows are real
+(``db_session``); the vector store is not touched.
 """
 
 from __future__ import annotations
@@ -65,8 +66,8 @@ def _indexer_row(user_id: str, doc_id: str = "doc-1", **overrides) -> Memory:
     return _row(user_id, **fields)
 
 
-class TestPredicateAgreesWithOwnsResourcePoint:
-    async def test_every_row_shape_answers_the_same(self, db_session: AsyncSession):
+class TestResourceOwnedPredicate:
+    async def test_what_each_rule_decides_per_row_shape(self, db_session: AsyncSession):
         user = _user()
         own_id, copy_id, bare_id = uuid4(), uuid4(), uuid4()
         rows = {
@@ -100,6 +101,14 @@ class TestPredicateAgreesWithOwnsResourcePoint:
             "full key, no point yet": _row(user, details=_key("doc-e")),
             "plain row": _row(user, id=bare_id, summary_embedding_id=bare_id),
             "plain row, no point": _row(user),
+            # An indexer row whose details key was edited since: it still names
+            # the point of the version it was indexed as.
+            "edited key": _row(
+                user,
+                details=_key("doc-k", 3),
+                summary_embedding_id=resource_point_id("reports", "doc-k", 2),
+                source="resource_ingest",
+            ),
         }
         db_session.add_all(rows.values())
         await db_session.flush()
@@ -129,13 +138,12 @@ class TestPredicateAgreesWithOwnsResourcePoint:
             .all()
         )
 
-        python = {name: owns_resource_point(row) for name, row in rows.items()}
-        assert {name: sql[row.id] for name, row in rows.items()} == python
+        owned = {name: sql[row.id] for name, row in rows.items()}
         # The exclusion side is the exact complement: never NULL.
         assert {name: negated[row.id] for name, row in rows.items()} == {
-            name: not owned for name, owned in python.items()
+            name: not value for name, value in owned.items()
         }
-        assert python == {
+        expected = {
             "indexer row": True,
             "indexer row, working": True,
             "remember(external_id) row": False,
@@ -146,7 +154,12 @@ class TestPredicateAgreesWithOwnsResourcePoint:
             "full key, no point yet": False,
             "plain row": False,
             "plain row, no point": False,
+            "edited key": True,
         }
+        assert owned == expected
+        # The uuid5 check differs only where the key no longer derives the point.
+        python = {name: owns_resource_point(row) for name, row in rows.items()}
+        assert python == {**expected, "edited key": False}
 
 
 class TestConsolidationLeavesResourceRowsAlone:
@@ -224,6 +237,62 @@ class TestDedupLeavesResourceRowsAlone:
             await db_session.refresh(row)
             assert row.deleted_at is None
         assert phase.pending_point_deletes == []
+
+
+class TestDedupCountsResourceRows:
+    async def test_the_neighbour_widening_counts_resource_owned_rows(
+        self, db_session: AsyncSession
+    ):
+        """They are out of the candidate set, but their points answer the vector
+        search and take neighbour slots (#1523's widening)."""
+        user = _user()
+        db_session.add_all(
+            [
+                _row(user),
+                _indexer_row(user, scope="persistent"),
+                _indexer_row(user, doc_id="doc-2", delivery_mode="always"),
+                _indexer_row(user, doc_id="doc-3", deleted_at=utcnow()),
+            ]
+        )
+        await db_session.flush()
+
+        phase = TestDedupLeavesResourceRowsAlone._phase(db_session)
+        # The pinned resource row counts once; the tombstone not at all.
+        assert await phase._count_pinned(user, None, None) == 2
+
+    async def test_a_refused_resource_pair_has_its_own_counter(self, db_session: AsyncSession):
+        """The row became resource-owned after the fetch: the locked recheck
+        refuses the pair, counted in ``skipped_resource_owned``, not in
+        ``skipped_pinned``."""
+        from neural.config import NeuralMemoryConfig
+        from services.sleep.reporter import SleepBudget
+
+        user = _user()
+        plain, resource = _row(user, summary="near duplicate"), _indexer_row(user)
+        db_session.add_all([plain, resource])
+        await db_session.flush()
+
+        phase = TestDedupLeavesResourceRowsAlone._phase(db_session)
+        phase._fetch_active_memories = AsyncMock(return_value=[plain, resource])
+        phase._count_pinned = AsyncMock(return_value=0)
+        phase._find_similar_pairs = AsyncMock(return_value=[(plain.id, resource.id, 0.99)])
+
+        result = await phase.execute(
+            NeuralMemoryConfig(sleep_llm_provider=""),
+            user,
+            None,
+            None,
+            SleepBudget(),
+            reporter=AsyncMock(),
+            report_id=uuid4(),
+        )
+
+        assert result.details["merged"] == 0
+        assert result.details["skipped_resource_owned"] == 1
+        assert result.details["skipped_pinned"] == 0
+        for row in (plain, resource):
+            await db_session.refresh(row)
+            assert row.deleted_at is None
 
 
 class TestImportanceLeavesResourceRowsAlone:

@@ -1024,20 +1024,22 @@ def not_tool_triggered_predicate() -> ColumnElement[bool]:
 
 
 def resource_owned_predicate() -> ColumnElement[bool]:
-    """The SQL definition of "a row the resource indexer owns" (#2996).
+    """The one definition of "a row the resource indexer owns" (#2996).
 
-    The counterpart of ``services.resource_indexer.owns_resource_point``: the
-    row carries the full natural key (``resource_id``, ``doc_id``, a numeric
-    ``version``) and names a point other than its own id. That function also
-    checks that the point is the uuid5 of the key, which plain SQL cannot
-    compute; no writer stores any other foreign point id (the API, a context
-    merge and the admin recovery store the row's own id, the indexer the
-    uuid5), so the two agree on every row they write
-    (tests/services/sleep/test_resource_row_exemption.py pins it).
+    The row carries the full natural key (``resource_id``, ``doc_id``, a
+    numeric ``version``) and names a point other than its own id. Every
+    automated pass that removes, merges or rescores memories (the Sleep
+    archive, dedup merge and importance re-evaluation, the legacy
+    consolidation task, the working-memory cleanup) decides by it, with
+    ``not_resource_owned_predicate()`` or the flag selected with the row:
+    the source owns such a row's lifecycle, whatever the context's settings.
 
-    The source owns such a row's lifecycle: every automated pass that removes,
-    merges or rescores memories excludes it with
-    ``not_resource_owned_predicate()``, whatever the context's settings.
+    ``services.resource_indexer.owns_resource_point`` answers a narrower
+    question, for the code that addresses the indexer's point: whether the
+    point the row names is the uuid5 of the key it carries now. The two differ
+    on a row whose ``details`` key was edited after the indexer wrote it (it
+    still names the old version's point): it is resource-owned here, and
+    ``owns_resource_point`` is false. Plain SQL cannot compute the uuid5.
     """
     return and_(
         Memory.resource_id.is_not(None),

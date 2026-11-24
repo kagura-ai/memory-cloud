@@ -54,6 +54,11 @@ def _make_memory(
     return mem
 
 
+def _rows(*memories, resource_owned: bool = False) -> list:
+    """What ``list_working_with_resource_owned`` returns for ``memories`` (#2996)."""
+    return [(memory, resource_owned) for memory in memories]
+
+
 class TestWeightDecayTask:
     @pytest.mark.asyncio
     async def test_skips_when_neural_memory_disabled(self, monkeypatch):
@@ -239,7 +244,7 @@ class TestConsolidationTask:
         mock_graph_repo = MagicMock()
         mock_graph_repo.list = AsyncMock(return_value=[_make_graph()])
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=[])
 
         with (
             patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
@@ -265,7 +270,9 @@ class TestConsolidationTask:
         # access_count=5 satisfies Pattern 2 (Very frequently used).
         frequent_memory = _make_memory(access_count=5, importance=0.1, age_days=1)
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[frequent_memory])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(
+            return_value=_rows(frequent_memory)
+        )
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
@@ -292,7 +299,9 @@ class TestConsolidationTask:
 
         old_memory = _make_memory(access_count=0, importance=0.0, age_days=45)
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[old_memory])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(
+            return_value=_rows(old_memory)
+        )
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
         # #2565: forget's steps — queued before the page's commit, deleted after it.
@@ -339,7 +348,7 @@ class TestConsolidationTask:
         pinned = _make_memory(access_count=0, importance=0.0, age_days=45)
         pinned.is_pinned = True
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[pinned])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=_rows(pinned))
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
@@ -371,7 +380,7 @@ class TestConsolidationTask:
         guardrail = _make_memory(access_count=0, importance=0.0, age_days=45)
         guardrail.is_tool_triggered = True
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[guardrail])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=_rows(guardrail))
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
@@ -404,7 +413,7 @@ class TestConsolidationTask:
         memo = _make_memory(access_count=0, importance=0.0, age_days=45)
         memo.tags = ["tech-debt", "status:open"]
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[memo])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=_rows(memo))
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
         # #2565: forget's steps — queued before the page's commit, deleted after it.
@@ -464,7 +473,9 @@ class TestConsolidationTask:
 
         idle_memory = _make_memory(access_count=0, importance=0.0, age_days=1)
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[idle_memory])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(
+            return_value=_rows(idle_memory)
+        )
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
@@ -477,6 +488,38 @@ class TestConsolidationTask:
 
         mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
         mock_memory_repo.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_leaves_a_resource_owned_memory_to_its_source(self):
+        """#2996: the flag the fetch read with the row (``resource_owned_predicate``)
+        decides: an old unused row is not deleted, a frequently used one is not
+        promoted, and both are counted."""
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
+
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(return_value=[_make_graph()])
+
+        old = _make_memory(access_count=0, importance=0.0, age_days=45)
+        used = _make_memory(access_count=9, importance=0.9, age_days=45)
+        mock_memory_repo = MagicMock()
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(
+            return_value=_rows(old, used, resource_owned=True)
+        )
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
+        mock_memory_repo.delete = AsyncMock()
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
+        ):
+            result = await consolidation_task()
+
+        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
+        mock_memory_repo.delete.assert_not_called()
+        assert result is not None and result["resource_skipped"] == 2
 
 
 class TestGraphPaging:
@@ -589,7 +632,7 @@ class TestGraphPaging:
             ]
         )
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list = AsyncMock(return_value=[])
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=[])
 
         with (
             patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
@@ -610,7 +653,10 @@ class TestGraphPaging:
             ("lock", "user-a"),
             ("commit",),
         ]
-        assert [c.kwargs["filters"]["user_id"] for c in mock_memory_repo.list.await_args_list] == [
+        assert [
+            c.kwargs["user_id"]
+            for c in mock_memory_repo.list_working_with_resource_owned.await_args_list
+        ] == [
             "user-c",
             "user-d",
             "user-a",

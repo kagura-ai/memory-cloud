@@ -176,3 +176,30 @@ async def test_the_legacy_pass_keeps_the_resource_row(
     assert result["deleted"] == 1
     # Counted only when the pass reached it (a working row).
     assert result["resource_skipped"] == (1 if scope == "working" else 0)
+
+
+async def test_the_legacy_pass_keeps_a_row_whose_key_was_edited(
+    world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
+) -> None:
+    """The legacy pass decides by ``resource_owned_predicate`` like Sleep does:
+    an indexer row whose ``details.version`` was edited still names its old
+    point (``owns_resource_point`` is false for it) and is still kept."""
+    from tasks.neural_tasks import consolidation_task
+
+    edited = _aged(
+        world,
+        summary="[catalog] item-2 v1",
+        type="resource_data",
+        source="resource_ingest",
+        details={"resource_id": "catalog", "doc_id": "item-2", "version": 2},
+        summary_embedding_id=resource_point_id("catalog", "item-2", 1),
+    )
+    world.session.add(edited)
+    await world.session.commit()
+
+    with ExitStack() as stack:
+        _legacy_patches(world, stack)
+        result = await consolidation_task()
+
+    assert await _state(world, edited.id) == (True, None)
+    assert result is not None and result["resource_skipped"] == 1

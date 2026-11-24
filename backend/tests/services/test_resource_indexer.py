@@ -386,18 +386,22 @@ class TestResourceIndexerNamedVectorUpsert:
         assert before <= memory.promoted_at <= utcnow()
 
     @pytest.mark.asyncio
-    async def test_apply_upsert_update_path_leaves_scope_as_it_is(self):
-        """#2996: only the create branch sets the scope; a re-index of a row
-        keeps its scope and promotion stamp (the f62 migration moved the old
-        working rows)."""
+    @pytest.mark.parametrize("scope", ["working", "persistent"])
+    async def test_apply_upsert_update_path_makes_a_working_row_persistent(self, scope):
+        """#2996: the update branch points the row at the indexer's point, so
+        its source owns it: a working row (a ``remember(external_id)`` row the
+        indexer takes over, or one written before f62) becomes persistent with
+        a fresh stamp; a persistent row keeps its stamp."""
         existing_memory = _indexed_row()
-        existing_memory.scope = "working"
-        existing_memory.promoted_at = None
+        existing_memory.scope = scope
+        stamp = datetime(2026, 1, 2)
+        existing_memory.promoted_at = None if scope == "working" else stamp
         db = self._db_with_existing(existing_memory)
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
             indexer = ResourceIndexer(db)
         indexer.embedding_service = MagicMock()
         indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        before = utcnow()
 
         await indexer._apply_upsert(
             _make_event(),
@@ -407,8 +411,11 @@ class TestResourceIndexerNamedVectorUpsert:
             indexer.embedding_service,
         )
 
-        assert existing_memory.scope == "working"
-        assert existing_memory.promoted_at is None
+        assert existing_memory.scope == "persistent"
+        if scope == "working":
+            assert before <= existing_memory.promoted_at <= utcnow()
+        else:
+            assert existing_memory.promoted_at == stamp
 
     @pytest.mark.asyncio
     async def test_apply_upsert_update_path_projects_lineage(self):

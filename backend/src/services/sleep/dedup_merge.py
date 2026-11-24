@@ -252,6 +252,10 @@ class _MergeTally:
     # deleted or gone between the candidate fetch and merge execution — the
     # execution-time recheck refused them (neither mode mutated anything).
     skipped_pinned: int = 0
+    # #2996: pairs the same recheck refused because a side is a row the
+    # resource indexer owns (counted here, not in ``skipped_pinned``, when any
+    # reason of the refusal is that one).
+    skipped_resource_owned: int = 0
     # #2584: eligible merges not planned because the loser carries an exempt
     # tag (an open review memo). Kept apart from the vetoes above: the judge
     # was right that the pair is a duplicate.
@@ -280,6 +284,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #1183: judge-failure counter (init here so ``_llm_judge`` can be
         # unit-tested without execute()).
         self._llm_failures: int = 0
+        # #2996: recheck refusals with a resource-owned side (init here so
+        # the executors can be unit-tested without execute()).
+        self._resource_owned_refusals: int = 0
         # #1195/#1198: newer-wins override counter (init here so
         # ``_judge_cluster`` can be unit-tested without execute()).
         self._winner_overrides: int = 0
@@ -486,6 +493,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         """
         for winner_id, loser_id, winner, loser, audit in merge_jobs:
             prior_edge: dict[str, Any] | None = None
+            resource_owned_before = self._resource_owned_refusals
             if shadow_mode:
                 executed, prior_edge = await self._execute_shadow_merge(
                     winner, loser, user_id, workspace_id, context_id
@@ -499,7 +507,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
             # not counted as merged (rollback would otherwise "restore" a
             # merge that never happened).
             if not executed:
-                tally.skipped_pinned += 1
+                if self._resource_owned_refusals > resource_owned_before:
+                    tally.skipped_resource_owned += 1
+                else:
+                    tally.skipped_pinned += 1
                 continue
             if not shadow_mode:
                 # The winner's content is merged: both sets (#2015 D5).
@@ -767,6 +778,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
             # #1519: planned merges refused at execution because a row was
             # pinned/deleted after the candidate fetch (both modes).
             "skipped_pinned": tally.skipped_pinned,
+            # #2996: the same refusal for a row the resource indexer owns
+            # (it took a ``remember(external_id)`` row over since the fetch).
+            "skipped_resource_owned": tally.skipped_resource_owned,
             # #2584: merges not planned because the loser carries an exempt
             # tag (sleep_archive_exempt_tags, default status:open).
             "skipped_exempt": tally.skipped_exempt,
@@ -868,13 +882,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
         compete for the per-memory neighbour slots in ``_find_similar_pairs``.
         The count widens that search by exactly the rows that can crowd it.
         Tool guardrails leave the candidate set the same way (the fetch above),
-        so they are counted here too; the method keeps its name because the
-        rows it counts are "the exempt rows that still answer Qdrant".
+        so they are counted here too, and so are rows the resource indexer
+        owns (#2996: out of the candidate set, but their points answer the
+        search); the method keeps its name because the rows it counts are "the
+        exempt rows that still answer Qdrant".
         """
         stmt = select(func.count()).where(
             Memory.user_id == user_id,
             Memory.deleted_at.is_(None),
-            or_(pinned_predicate(), tool_triggered_predicate()),
+            or_(pinned_predicate(), tool_triggered_predicate(), resource_owned_predicate()),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
@@ -1599,6 +1615,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 reasons.append(f"{label}_time")
         if not reasons:
             return False
+        if any(reason.endswith("_resource_owned") for reason in reasons):
+            self._resource_owned_refusals += 1
         logger.info(
             "dedup_merge_skipped_pinned",
             winner_id=str(winner.id),

@@ -22,6 +22,7 @@ from models.memory import (
     Memory,
     not_resource_owned_predicate,
     pinned_predicate,
+    resource_owned_predicate,
     tool_triggered_predicate,
 )
 from repositories.base import BaseRepository
@@ -207,6 +208,25 @@ class MemoryRepository(BaseRepository[Memory]):
 
         result = await self.db.execute(query)
         return list(result.scalars().all())
+
+    async def list_working_with_resource_owned(
+        self, user_id: str, limit: int = 100
+    ) -> list[tuple[Memory, bool]]:
+        """A user's working memories, each with whether the resource indexer owns it.
+
+        The rows ``list(filters={"user_id": ..., "scope": "working"})`` returns
+        (newest first, ``limit`` of them), read in one statement together with
+        ``resource_owned_predicate()`` (#2996): the legacy consolidation pass
+        decides on that flag, the one rule every automated pass applies.
+        """
+        query = (
+            select(Memory, resource_owned_predicate().label("resource_owned"))
+            .where(Memory.user_id == user_id, Memory.scope == "working")
+            .order_by(desc(Memory.created_at), desc(Memory.id))
+            .limit(limit)
+        )
+        result = await self.db.execute(query)
+        return [(memory, bool(owned)) for memory, owned in result.tuples().all()]
 
     async def create(self, memory: Memory) -> Memory:
         """Create new memory.

@@ -406,8 +406,11 @@ def owns_resource_point(memory: Memory) -> bool:
     ``details.resource_id`` alone does not say so: ``remember(external_id=...)``
     sets it on memories the API wrote, whose point is their own id. An indexer
     row carries the full natural key and names the point derived from it.
-    ``models.memory.resource_owned_predicate`` is the SQL counterpart the
-    automated passes exclude such rows with (#2996).
+    For the code that addresses the indexer's point. Whether an automated pass
+    leaves a row to its source is decided by
+    ``models.memory.resource_owned_predicate`` instead (#2996), which does not
+    check the uuid5: a row whose ``details`` key was edited after indexing is
+    resource-owned there and not here.
     """
     return names_own_resource_point(
         memory.summary_embedding_id,
@@ -1698,6 +1701,14 @@ class ResourceIndexer:
                 previous_point = existing_memory.summary_embedding_id
                 # Bugfix: Use UUID format for summary_embedding_id
                 existing_memory.summary_embedding_id = point_id_uuid
+                # #2996: the row now names the indexer's point, so its source
+                # owns its lifecycle (``resource_owned_predicate``): a working
+                # row (a ``remember(external_id)`` row taken over here, or one
+                # written before f62) becomes persistent, stamped like the
+                # create branch's; a persistent row keeps its stamp.
+                if existing_memory.scope != "persistent":
+                    existing_memory.scope = "persistent"
+                    existing_memory.promoted_at = utcnow()
                 apply_keyword_lengths(existing_memory, keyword_lengths)
 
                 if previous_values != (
@@ -1744,8 +1755,9 @@ class ResourceIndexer:
                     # #2996: the source owns the row's lifecycle, so it is
                     # persistent from creation, stamped as PROMOTE stamps a
                     # promotion. Every page change creates a new row (a new
-                    # version), so the create branch is the only place; the
-                    # rows created working before are moved by f62.
+                    # version); the update branch above converts a working
+                    # row it takes over, and f62 moved the rows created
+                    # working before.
                     scope="persistent",
                     promoted_at=utcnow(),
                     source=INDEXER_SOURCE,  # Issue #262: Track provenance
