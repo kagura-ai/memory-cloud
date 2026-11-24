@@ -295,7 +295,10 @@ observation (experimental, #2921): advertised as
 `public.domains.operations.v1` while the operator turns
 `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` on. The states, limits, TXT proof
 and audit rows are those of the owner API. See "Installation-bound owner
-operations" in [Public MCP custom domains](../public-mcp-domains.md).
+operations" in [Public MCP custom domains](../public-mcp-domains.md). An
+unlinked (`revoked`) installation's client can no longer run these commands
+(#2995): they answer the same `404` `not_found` as an installation that does
+not match. The owner API keeps managing the domain.
 
 The sync service id can never be `public-mcp-domains`: `sync_service register`
 refuses that reserved id.

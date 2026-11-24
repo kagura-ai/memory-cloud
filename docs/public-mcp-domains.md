@@ -980,9 +980,11 @@ reads the observation again and decides from what it shows.
 
 Unlink, reconnect, every stop of managed synchronization (by the owner, the
 billing service or the maintenance pass) and resume advance the installation's
-`generation`, so a command formed before any of them is stale. The
-installation's `state` is not a condition: an unlinked installation keeps its
-endpoint and its alias, and its current binding is accepted. An unpublished or
+`generation`, so a command formed before any of them is stale. An unlinked
+(`revoked`) installation keeps its endpoint and its alias, but its client can
+no longer run these commands (#2995): a command naming its current binding is
+the same `404` `not_found` as an installation that does not match, and changes
+nothing (the owner API still manages the domain). An unpublished or
 republished endpoint is `404` here; this interface never adopts the domain of
 a new publication (the owner API manages it).
 
@@ -995,7 +997,7 @@ Errors (envelope `{"error": "<code>"}`, without `message` or `details`):
 | `401` | `invalid_token` | a missing, malformed, expired or revoked token, or one that expires before the commit | all |
 | `403` | `insufficient_scope` | the token, its grant or its client lacks `integrations:manage` | all |
 | `403` | `SLOT-001` | the canonical owner of a slot-suspended workspace | all |
-| `404` | `not_found` | the switch or a prerequisite off; not the current canonical owner or not an `OWNER` member; the workspace missing or deleted; no such installation of this workspace for this client and service generation; the installation's target not live and exact | all |
+| `404` | `not_found` | the switch or a prerequisite off; not the current canonical owner or not an `OWNER` member; the workspace missing or deleted; no such installation of this workspace for this client and service generation; the installation unlinked (`revoked`); the installation's target not live and exact | all |
 | `409` | `public_mcp_domain_command_stale` | the binding is not the installation's current one; the named domain is not an open domain of this publication, or not in the named state; the ownership changed and changed back during the command. Answered only before the command writes a domain row | all (the domain cases: verify, remove) |
 | `409` | `RES-002` | an authority row is held by another transaction (send the same command again); the client has no enabled service registration | all |
 | `409` | `public_mcp_domain_exists` | the publication already has an open domain | claim |
