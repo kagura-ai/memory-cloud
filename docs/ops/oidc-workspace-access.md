@@ -124,4 +124,15 @@ refuses authentication work before a DB connection is opened. Proxy identity
 uses the deployment's existing trusted-proxy policy, never raw forwarded headers
 (see [OIDC provider](oidc-provider.md#protocol-burst-limits)).
 
+The budget does not depend on a workspace or a plan. The workspace ID in the
+path does not choose the bucket, and every plan gets the same budget: one per
+operation (`workspace-list`, `workspace-access`), first per peer, then per
+client and user. A client application that reads many workspaces paces its
+reads instead of re-reading all of them every minute. For example, it reads a
+workspace's `/access` once, caches it, and reads it again when it acts on that
+workspace. On a 429 it waits for `Retry-After` before it retries. An operator
+gives more by raising `OIDC_RATE_LIMIT_PER_MINUTE`. That setting also bounds
+the protocol endpoints (`/oidc/authorize`, `/oidc/token`, `/oidc/revoke`,
+`/oidc/userinfo`) and the sync routes.
+
 No new tables, migrations or runtime dependencies are required.

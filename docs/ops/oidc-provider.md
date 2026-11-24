@@ -186,6 +186,11 @@ instead of allowing unlimited authentication attempts. Discovery and JWKS
 remain available independently of these counters. Neither credentials, client
 IDs nor raw peer addresses are stored in the counter keys.
 
+These budgets are the same on every plan. A workspace ID in a request path
+does not change them (see
+[OIDC workspace access](oidc-workspace-access.md#errors-and-operational-behavior)
+for how a client application paces its reads).
+
 ### Peer address behind a reverse proxy or CDN
 
 The peer address comes from ASGI. Raw client-supplied forwarding headers do
