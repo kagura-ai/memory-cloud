@@ -14,6 +14,7 @@ from uuid import uuid4
 import pytest
 
 import mcp_server.tools as tools_mod
+from mcp_server.tools import _workspace_binding
 from mcp_server.tools._default_context import DefaultContextSelection
 from mcp_server.tools._helpers import get_mcp_default_context_selection
 from tests.mcp_server.test_transport_tool_profiles import (
@@ -37,6 +38,13 @@ def seen(monkeypatch):
         return [SimpleNamespace(type="text", text="ok")]
 
     monkeypatch.setattr(tools_mod, "execute_tool_call", fake_execute)
+
+    # #3000: the transport checks a named default context against the database
+    # to bind the workspace; these tests have none (the context does not bind).
+    async def no_binding(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(_workspace_binding, "resolve_default_context_binding", no_binding)
     return recorded
 
 

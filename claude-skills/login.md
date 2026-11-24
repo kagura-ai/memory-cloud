@@ -212,8 +212,9 @@ Kagura Memory login
   MCP          list_contexts: ok
 ```
 
-- `list_contexts` names no workspace: the workspace is the one in the URL path
-  (`/mcp/w/<workspace-id>`), or on a plain `/mcp` the account's current workspace. Quote a `hint`
+- `list_contexts` names no workspace when the connection is bound: the one in the URL path
+  (`/mcp/w/<workspace-id>`), the key's, or the default context's; an unbound `/mcp` lists every
+  workspace and each item names its `workspace`. Quote a `hint`
   when the response has one (no workspace, or no context visible yet).
 - Still `401`: the old connection may still be in use — reconnect once through `/mcp`, then report
   the error. Do not loop.

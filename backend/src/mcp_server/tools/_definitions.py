@@ -873,15 +873,15 @@ Manual: guide(["get_context_info"]).""",
         {
             "name": "list_contexts",
             "readOnly": True,
-            "description": """List the contexts you can access as a name→id directory, most recently used first. Other tools need context_id unless the URL sets ?context=. Narrow with name_contains; get_context_info(context_id) for one context's details.
-Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], total (page), count (all visible), limit/can_create (quota), has_more, next_cursor, hint?, other_workspaces?}; pass next_cursor as cursor for the next page.
+            "description": """List the contexts you can access, most recently used first. Other tools need context_id unless the URL sets ?context=. Narrow with name_contains; get_context_info(context_id) for details. Unless bound to a workspace (URL, key or default context), lists all your workspaces, items with workspace {id, name}.
+Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], total (page), count (all visible), limit/can_create?, has_more, next_cursor, hint?, other_workspaces?, skipped_workspaces?}; pass next_cursor as cursor.
 Manual: guide(["list_contexts"]).""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "include_stats": {
                         "type": "boolean",
-                        "description": "Add memory_count per context.",
+                        "description": "memory_count per context.",
                     },
                     "name_contains": {
                         "type": "string",
@@ -890,15 +890,15 @@ Manual: guide(["list_contexts"]).""",
                     },
                     "include_summary": {
                         "type": "boolean",
-                        "description": "Add summary, cut to 300 characters (summary_truncated).",
+                        "description": "Summary cut to 300 characters (summary_truncated).",
                     },
                     "include_details": {
                         "type": "boolean",
-                        "description": "Add the full summary and embedding_model (pages of 20 without name_contains; wins over include_summary).",
+                        "description": "Full summary and embedding_model (pages of 20 without name_contains; wins over include_summary).",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Contexts per page, 1-200 (default 100; 20 with include_details). A page also stops at 20000 characters.",
+                        "description": "Per page, 1-200 (default 100; 20 with include_details); a page stops at 20000 characters.",
                     },
                     "cursor": {
                         "type": "string",
@@ -906,7 +906,7 @@ Manual: guide(["list_contexts"]).""",
                     },
                     "workspace_id": {
                         "type": "string",
-                        "description": "Another workspace of yours; default: this connection's.",
+                        "description": "List only this workspace of yours.",
                     },
                 },
             },
@@ -971,20 +971,20 @@ Manual: guide(["list_tags"]).""",
         # Issue #240: switch_context removed - use context_id argument in each tool
         {
             "name": "create_context",
-            "description": """Create a context — a separate namespace for memories (per project or topic) — in the current workspace. Workspace owner or admin only: owners can create private and shared contexts, admins shared only.
+            "description": """Create a context (a memory namespace per project or topic) in this connection's workspace. Owners create private and shared contexts, admins shared only. An unbound connection with several creatable workspaces must pass workspace_id.
 
-Returns: {status, message, context_{id, name, display_name, is_private, is_locked}}. Pass context_id to the other tools.""",
+Returns: {status, message, context_{id, name, display_name, is_private, is_locked}, workspace: {id, name}}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["name"],
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Context name, unique in the workspace: lowercase alphanumerics, hyphens, underscores (^[a-z0-9_-]+$), e.g. 'my-project'.",
+                        "description": "Unique in the workspace, ^[a-z0-9_-]+$, e.g. 'my-project'.",
                     },
                     "display_name": {
                         "type": "string",
-                        "description": "Human-readable name. Defaults to name.",
+                        "description": "Human-readable; defaults to name.",
                     },
                     "description": {
                         "type": "string",
@@ -997,7 +997,7 @@ Returns: {status, message, context_{id, name, display_name, is_private, is_locke
                         "type": "string",
                         "maxLength": CONTEXT_SUMMARY_MAX_LENGTH,
                         "description": (
-                            "Summary of the context's purpose, written for an AI reader "
+                            "The context's purpose, for an AI reader "
                             f"(max {CONTEXT_SUMMARY_MAX_LENGTH} chars)."
                         ),
                     },
@@ -1005,7 +1005,7 @@ Returns: {status, message, context_{id, name, display_name, is_private, is_locke
                         "type": "string",
                         "maxLength": CONTEXT_USAGE_GUIDE_MAX_LENGTH,
                         "description": (
-                            "Notes on what the context holds and how it is organised "
+                            "What the context holds and how it is organised "
                             f"(max {CONTEXT_USAGE_GUIDE_MAX_LENGTH} chars)."
                         ),
                     },
@@ -1015,7 +1015,11 @@ Returns: {status, message, context_{id, name, display_name, is_private, is_locke
                     },
                     "embedding_model": {
                         "type": "string",
-                        "description": "Embedding model. Default: the deployment's EMBEDDING_MODEL. Immutable after creation.",
+                        "description": "Default: the deployment's EMBEDDING_MODEL. Immutable after creation.",
+                    },
+                    "workspace_id": {
+                        "type": "string",
+                        "description": "Workspace to create in.",
                     },
                 },
             },
