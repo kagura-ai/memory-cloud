@@ -100,8 +100,9 @@ list_workspaces()
    current and usable (reason when usable=false), and exactly one has current=true (this
    connection's workspace)
 -> Verify: with more than one workspace, the list_contexts() reply above carries
-   other_workspaces == the number of other items with usable=true and a `workspaces_hint`; with
-   no other usable workspace it carries neither
+   other_workspaces == the number of other items with usable=true and a `workspaces_hint` on a
+   connection bound to a workspace, or items with `workspace` on an unbound one; with no other
+   usable workspace it carries neither
 
 create_context(name="smoke-test-{unix_timestamp}", description="Temporary context for MCP smoke test. Safe to delete.")
 -> Verify: status=success with a top-level `context_id` (UUID format) — there is no nested context

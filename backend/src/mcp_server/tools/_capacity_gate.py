@@ -36,6 +36,7 @@ from sqlalchemy import select
 
 from mcp_server.tools._errors import describe_tool_exception
 from mcp_server.tools._helpers import ToolErrorContent
+from mcp_server.tools._workspace_binding import handler_picks_workspace
 from services.capacity_lock import CapacityPolicy
 from utils.exceptions import CapacityLockedError
 from utils.logger import get_logger
@@ -353,6 +354,10 @@ async def capacity_lock_refusal(
     if tool_name not in CAPACITY_LOCK_BLOCKED_TOOLS:
         return None
     if tool_name not in CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS and names_a_target(args):
+        return None
+    # #3000: an unbound create_context picks its workspace in the handler; the
+    # service checks the lock there after authorization.
+    if handler_picks_workspace(tool_name):
         return None
     if workspace_id is None or _known_not_candidate(workspace_id):
         return None

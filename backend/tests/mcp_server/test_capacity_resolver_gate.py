@@ -286,6 +286,11 @@ async def _call(tool: str, resolvers: _Resolvers, db: MagicMock, usage: AsyncMoc
             stack.enter_context(p)
         # The usage row (some handlers log the refusal) is not handler work.
         stack.enter_context(patch("utils.usage_logger.log_usage", usage or AsyncMock()))
+        # #3001: the dispatcher's metering read (which workspace the call counts
+        # against) runs before any gate; it is not handler work either.
+        stack.enter_context(
+            patch("mcp_server.tools._charge_workspace", AsyncMock(return_value=None))
+        )
         # No session workspace: the dispatcher's own check has nothing to look at.
         # That it also skips a session workspace when a target is named is pinned
         # in test_capacity_gate.py (test_a_gated_tool_naming_its_target_opens_no_session).

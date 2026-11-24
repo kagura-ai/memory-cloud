@@ -324,14 +324,15 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     },
     "list_contexts": {
         _D: (
-            "3af41ca1a9a64482",
+            "ef6afea83bb77953",
             "List the contexts you can access as a name→id directory (the id is the "
             "context_id argument; the URL's ?context= sets a default), most recently used "
-            "first. Narrow with name_contains.\n"
-            "Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], "
-            "total (page), count (all visible), limit/can_create (quota), has_more, "
-            "next_cursor, hint?, other_workspaces?}; pass next_cursor as cursor for the "
-            "next page.",
+            "first. Narrow with name_contains. A connection not bound to a workspace lists "
+            "every workspace of yours; items then carry workspace.\n"
+            "Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at, "
+            "workspace?: {id, name}}], total (page), count (all visible), limit/can_create?, "
+            "has_more, next_cursor, hint?, other_workspaces?, skipped_workspaces?}; pass "
+            "next_cursor as cursor for the next page.",
         ),
     },
     "list_tags": {

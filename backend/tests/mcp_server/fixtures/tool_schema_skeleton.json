@@ -873,6 +873,9 @@
         },
         "embedding_model": {
           "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
         }
       },
       "additionalProperties": false

@@ -2227,7 +2227,7 @@
     "colDefaultContext": "デフォルトコンテキスト",
     "defaultContextFor": "{name} のデフォルトコンテキスト",
     "defaultContextLabel": "デフォルトコンテキスト(任意)",
-    "defaultContextHelp": "このキーで context_id を指定せずに呼んだ MCP ツールは、このコンテキストで動作します。MCP URL の ?context= が優先されます。",
+    "defaultContextHelp": "このキーで context_id を指定せずに呼んだ MCP ツールは、このコンテキストで動作します。MCP URL の ?context= が優先されます。ワークスペースに紐付かないキーでは、接続が使うワークスペースもこのコンテキストで決まります。",
     "defaultContextSaved": "デフォルトコンテキストを保存しました",
     "defaultContextCleared": "デフォルトコンテキストを解除しました"
   },

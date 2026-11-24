@@ -412,5 +412,5 @@ async def test_an_empty_other_workspace_gets_no_create_context_hint(accounts, db
     assert payload["status"] == "success", payload
     assert payload["contexts"] == []
     assert "limit" not in payload and "can_create" not in payload
-    assert "create_context" not in payload["hint"]
-    assert f"/mcp/w/{s['wc']}" in payload["hint"]
+    # #3002: create_context(workspace_id=) creates there directly.
+    assert f'create_context(workspace_id="{s["wc"]}")' in payload["hint"]

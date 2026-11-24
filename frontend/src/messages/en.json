@@ -2227,7 +2227,7 @@
     "colDefaultContext": "Default context",
     "defaultContextFor": "Default context for {name}",
     "defaultContextLabel": "Default context (optional)",
-    "defaultContextHelp": "MCP tools called with this key and without a context_id run in this context. A ?context= on the MCP URL takes precedence.",
+    "defaultContextHelp": "MCP tools called with this key and without a context_id run in this context. A ?context= on the MCP URL takes precedence. For a key not scoped to a workspace, this context also decides the workspace the connection works in.",
     "defaultContextSaved": "Default context saved",
     "defaultContextCleared": "Default context cleared"
   },

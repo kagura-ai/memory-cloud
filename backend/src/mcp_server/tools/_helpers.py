@@ -155,6 +155,35 @@ def get_mcp_credential_default_context() -> "UUID | None":
 
 
 # ============================================================================
+# #3001: the workspace a tool call is charged to
+# ============================================================================
+# The dispatcher decides once per call which workspace the call counts
+# against (``_workspace_binding.charge_workspace``): the daily MCP call limit,
+# the plan headroom's MCP-call figure and the usage row all use this one
+# value, so a check never reads a workspace the row is not written to.
+# Unset (a handler called outside the dispatcher, which only tests do): the
+# handler's own ``workspace_id``.
+_UNSET: Any = object()
+_mcp_charge_workspace: ContextVar[Any] = ContextVar("mcp_charge_workspace", default=_UNSET)
+
+
+def set_mcp_charge_workspace(workspace_id: "UUID | None") -> "Token[Any]":
+    """Set the running call's charged workspace; pass the token to ``reset_mcp_charge_workspace``."""
+    return _mcp_charge_workspace.set(workspace_id)
+
+
+def reset_mcp_charge_workspace(token: "Token[Any]") -> None:
+    """Restore the value in effect before ``set_mcp_charge_workspace``."""
+    _mcp_charge_workspace.reset(token)
+
+
+def charged_workspace(fallback: "UUID | None") -> "UUID | None":
+    """The running call's charged workspace, else ``fallback`` (no dispatcher)."""
+    value = _mcp_charge_workspace.get()
+    return fallback if value is _UNSET else value
+
+
+# ============================================================================
 # #1954: per-call capacity policy for the context resolvers
 # ============================================================================
 # The capacity-over lock (#1941) is checked where a tool resolves its target
@@ -388,7 +417,7 @@ async def _plan_headroom_field(
             plan_headroom(
                 db,
                 workspace_id=context.workspace_id,
-                session_workspace_id=session_workspace_id,
+                session_workspace_id=charged_workspace(session_workspace_id),
                 counts=current_plan_headroom_counts(),
                 throttle=throttle,
             ),
@@ -1099,6 +1128,9 @@ async def _log_tool_usage(
     from db.base import get_db
     from utils.usage_logger import log_usage
 
+    # #3001: the row goes where the call was charged (the rate limit read the
+    # same workspace), whatever the handler passes.
+    workspace_id = charged_workspace(workspace_id)
     response_time_ms = int((time.time() - start_time) * 1000)
     try:
         # Use independent session: log_usage() calls db.commit() internally,
