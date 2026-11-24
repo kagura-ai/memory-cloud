@@ -35,12 +35,12 @@ def row_date(row: Any) -> tuple[str, DateSource]:
         ``(day, "event" | "observed" | "created")``.
     """
     event_start = getattr(row, "event_start", None)
-    if event_weekday(event_start) is not None:
+    if isinstance(event_start, str) and event_weekday(event_start) is not None:
         return event_start, "event"
     observed_at = getattr(row, "observed_at", None)
     # A stored observed_at begins with its UTC day (a date, or a UTC datetime);
     # a legacy value that does not falls through to created_at.
-    if observed_weekday(observed_at) is not None:
+    if isinstance(observed_at, str) and observed_weekday(observed_at) is not None:
         return observed_at[:10], "observed"
     created = to_utc_iso(row.created_at)
     return (created or "")[:10], "created"

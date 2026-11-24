@@ -90,7 +90,7 @@ class TestMcpEnvelope:
 
         assert "_recall_reply(" in inspect.getsource(mcp_memory.handle_recall)
         assert (
-            "_recall_envelope(result, context, verbosity, explore_hints_omitted)"
+            "_recall_envelope(result, context, verbosity, explore_hints_omitted, order)"
             in inspect.getsource(mcp_memory._recall_reply)
         )
         src = inspect.getsource(mcp_memory._recall_envelope)
