@@ -24,19 +24,22 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for dete
 # Third-party imports (PEP8)
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import PointStruct, SparseVector
-from sqlalchemy import case, exists, or_, select
+from sqlalchemy import ColumnElement, and_, case, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 # Local application imports (PEP8)
 from db.base import isolated_session
-from db.point_writer_lock import try_exclude_point_writers
+from db.point_writer_lock import hold_point_writer_lock, try_exclude_point_writers
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
+    add_memory_to_qdrant,
     delete_chunk_points,
     delete_points_from_qdrant,
     ensure_kagura_memories_collection,
     get_qdrant_client,
+    retrieve_vectors_and_contexts,
 )
 from models.auth import Context, Workspace
 from models.memory import (  # Issue #262: Memory model for resource data storage
@@ -44,10 +47,12 @@ from models.memory import (  # Issue #262: Memory model for resource data storag
     Memory,
 )
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
-from services.context_routing import resolve_context_routing
+from services.context_routing import resolve_collection_name, resolve_context_routing
 from services.embedding_service import EmbeddingService
 from services.keyword_stats import (
     apply_keyword_lengths,
+    memory_field_stats,
+    memory_keyword_lengths,
     resource_fulltext_avgdl,
     resource_keyword_lengths,
 )
@@ -435,56 +440,92 @@ def names_own_resource_point(
 async def unshared_point_id(db: AsyncSession, memory_id: UUID, point_id: UUID) -> UUID | None:
     """``point_id`` — the row ``memory_id``'s point — or ``None`` when another live row names it.
 
-    A resource point's id is derived from the document (#1829): the same
-    document version indexed into two contexts that share a collection is ONE
-    point for TWO rows, so deleting it for one row would leave the other
-    unsearchable. A row whose point is its own id (``point_id == memory_id``)
+    A resource point's id is derived from the document (#1829), not from the
+    context: two live rows can name one point. Deleting it for one row would
+    leave the other unsearchable, so every delete path keeps a point another
+    live row names. A row whose point is its own id (``point_id == memory_id``)
     skips the lookup. Not scoped by context on purpose: the row to find is one
-    in ANOTHER context that shares the collection. Served by the partial index
+    in ANOTHER context. Served by the partial index
     idx_memories_summary_embedding_live (#1869). The rule ``forget``, the
-    Sleep archive and merge (#2065), and the indexer's old-version cleanup and
-    ``version=N`` delete (#2248) delete a memory's point by.
+    Sleep archive and merge (#2065), the indexer's old-version cleanup, its
+    deletes of a document (#2248) and the orphan sweep delete a point by.
 
-    One context indexes a resource at a time (#2248, #2254).
-    ``contexts.resource_id`` is unique among live contexts
-    (``ux_contexts_resource_id_active``), only the indexer writes a
-    ``resource_point_id`` into ``summary_embedding_id``, a deleted context's
-    rows are tombstoned, a restore is refused while another live context
-    serves the slug, and a merge copies rows under their own id. One path
-    still lets two live rows name one point: a context that is unpublished or
+    Who owns a shared point: the live row of the context that holds the slug
+    (``contexts.resource_id`` equal to the row's resource id, the context
+    live), see :func:`detach_resource_rows`. A context that is unpublished or
     changes its ``resource_id`` (``ContextService.update_context``) releases
-    the slug and keeps its rows, which keep naming their points. Once another
-    context takes the slug and indexes the same version, the point is
-    rewritten with that context's payload, and the first context's row is no
-    longer found by recall (the point carries one ``context_id``, which
-    recall filters by). This lookup only stops the caller's delete: the
-    orphan sweep judges a resource point by the context in its payload, so it
-    still removes that point once that context has no row for it, whatever
-    other context's row names it. It is deliberately not scoped by
-    collection: a scope that misreads a context mid embedding migration (its
-    rows in two collections under the same ids) would delete a point a row
-    still needs, and a false "shared" only keeps a point for the sweep.
-    Serving one resource from several contexts at once would need per-context
-    point ids.
+    the slug and keeps its rows. When another context takes the slug, its
+    indexer detaches the former holder's rows before it writes the point
+    (``_apply_upsert``), and a rebuild of a row whose context no longer holds
+    the slug writes the row's own point instead (``rebuild_point``). Rows a
+    release before that rule left naming one point still meet this lookup.
+    It is deliberately not scoped by collection: a scope that misreads a
+    context mid embedding migration (its rows in two collections under the
+    same ids) would delete a point a row still needs, and a false "shared"
+    only keeps a point for the sweep.
     """
     if point_id == memory_id:
         return point_id
     # A SAVEPOINT: a failed lookup must not abort the caller's transaction
     # (the Sleep phases call this from a best-effort vector step).
+    # One statement: another live row names the point, or the row's context
+    # no longer holds the slug (the point is the holder's then).
     async with db.begin_nested():
-        shared = await db.execute(
+        kept = await db.execute(
             select(
-                exists().where(
-                    Memory.summary_embedding_id == point_id,
-                    Memory.id != memory_id,
-                    Memory.deleted_at.is_(None),
+                or_(
+                    exists().where(
+                        Memory.summary_embedding_id == point_id,
+                        Memory.id != memory_id,
+                        Memory.deleted_at.is_(None),
+                    ),
+                    exists().where(Memory.id == memory_id, _released_row()),
                 )
             )
         )
-    if shared.scalar():
+    if kept.scalar():
         logger.info("memory_point_shared_kept", memory_id=str(memory_id), point_id=str(point_id))
         return None
     return point_id
+
+
+def _released_row() -> ColumnElement[bool]:
+    """A row that names a resource point its context does not own.
+
+    The row names a point other than its own id and carries a resource id,
+    and its context is gone or no longer holds that slug (it was unpublished
+    or took another ``resource_id``). The point is the holder's
+    (:func:`detach_resource_rows`), so it is never this row's to write,
+    patch or delete. A row without a context is left out (nothing to
+    compare).
+    """
+    holds = exists().where(
+        Context.id == Memory.context_id,
+        Context.resource_id == Memory.resource_id,
+        Context.deleted_at.is_(None),
+    )
+    return and_(
+        Memory.context_id.is_not(None),
+        Memory.resource_id.is_not(None),
+        Memory.summary_embedding_id.is_not(None),
+        Memory.summary_embedding_id != Memory.id,
+        ~holds,
+    )
+
+
+async def released_resource_rows(db: AsyncSession, memory_ids: Sequence[UUID]) -> set[UUID]:
+    """Those of ``memory_ids`` whose context no longer owns the resource point they name.
+
+    See ``_released_row``. One query, in a SAVEPOINT like the
+    shared-point lookups.
+    """
+    if not memory_ids:
+        return set()
+    async with db.begin_nested():
+        rows = await db.execute(
+            select(Memory.id).where(Memory.id.in_(list(memory_ids)), _released_row())
+        )
+    return {row[0] for row in rows}
 
 
 async def unshared_point_ids(
@@ -500,9 +541,10 @@ async def unshared_point_ids(
 
     Returns:
         Each ``memory_id`` mapped to its ``point_id``, or to ``None`` when
-        another live row names that point. The rule is the single-row one: a
-        point under the row's own id skips the lookup, and the lookup is
-        scoped by neither context nor collection.
+        another live row names that point or the row's context no longer
+        holds the slug. The rule is the single-row one: a point under the
+        row's own id skips the lookup, and the lookup is scoped by neither
+        context nor collection.
     """
     result: dict[UUID, UUID | None] = {}
     lookup: dict[UUID, UUID] = {}
@@ -512,23 +554,221 @@ async def unshared_point_ids(
             lookup[memory_id] = point_id
     if not lookup:
         return result
+    # One statement: the live rows naming the points, and the asked rows
+    # themselves with whether their context still holds the slug.
+    live_namer = and_(
+        Memory.summary_embedding_id.in_(set(lookup.values())), Memory.deleted_at.is_(None)
+    )
     async with db.begin_nested():
-        namers = await db.execute(
-            select(Memory.id, Memory.summary_embedding_id).where(
-                Memory.summary_embedding_id.in_(set(lookup.values())),
-                Memory.deleted_at.is_(None),
-            )
+        found = await db.execute(
+            select(
+                Memory.id,
+                Memory.summary_embedding_id,
+                live_namer.label("names"),
+                _released_row().label("released"),
+            ).where(or_(live_namer, Memory.id.in_(list(lookup))))
         )
     named_by: dict[UUID, set[UUID]] = {}
-    for namer_id, point_id in namers:
-        named_by.setdefault(point_id, set()).add(namer_id)
+    released: set[UUID] = set()
+    for namer_id, point_id, names, is_released in found:
+        if names:
+            named_by.setdefault(point_id, set()).add(namer_id)
+        if is_released and namer_id in lookup:
+            released.add(namer_id)
     for memory_id, point_id in lookup.items():
         if named_by.get(point_id, set()) - {memory_id}:
             logger.info(
                 "memory_point_shared_kept", memory_id=str(memory_id), point_id=str(point_id)
             )
             result[memory_id] = None
+        elif memory_id in released:
+            logger.info(
+                "memory_point_shared_kept", memory_id=str(memory_id), point_id=str(point_id)
+            )
+            result[memory_id] = None
     return result
+
+
+async def context_holds_slug(db: AsyncSession, context_id: UUID, resource_id: str) -> bool:
+    """Whether the live context ``context_id`` holds the slug ``resource_id``, locked shared.
+
+    The holder owns the resource points of the slug (:func:`detach_resource_rows`).
+    The context row is locked ``FOR SHARE`` when it holds the slug, so a release
+    (unpublish, a ``resource_id`` change) waits for the caller's transaction:
+    the answer stays true until the point the caller writes is committed.
+    """
+    held = await db.scalar(
+        select(Context.id)
+        .where(
+            Context.id == context_id,
+            Context.resource_id == resource_id,
+            Context.deleted_at.is_(None),
+        )
+        .with_for_update(read=True)
+    )
+    return held is not None
+
+
+async def detach_resource_rows(
+    db: AsyncSession,
+    point_id: UUID,
+    *,
+    holder_context_id: UUID | None,
+    memory_ids: Sequence[UUID] | None = None,
+) -> int:
+    """Turn the live rows outside ``holder_context_id`` that name ``point_id`` into plain memories.
+
+    The rule: a resource point belongs to the live row of the context that
+    holds its slug. A row of any other context that names it (a context that
+    released the slug and kept its rows) is detached: it gets a point of its
+    own under its row id, with the payload of a plain memory
+    (``build_memory_point``) and its own workspace, context and author, and
+    ``summary_embedding_id`` = its id. Its content, details and metadata are
+    kept. From then on ``resource_owned_predicate()`` and
+    ``owns_resource_point`` are false for it: every pass treats it as a plain
+    memory.
+
+    The dense vector comes from the shared point while that point still holds
+    the row's context's document (its payload ``context_id``), from the row's
+    own point when an earlier attempt already wrote one, and otherwise the
+    row goes back to ``pending`` under its own id, for the embedding pipeline
+    to embed. The keyword (``bm25``) vector is the plain memory's, built from
+    the row like the payload, so the point, the row's keyword lengths and a
+    later keyword rebuild agree. A row the feed fence or a running erasure
+    keeps from a vector write goes back to ``pending`` the same way.
+
+    The rows are locked ``FOR UPDATE NOWAIT`` in id order: a row another
+    transaction holds fails the statement with ``lock_not_available``, which
+    the indexer treats as a retry of the event (``sync_lock_busy``), so the
+    caller never waits on a row of another context. Each row's own point is
+    written before its row change is flushed; the caller commits. A retry
+    after a rollback reuses the own point an earlier attempt wrote, so it
+    never copies a vector the new holder wrote meanwhile.
+
+    Backends: the reads and the write go through ``db.qdrant``, which the
+    LanceDB store serves as well.
+
+    Args:
+        db: The caller's session; its transaction holds the row locks.
+        point_id: The resource point.
+        holder_context_id: The context that holds the slug, whose rows stay;
+            ``None`` when only ``memory_ids`` are asked for.
+        memory_ids: Only these rows (a row found released by its own caller).
+
+    Returns:
+        How many rows were detached.
+    """
+    stmt = select(Memory).where(
+        Memory.summary_embedding_id == point_id,
+        Memory.deleted_at.is_(None),
+    )
+    if holder_context_id is not None:
+        stmt = stmt.where(Memory.context_id != holder_context_id)
+    if memory_ids is not None:
+        stmt = stmt.where(Memory.id.in_(list(memory_ids)))
+    rows = list(
+        (
+            await db.execute(
+                stmt.order_by(Memory.id)
+                .with_for_update(nowait=True)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return 0
+    # The own points are written before the rows' change commits: the orphan
+    # sweep, which would take such a point for a stray of a row that still
+    # names the shared point, stays out until the caller's transaction ends.
+    await hold_point_writer_lock(db)
+    by_collection: dict[str, list[Memory]] = {}
+    for row in rows:
+        collection = await resolve_collection_name(db, cast(UUID, row.context_id))
+        by_collection.setdefault(collection, []).append(row)
+    for collection, group in by_collection.items():
+        found = await retrieve_vectors_and_contexts(
+            collection, [str(point_id), *(str(row.id) for row in group)]
+        )
+        for row in group:
+            # Read before the row changes: a flush expires its generated
+            # columns, which the payload reads.
+            lengths = await write_own_point(db, row, point_id, collection, found)
+            row.summary_embedding_id = row.id
+            if lengths is None:
+                if row.embedding_suppressed_at is None:
+                    row.embedding_status = "pending"
+                vector = "queued"
+            else:
+                apply_keyword_lengths(row, lengths)
+                vector = "copied"
+            await db.flush()
+            logger.info(
+                "resource_row_detached",
+                memory_id=str(row.id),
+                point_id=str(point_id),
+                vector=vector,
+            )
+    return len(rows)
+
+
+async def write_own_point(
+    db: AsyncSession,
+    row: Memory,
+    shared_point: UUID,
+    collection: str,
+    found: dict[str, tuple[list[float] | None, str | None]],
+) -> dict[str, int | None] | None:
+    """Write ``row``'s point under its own id from a vector already in ``collection``.
+
+    The dense vector is the shared point's when its payload carries the
+    row's context (it still holds that context's document), else the one of
+    a point under the row's id (an earlier attempt's copy). The payload and
+    the keyword vector are a plain memory's (``build_memory_point``). Nothing
+    is written when neither vector is there, or the feed fence or a running
+    erasure keeps the row from a vector write. The row itself is not changed.
+
+    Args:
+        found: ``retrieve_vectors_and_contexts`` of the shared point and the
+            row's id in ``collection``.
+
+    Returns:
+        The keyword lengths of the point written, for the row; ``None`` when
+        nothing was written (the row is the embedding pipeline's then).
+    """
+    # Local imports: memory_service imports this module.
+    from services.memory_service import build_memory_point
+    from services.vector_erasure import embedding_author_current, reconcile_erased_writer
+    from utils.exceptions import ManagedDataLockedError
+
+    shared_vector, shared_context = found.get(str(shared_point), (None, None))
+    if shared_vector is not None and shared_context == str(row.context_id):
+        dense: list[float] | None = shared_vector
+    else:
+        dense = found.get(str(row.id), (None, None))[0]
+    if dense is None:
+        return None
+    try:
+        if not await embedding_author_current(db, row):
+            return None
+    except ManagedDataLockedError:
+        return None
+    stats = await memory_field_stats(db, row.context_id)
+    payload, sparse_indices, sparse_values = build_memory_point(row, stats)
+    await add_memory_to_qdrant(
+        user_id=row.user_id,
+        memory_id=row.id,
+        vector=dense,
+        payload=payload,
+        workspace_id=str(row.workspace_id),
+        context_id=str(row.context_id),
+        sparse_indices=sparse_indices,
+        sparse_values=sparse_values,
+        collection_name=collection,
+    )
+    await reconcile_erased_writer(db, row)
+    return memory_keyword_lengths(payload)
 
 
 # The ``Memory.source`` and ``Memory.type`` of a row the indexer creates.
@@ -1431,6 +1671,19 @@ class ResourceIndexer:
         if fresh is None:
             return
         context = fresh
+        if context.resource_id != event.resource_id:
+            # The context released the slug (unpublished, or a new
+            # ``resource_id``) after the event was queued for it. The slug's
+            # points belong to the context that holds it now
+            # (``detach_resource_rows``), so an upsert left in this
+            # context's backlog writes nothing; its deletes still apply.
+            logger.info(
+                "upsert_event_slug_released",
+                event_id=event.id,
+                context_id=str(context.id),
+                resource_id=event.resource_id,
+            )
+            return
         await hold_point_writer_lock(self.db)
         if not event.payload:
             logger.warning("upsert_event_has_no_payload", event_id=event.id)
@@ -1614,6 +1867,13 @@ class ResourceIndexer:
             keyword_avgdl=await resource_fulltext_avgdl(self.db, context.id),
             **row_metadata,
         )
+
+        # The point belongs to this context, which holds the slug (the share
+        # lock above keeps it held until the batch commits): a live row of
+        # another context that still names it (a context that released the
+        # slug) gets a point of its own first, so this write takes no row's
+        # vector away and no other context's row ever resolves to it.
+        await detach_resource_rows(self.db, point_id_uuid, holder_context_id=context.id)
 
         # 4. Upsert to Qdrant (per-context collection, see #334). The point is
         # written before the row that owns it commits (once per batch); the
@@ -2119,6 +2379,19 @@ class ResourceIndexer:
         context = await self._get_context(memory.context_id)
         resource_pk = await resolve_resource_pk(self.db, context.workspace_id, resource_id)
         schema = await self._get_latest_schema(resource_pk) if resource_pk else None
+        if not await context_holds_slug(self.db, context.id, resource_id):
+            # The row's context released the slug: the document's point is the
+            # holder's (``detach_resource_rows``). The row is detached here
+            # and gets a point of its own instead.
+            return await self._rebuild_detached(
+                memory,
+                schema=schema,
+                collection_name=collection_name,
+                embedding_service=embedding_service,
+                usage=usage,
+                canonical_rebuild=canonical_rebuild,
+                keyword_lengths=keyword_lengths,
+            )
         if resource_pk is None or schema is None:
             raise ResourceRebuildError(
                 f"Resource '{resource_id}' has no schema to project document "
@@ -2191,6 +2464,10 @@ class ResourceIndexer:
         )
         if not await embedding_author_current(self.db, memory, canonical_rebuild=canonical_rebuild):
             return memory.point_id
+        # The context holds the slug (locked shared since the check above): a
+        # live row of another context that still names the point is detached
+        # first, so the upsert takes no row's vector away.
+        await detach_resource_rows(self.db, memory.point_id, holder_context_id=context.id)
         # Rebuild follows the row author, including an explicit restored pseudonym.
         if point.payload is not None:
             point.payload["user_id"] = memory.user_id
@@ -2210,6 +2487,121 @@ class ResourceIndexer:
         )
         return memory.point_id
 
+    async def _rebuild_detached(
+        self,
+        memory: Memory,
+        *,
+        schema: ResourceSchema | None,
+        collection_name: str,
+        embedding_service: EmbeddingService,
+        usage: dict[str, int] | None,
+        canonical_rebuild: bool,
+        keyword_lengths: dict[str, int | None] | None,
+    ) -> UUID:
+        """``rebuild_point`` for a row whose context no longer holds the slug.
+
+        The row is detached (see ``detach_resource_rows``): its point is
+        written under its own id with a plain memory's payload and keyword
+        vector, and ``summary_embedding_id`` is set to its id in the caller's
+        transaction (a Core UPDATE: some callers hold the row outside the
+        session). The document's point is not touched. The dense vector is
+        the embedding of the document the row holds, projected like the
+        indexer projects it, or of its summary when it holds no document the
+        resource's schema can project. The point is written before the row
+        change; a retry writes the same point again. When ``collection_name``
+        is not the context's routing collection (an embedding migration's
+        target), the row's point is written in the routing collection as well
+        (``write_own_point``), or the row is queued for the embedding pipeline.
+
+        Returns:
+            The row id, the point it names now.
+        """
+        from services.memory_service import build_memory_point
+        from services.vector_erasure import embedding_author_current, reconcile_erased_writer
+
+        text_to_embed = memory.summary or ""
+        if schema is not None:
+            try:
+                document = json.loads(memory.content or "")
+            except ValueError:
+                document = None
+            if isinstance(document, dict):
+                text_to_embed = resource_document_text(
+                    self._project_payload(document, schema), cast(str, memory.resource_doc_id)
+                )
+        embed_kwargs: dict[str, Any] = {
+            "text": text_to_embed,
+            "user_id": memory.user_id,
+            "context_id": str(memory.context_id),
+            "workspace_id": str(memory.workspace_id) if memory.workspace_id else None,
+        }
+        if usage is None:
+            embedding = await embedding_service.embed(**embed_kwargs)
+        else:
+            embedding, usage["tokens"] = await embedding_service.embed_with_usage(**embed_kwargs)
+        if not await embedding_author_current(self.db, memory, canonical_rebuild=canonical_rebuild):
+            return memory.point_id
+
+        payload, sparse_indices, sparse_values = build_memory_point(
+            memory, await memory_field_stats(self.db, memory.context_id)
+        )
+        # The own point is written before ``summary_embedding_id`` changes in
+        # the caller's transaction: keep the orphan sweep's delete pass out
+        # until that transaction ends (``detach_resource_rows`` does the same).
+        await hold_point_writer_lock(self.db)
+        try:
+            await add_memory_to_qdrant(
+                user_id=memory.user_id,
+                memory_id=memory.id,
+                vector=embedding,
+                payload=payload,
+                workspace_id=str(memory.workspace_id),
+                context_id=str(memory.context_id),
+                sparse_indices=sparse_indices,
+                sparse_values=sparse_values,
+                collection_name=collection_name,
+            )
+        except QdrantError:
+            raise
+        except Exception as e:
+            raise QdrantError(f"Failed to write point: {e}") from e
+        shared_point = memory.point_id
+        values: dict[str, Any] = {"summary_embedding_id": memory.id}
+        routing = await resolve_collection_name(self.db, cast(UUID, memory.context_id))
+        if routing != collection_name:
+            # An embedding migration writes its target; the context still
+            # serves from its routing collection (and goes back to it on a
+            # rollback), where the row's point must be under its id too. The
+            # vector there is copied like a detach copies it, or the row is
+            # queued for the embedding pipeline, which writes the routing
+            # collection.
+            found = await retrieve_vectors_and_contexts(
+                routing, [str(shared_point), str(memory.id)]
+            )
+            if await write_own_point(self.db, memory, shared_point, routing, found) is None:
+                if memory.embedding_suppressed_at is None:
+                    values["embedding_status"] = "pending"
+        await self.db.execute(
+            update(Memory)
+            .where(Memory.id == memory.id)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        set_committed_value(memory, "summary_embedding_id", memory.id)
+        if "embedding_status" in values:
+            set_committed_value(memory, "embedding_status", values["embedding_status"])
+        if keyword_lengths is not None:
+            keyword_lengths.update(memory_keyword_lengths(payload))
+
+        await reconcile_erased_writer(self.db, memory)
+        logger.info(
+            "resource_row_detached",
+            memory_id=str(memory.id),
+            point_id=str(shared_point),
+            vector="embedded",
+        )
+        return memory.id
+
     async def _apply_delete(
         self,
         event: ResourceEvent,
@@ -2227,41 +2619,14 @@ class ResourceIndexer:
             context: Context object
             collection_name: Resolved Qdrant collection (per-context, see #334)
         """
-        from qdrant_client.models import FieldCondition, Filter, MatchValue
-
+        # A context that released the slug deletes its rows but never the
+        # slug's document points: those are the holder's (``detach_resource_rows``).
+        holds_slug = context.resource_id == event.resource_id
         try:
             if event.version is None:
                 # ================================================================
                 # Delete all versions (new behavior)
                 # ================================================================
-
-                # Delete from Qdrant with 3-level isolation
-                await self.qdrant_client.delete(
-                    collection_name=collection_name,
-                    points_selector=Filter(
-                        must=[
-                            FieldCondition(
-                                key="workspace_id",
-                                match=MatchValue(value=str(context.workspace_id)),
-                            ),
-                            FieldCondition(
-                                key="context_id", match=MatchValue(value=str(context.id))
-                            ),
-                            FieldCondition(key="doc_id", match=MatchValue(value=event.doc_id)),
-                            FieldCondition(
-                                key="resource_id", match=MatchValue(value=event.resource_id)
-                            ),
-                        ]
-                    ),
-                )
-
-                # Code quality: Use info for important business events
-                logger.info(
-                    "qdrant_delete_all_versions",
-                    doc_id=event.doc_id,
-                    resource_id=event.resource_id,
-                    collection=collection_name,
-                )
 
                 # Delete from Memory table with 3-level isolation
                 # Performance: Use generated columns (Migration 061) instead of JSONB search
@@ -2274,17 +2639,34 @@ class ResourceIndexer:
                     )
                 )
                 memories_to_delete = result.scalars().all()
+                # The points the deleted rows name, dropped once the deletes
+                # are durable and only where no other live row names them
+                # (the ``unshared_point_id`` rule, ``_drop_retired_points``):
+                # a version's point can be named by a row of another context,
+                # so a delete by payload filter could take that row's vector.
+                retired = [
+                    RetiredVersionRow(
+                        memory_id=memory.id,
+                        version_point=memory.point_id,
+                        collection=collection_name,
+                    )
+                    for memory in memories_to_delete
+                    if holds_slug or memory.point_id == memory.id
+                ]
 
                 for memory in memories_to_delete:
                     await self.db.delete(memory)
 
                 await self.db.flush()
+                self._retired.extend(retired)
 
+                # Code quality: Use info for important business events
                 logger.info(
                     "resource_memories_deleted_all_versions",
                     doc_id=event.doc_id,
                     resource_id=event.resource_id,
                     deleted_count=len(memories_to_delete),
+                    collection=collection_name,
                 )
                 self._history_changes["memory.deleted"] += len(memories_to_delete)
 
@@ -2330,25 +2712,39 @@ class ResourceIndexer:
                     )
                     return
 
+                # A detached row (a context that released the slug) names a
+                # point under its own id: it goes with the row, like on a
+                # whole-document delete.
+                own_points: list[RetiredVersionRow] = []
                 for memory in memories:
                     from services.sync_feed_provenance import preserve_manual_tombstone
 
                     if preserve_manual_tombstone(self.db, event, memory):
                         continue
+                    if memory.point_id == memory.id:
+                        own_points.append(
+                            RetiredVersionRow(
+                                memory_id=memory.id,
+                                version_point=memory.id,
+                                collection=collection_name,
+                            )
+                        )
                     await self.db.delete(memory)
                 await self.db.flush()
                 self._history_changes["memory.deleted"] += len(memories)
+                self._retired.extend(own_points)
 
                 # The rule of the other delete paths (``unshared_point_id``),
                 # applied once the deletes are durable: a rolled-back row must
                 # keep its point.
-                self._retired.append(
-                    RetiredVersionRow(
-                        memory_id=memories[0].id,
-                        version_point=point_id_uuid,
-                        collection=collection_name,
+                if holds_slug:
+                    self._retired.append(
+                        RetiredVersionRow(
+                            memory_id=memories[0].id,
+                            version_point=point_id_uuid,
+                            collection=collection_name,
+                        )
                     )
-                )
 
                 logger.info(
                     "resource_memory_deleted_version",
