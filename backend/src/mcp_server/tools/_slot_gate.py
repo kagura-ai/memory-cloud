@@ -24,6 +24,7 @@ from uuid import UUID
 from mcp_server.tools._capacity_gate import names_a_target
 from mcp_server.tools._errors import describe_tool_exception
 from mcp_server.tools._helpers import ToolErrorContent
+from mcp_server.tools._workspace_binding import handler_picks_workspace
 from services.workspace_slots import workspace_slots_enforced
 from utils.logger import get_logger
 
@@ -63,6 +64,10 @@ async def slot_suspension_refusal(
     if tool_name in SLOT_GATE_EXEMPT_TOOLS or tool_name in HANDLER_GATED_TOOLS:
         return None
     if workspace_id is None:
+        return None
+    # #3000: on an unbound connection list_contexts / create_context pick their
+    # workspace themselves and gate it (``tools._workspace_binding``).
+    if handler_picks_workspace(tool_name):
         return None
     if not workspace_slots_enforced() or names_a_target(args):
         return None

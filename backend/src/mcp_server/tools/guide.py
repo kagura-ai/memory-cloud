@@ -88,8 +88,10 @@ GUIDE_TOPICS: dict[str, str] = {
         "set on the API key or on the app's OAuth grant (Credentials & Integrations, or "
         "the consent page) applies, with context_source: 'credential'; an agent-bound key "
         "defaults to its default (or only) binding. Precedence: context_id > ?context= > "
-        "the key or app default > the agent binding. list_contexts(name_contains=) "
-        "reaches another context; pass its id as context_id."
+        "the key or app default > the agent binding. Without a workspace in the URL or "
+        "a workspace-scoped key, the default context (not an agent binding) also sets "
+        "the connection's workspace, while you can still reach it. "
+        "list_contexts(name_contains=) reaches another context; pass its id as context_id."
     ),
     "guardrails": (
         "A tool guardrail is a memory with details.tool_trigger = {tool: 'Bash|"
@@ -758,17 +760,19 @@ GUIDE_TOPICS: dict[str, str] = {
         "(contexts you cannot see count toward it)."
     ),
     "list_contexts.workspaces": (
-        "A connection works in one workspace: the one in its URL (/mcp/w/{workspace_id}) "
-        "or your account's default. When your account is a member of more than one "
-        "workspace, the reply carries other_workspaces (how many other usable "
-        "workspaces) and workspaces_hint. list_workspaces() (outside the core profile; "
+        "A connection is bound to a workspace by its URL (/mcp/w/{workspace_id}), a "
+        "workspace-scoped key or its default context; it then lists that workspace, and "
+        "with more than one workspace the reply carries other_workspaces (how many other "
+        "usable workspaces) and workspaces_hint. An unbound connection lists every "
+        "workspace of yours: items carry workspace {id, name}, no limit / can_create, "
+        "unusable workspaces are named in skipped_workspaces, and create_context then "
+        "needs workspace_id when you can create in several. list_workspaces() (outside the core profile; "
         'describe_tools(["list_workspaces"]) has its schema, and it is callable from '
         "any URL, also while this connection's workspace is suspended) returns "
         "{status, workspaces: [{id, name, role, current, usable, reason?}], total}; "
         "list_contexts(workspace_id=<id>) lists that workspace's contexts under your "
         "role there, and a context_id from it works in the other tools. Such a listing "
-        "carries no limit / can_create: contexts are created in a workspace from a "
-        "connection to it. usable=false means that call is refused (reason: "
+        "carries no limit / can_create. usable=false means that call is refused (reason: "
         "workspace_suspended, or feature_not_available when you have no seat). A "
         "workspace you are not a member of is refused (permission_denied). With a "
         "workspace-scoped API key only the key's workspace is listed, any other "

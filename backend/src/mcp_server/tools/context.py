@@ -4,8 +4,11 @@ Handles get_context_info, create_context, update_context, delete_context, list_c
 Extracted from tools.py for modularity (Issue #7).
 """
 
+import base64
+import binascii
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -29,6 +32,7 @@ from mcp_server.tools._helpers import (
     get_mcp_key_workspace_scope,
     mcp_capacity_policy,
 )
+from mcp_server.tools._workspace_binding import connection_is_unbound
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
 from utils.response_budget import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, fit_items
 
@@ -916,7 +920,9 @@ def _list_contexts_target(
         )
 
 
-def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | None:
+def _validate_list_contexts_args(
+    args: dict[str, Any], *, across_workspaces: bool = False
+) -> list[TextContent] | None:
     """Validate list_contexts arguments (#1600).
 
     ``type(x) is bool`` rather than truthiness: the dispatcher has already
@@ -937,10 +943,17 @@ def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | No
     if limit is not None and type(limit) is not int:
         return _error_response("validation_error", "'limit' must be an integer.", received=limit)
     cursor = args.get("cursor")
+    # #3001: the two listings page differently (an offset inside one
+    # workspace, a keyset over every member workspace); a cursor of one is
+    # refused by the other.
     if (
         cursor is not None
         and cursor != ""
-        and not (isinstance(cursor, str) and cursor.isascii() and cursor.isdigit())
+        and not (
+            _decode_cross_cursor(cursor) is not None
+            if across_workspaces
+            else isinstance(cursor, str) and cursor.isascii() and cursor.isdigit()
+        )
     ):
         return _error_response(
             "validation_error",
@@ -1005,6 +1018,223 @@ def _workspace_description(description: str | None) -> dict[str, Any]:
     }
 
 
+def _list_contexts_page_args(args: dict[str, Any]) -> tuple[str, int]:
+    """``(name_filter, limit)`` of a list_contexts call (validated arguments)."""
+    name_filter = (args.get("name_contains") or "").strip().casefold()
+    default_limit = (
+        _LIST_CONTEXTS_DETAILS_MAX_LIMIT
+        if args.get("include_details", False) and not name_filter
+        else _LIST_CONTEXTS_DEFAULT_LIMIT
+    )
+    raw_limit = args.get("limit")
+    limit = max(1, min(default_limit if raw_limit is None else raw_limit, _LIST_CONTEXTS_MAX_LIMIT))
+    return name_filter, limit
+
+
+def _name_matches(ctx: Any, name_filter: str) -> bool:
+    """``name_contains`` (#1600): the name or the display name, case-folded."""
+    return name_filter in ctx.name.casefold() or name_filter in (ctx.display_name or "").casefold()
+
+
+async def _context_items(
+    db: Any, context_service: Any, user_id: str, contexts: list[Any], args: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The ``contexts`` items of one list_contexts page (#1600 shapes)."""
+    from utils.datetime import to_utc_iso
+
+    include_stats = args.get("include_stats", False)
+    include_details = args.get("include_details", False)
+    include_summary = args.get("include_summary", False)
+    # Batch-fetch embedding configs to avoid N+1 — only the
+    # include_details shape reports embedding_model (#1600).
+    config_by_ctx: dict[Any, Any] = {}
+    default_embedding_model = None
+    if include_details and contexts:
+        from sqlalchemy import select as _select
+
+        from config.settings import get_settings as _get_settings2
+        from models.config import ContextSearchConfig
+
+        default_embedding_model = _get_settings2().embedding_model
+
+        context_ids = [ctx.id for ctx in contexts]
+        config_results = await db.execute(
+            _select(ContextSearchConfig).where(ContextSearchConfig.context_id.in_(context_ids))
+        )
+        config_by_ctx = {c.context_id: c for c in config_results.scalars().all()}
+
+    context_list = []
+    for ctx in contexts:
+        ctx_data: dict[str, Any] = {
+            "id": str(ctx.id),
+            "name": ctx.name,
+            "is_private": ctx.is_private,
+            "is_locked": ctx.is_locked,
+            # #1257 made this live data; Z-suffix per backend.md (raw
+            # .isoformat() rendered '+00:00', unlike every other
+            # timestamp on the MCP surface, e.g. tags[].last_used_at).
+            "last_used_at": to_utc_iso(ctx.last_used_at),
+        }
+        if include_details:
+            cfg = config_by_ctx.get(ctx.id)
+            ctx_data["summary"] = ctx.summary
+            ctx_data["embedding_model"] = cfg.embedding_model if cfg else default_embedding_model
+        elif include_summary:
+            ctx_data.update(_summary_preview(ctx.summary))
+        if include_stats:
+            try:
+                stats = await context_service.get_context_stats(user_id, ctx.id)
+                ctx_data["memory_count"] = stats.get("memory_count", 0)
+            except Exception:
+                ctx_data["memory_count"] = 0
+        context_list.append(ctx_data)
+    return context_list
+
+
+# #3001: the cross-workspace listing pages with a keyset over (last_used_at,
+# id), most recently used first; the cursor is opaque to the caller and
+# carries a prefix, so neither listing accepts the other's cursor.
+_CROSS_CURSOR_PREFIX = "w1."
+_UTC_MIN_SORT = datetime.min.replace(tzinfo=UTC)
+
+
+def _cross_sort_key(ctx: Any) -> tuple[datetime, UUID]:
+    last = ctx.last_used_at
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    return (last or _UTC_MIN_SORT, ctx.id)
+
+
+def _encode_cross_cursor(key: tuple[datetime, UUID]) -> str:
+    raw = f"{key[0].isoformat()}|{key[1]}"
+    return _CROSS_CURSOR_PREFIX + base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_cross_cursor(cursor: Any) -> tuple[datetime, UUID] | None:
+    """The keyset position a cross-workspace cursor names; ``None`` if it names none."""
+    if not isinstance(cursor, str) or not cursor.startswith(_CROSS_CURSOR_PREFIX):
+        return None
+    body = cursor[len(_CROSS_CURSOR_PREFIX) :]
+    if len(body) > 200:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode()
+        stamp, context_id = decoded.split("|", 1)
+        when = datetime.fromisoformat(stamp)
+        if when.tzinfo is None:
+            return None
+        return when, UUID(context_id)
+    except (ValueError, TypeError, UnicodeDecodeError, binascii.Error):
+        return None
+
+
+async def _list_contexts_across_workspaces(
+    args: dict[str, Any], user_id: str, connection_workspace_id: UUID | None
+) -> list[TextContent]:
+    """list_contexts of an unbound connection: every member workspace (#3001).
+
+    One listing per usable member workspace (the same permission-scoped
+    listing a bound connection gets, so the same contexts of each), merged
+    most recently used first. Items carry ``workspace: {id, name}``.
+    ``count`` is what the caller can see across the listed workspaces;
+    ``limit`` / ``can_create`` (per-workspace plan figures) are left out. A
+    workspace the caller cannot use is left out and named in
+    ``skipped_workspaces`` with the error code ``list_contexts(workspace_id=)``
+    would answer for it; one such workspace never fails the listing.
+    """
+    from db.base import get_db
+    from mcp_server.tools.workspaces import account_workspaces
+    from services.context_service import ContextListingFailedError, ContextService
+    from utils.exceptions import WorkspaceSlotSuspendedError
+
+    name_filter, limit = _list_contexts_page_args(args)
+    position = _decode_cross_cursor(args.get("cursor") or None)
+
+    start_time = time.time()
+    async for db in get_db():
+        try:
+            context_service = ContextService(db)
+            workspaces = await account_workspaces(db, user_id)
+            skipped: list[dict[str, Any]] = []
+            listed: list[tuple[Any, Any]] = []  # (context, workspace)
+            for workspace in workspaces:
+                refusal = workspace.refusal
+                if refusal is None:
+                    try:
+                        contexts = await execute_with_timeout(
+                            context_service.list_contexts(
+                                user_id, workspace_id=workspace.id, raise_on_lookup_error=True
+                            ),
+                            operation_name="list_contexts",
+                        )
+                    except WorkspaceSlotSuspendedError:
+                        refusal = "workspace_suspended"
+                    except FeatureNotAvailableError:
+                        refusal = "feature_not_available"
+                    except ContextListingFailedError as e:
+                        logger.warning("list_contexts_lookup_failed: %s", str(e))
+                        refusal = "internal_error"
+                    else:
+                        listed.extend((ctx, workspace) for ctx in contexts)
+                if refusal is not None:
+                    skipped.append(
+                        {"id": str(workspace.id), "name": workspace.name, "reason": refusal}
+                    )
+
+            listed.sort(key=lambda pair: _cross_sort_key(pair[0]), reverse=True)
+            visible_count = len(listed)
+            if name_filter:
+                listed = [pair for pair in listed if _name_matches(pair[0], name_filter)]
+            if position is not None:
+                listed = [pair for pair in listed if _cross_sort_key(pair[0]) < position]
+            page = listed[:limit]
+
+            items = await _context_items(
+                db, context_service, user_id, [ctx for ctx, _ in page], args
+            )
+            for item, (_, workspace) in zip(items, page, strict=True):
+                item["workspace"] = {"id": str(workspace.id), "name": workspace.name}
+            placed = fit_items(items, DEFAULT_MAX_CHARS - _LIST_CONTEXTS_ENVELOPE_RESERVE)
+            if items and placed == 0:
+                placed = 1  # a page always advances
+            items = items[:placed]
+            has_more = placed < len(listed)
+            next_cursor = (
+                _encode_cross_cursor(_cross_sort_key(page[placed - 1][0])) if has_more else None
+            )
+
+            hint = None
+            if visible_count == 0 and not skipped:
+                hint = _EMPTY_CONTEXTS_HINT if workspaces else _NO_WORKSPACE_HINT
+
+            await _log_tool_usage(
+                db, user_id, "list_contexts", start_time, 200, None, connection_workspace_id
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=_dumps(
+                        {
+                            "status": "success",
+                            "contexts": items,
+                            "count": visible_count,
+                            "total": len(items),
+                            "has_more": has_more,
+                            "next_cursor": next_cursor,
+                            **({"hint": hint} if hint else {}),
+                            **({"skipped_workspaces": skipped} if skipped else {}),
+                        }
+                    ),
+                )
+            ]
+        except Exception as e:
+            await db.rollback()
+            return _tool_exception_response("list_contexts", e)
+
+    # Safety: should never reach here (get_db always yields)
+    return _error_response("internal_error", "Database session unavailable")
+
+
 async def handle_list_contexts(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -1016,9 +1246,13 @@ async def handle_list_contexts(
     ``include_summary``); ``name_contains`` narrows the list. One context's full
     details live in ``get_context_info``.
     """
-    arg_error = _validate_list_contexts_args(args)
+    # #3001: an unbound connection without workspace_id lists every member workspace.
+    across_workspaces = args.get("workspace_id") in (None, "") and connection_is_unbound()
+    arg_error = _validate_list_contexts_args(args, across_workspaces=across_workspaces)
     if arg_error:
         return arg_error
+    if across_workspaces:
+        return await _list_contexts_across_workspaces(args, user_id, workspace_id)
     # #2972: the connection's workspace is still the one usage is logged under.
     connection_workspace_id = workspace_id
     workspace_id, named_workspace, target_error = _list_contexts_target(args, workspace_id)
@@ -1026,17 +1260,7 @@ async def handle_list_contexts(
         return target_error
     other_workspace = named_workspace and workspace_id != connection_workspace_id
 
-    include_stats = args.get("include_stats", False)
-    include_details = args.get("include_details", False)
-    include_summary = args.get("include_summary", False)
-    name_filter = (args.get("name_contains") or "").strip().casefold()
-    default_limit = (
-        _LIST_CONTEXTS_DETAILS_MAX_LIMIT
-        if include_details and not name_filter
-        else _LIST_CONTEXTS_DEFAULT_LIMIT
-    )
-    raw_limit = args.get("limit")
-    limit = max(1, min(default_limit if raw_limit is None else raw_limit, _LIST_CONTEXTS_MAX_LIMIT))
+    name_filter, limit = _list_contexts_page_args(args)
     offset = int(args.get("cursor") or 0)
 
     from db.base import get_db
@@ -1078,10 +1302,6 @@ async def handle_list_contexts(
                 contexts = []
                 lookup_failed = True
 
-            from datetime import UTC, datetime
-
-            from utils.datetime import to_utc_iso
-
             # ``Context.last_used_at`` is declared as ``DateTime(timezone=True)``
             # (see models/auth.py) — populated values are aware. Use an aware
             # UTC sentinel so the ``None`` branch sorts consistently; mixing a
@@ -1099,10 +1319,7 @@ async def handle_list_contexts(
             visible_count = len(contexts_sorted)
             if name_filter:
                 contexts_sorted = [
-                    ctx
-                    for ctx in contexts_sorted
-                    if name_filter in ctx.name.casefold()
-                    or name_filter in (ctx.display_name or "").casefold()
+                    ctx for ctx in contexts_sorted if _name_matches(ctx, name_filter)
                 ]
 
             # #1743: one page of the directory. Everything below (config
@@ -1110,53 +1327,7 @@ async def handle_list_contexts(
             matched_count = len(contexts_sorted)
             contexts_sorted = contexts_sorted[offset : offset + limit]
 
-            # Batch-fetch embedding configs to avoid N+1 — only the
-            # include_details shape reports embedding_model (#1600).
-            config_by_ctx: dict[Any, Any] = {}
-            default_embedding_model = None
-            if include_details and contexts_sorted:
-                from sqlalchemy import select as _select
-
-                from config.settings import get_settings as _get_settings2
-                from models.config import ContextSearchConfig
-
-                default_embedding_model = _get_settings2().embedding_model
-
-                context_ids = [ctx.id for ctx in contexts_sorted]
-                config_results = await db.execute(
-                    _select(ContextSearchConfig).where(
-                        ContextSearchConfig.context_id.in_(context_ids)
-                    )
-                )
-                config_by_ctx = {c.context_id: c for c in config_results.scalars().all()}
-
-            context_list = []
-            for ctx in contexts_sorted:
-                ctx_data: dict[str, Any] = {
-                    "id": str(ctx.id),
-                    "name": ctx.name,
-                    "is_private": ctx.is_private,
-                    "is_locked": ctx.is_locked,
-                    # #1257 made this live data; Z-suffix per backend.md (raw
-                    # .isoformat() rendered '+00:00', unlike every other
-                    # timestamp on the MCP surface, e.g. tags[].last_used_at).
-                    "last_used_at": to_utc_iso(ctx.last_used_at),
-                }
-                if include_details:
-                    cfg = config_by_ctx.get(ctx.id)
-                    ctx_data["summary"] = ctx.summary
-                    ctx_data["embedding_model"] = (
-                        cfg.embedding_model if cfg else default_embedding_model
-                    )
-                elif include_summary:
-                    ctx_data.update(_summary_preview(ctx.summary))
-                if include_stats:
-                    try:
-                        stats = await context_service.get_context_stats(user_id, ctx.id)
-                        ctx_data["memory_count"] = stats.get("memory_count", 0)
-                    except Exception:
-                        ctx_data["memory_count"] = 0
-                context_list.append(ctx_data)
+            context_list = await _context_items(db, context_service, user_id, contexts_sorted, args)
 
             # #1743: the page stops where the shared response budget runs out
             # (include_summary / include_details items are large); the cursor

@@ -1113,6 +1113,9 @@ async def _log_tool_usage(
                 response_time_ms=response_time_ms,
                 context_id=str(context_id) if context_id else None,
                 workspace_id=str(workspace_id) if workspace_id else None,
+                # #3001: a call on a context of another of the user's
+                # workspaces counts in that workspace, not the connection's.
+                attribute_to_context_workspace=True,
             )
             # #1228: attribution rows only make sense alongside the billable
             # row — log_usage swallows its own failure, and writing the
