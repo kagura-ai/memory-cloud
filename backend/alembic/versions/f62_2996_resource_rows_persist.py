@@ -1,22 +1,23 @@
 """#2996: rows the resource indexer owns become persistent, as the indexer now writes them.
 
 The indexer used to create its rows with ``scope='working'``. The source owns
-their lifecycle, so since v0.181.0 the create branch writes
-``scope='persistent'`` and ``promoted_at`` (the two columns the PROMOTE
-statement sets). This data migration moves the rows written before:
+their lifecycle, so since v0.181.0 the indexer writes ``scope='persistent'``
+and ``promoted_at`` (the two columns the PROMOTE statement sets) on a row it
+creates and on a working row it takes over. This data migration moves the
+rows left from before: every live working row that is resource-owned,
 
-    scope = 'working' AND source = 'resource_ingest' AND deleted_at IS NULL
-    AND the row owns its indexer point (the full natural key, and a
-    ``summary_embedding_id`` other than its own id: ``resource_owned_predicate``
-    in models/memory.py, the SQL counterpart of ``owns_resource_point``)
+    scope = 'working' AND deleted_at IS NULL
+    AND resource_owned_predicate() (models/memory.py: the full natural key,
+    and a ``summary_embedding_id`` other than the row's own id)
 
-get ``scope='persistent'`` and ``promoted_at`` = the time of the update (UTC).
-Nothing else changes: not ``version`` (the canonical-index check of a sync
-target requires 1), not ``updated_at``, not the vector point (a resource
-point's payload carries neither ``scope`` nor ``promoted_at``). Tombstones,
-rows of other writers, and the copies a context merge makes of indexer rows
-(their point is their own id, built like any memory's point, whose payload
-does carry ``scope``) stay as they are.
+whoever wrote it (the indexer's own rows, and ``remember(external_id)`` rows
+it took over and re-pointed), gets ``scope='persistent'`` and ``promoted_at``
+= the time of the update (UTC). Nothing else changes: not ``version`` (the
+canonical-index check of a sync target requires 1), not ``updated_at``, not
+the vector point (a resource point's payload carries neither ``scope`` nor
+``promoted_at``). Tombstones, rows that name their own point (other writers'
+rows, and the copies a context merge makes of indexer rows, whose point is
+built like any memory's and does carry ``scope``) stay as they are.
 
 The walk runs in ``op.get_context().autocommit_block()`` so each batch commits
 on its own (``alembic/env.py`` runs an upgrade in one transaction, which would
@@ -72,8 +73,9 @@ PROGRESS_EVERY = 100
 # The rows to move, on the alias ``m``, written out in each statement below
 # (fixed SQL, nothing comes from input; the tests run every statement):
 #
-#   m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS NULL
-#   AND m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
+#   m.scope = 'working' AND m.deleted_at IS NULL
+#   AND (resource_owned_predicate() of models/memory.py:)
+#   m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
 #   AND m.resource_version IS NOT NULL AND m.summary_embedding_id IS NOT NULL
 #   AND m.summary_embedding_id <> m.id
 #
@@ -82,7 +84,7 @@ PROGRESS_EVERY = 100
 # The whole change in one statement: the offline form and the documented rerun.
 RERUN_SQL = """
 UPDATE memories AS m SET scope = 'persistent', promoted_at = timezone('UTC', now())
-WHERE m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS NULL
+WHERE m.scope = 'working' AND m.deleted_at IS NULL
   AND m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
   AND m.resource_version IS NOT NULL AND m.summary_embedding_id IS NOT NULL
   AND m.summary_embedding_id <> m.id
@@ -90,7 +92,7 @@ WHERE m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS N
 
 COUNT_SQL = """
 SELECT count(*) FROM memories AS m
-WHERE m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS NULL
+WHERE m.scope = 'working' AND m.deleted_at IS NULL
   AND m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
   AND m.resource_version IS NOT NULL AND m.summary_embedding_id IS NOT NULL
   AND m.summary_embedding_id <> m.id
@@ -104,7 +106,7 @@ WHERE m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS N
 BATCH_SQL = """
 WITH batch AS (
   SELECT m.id FROM memories AS m
-  WHERE m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS NULL
+  WHERE m.scope = 'working' AND m.deleted_at IS NULL
     AND m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
     AND m.resource_version IS NOT NULL AND m.summary_embedding_id IS NOT NULL
     AND m.summary_embedding_id <> m.id
@@ -115,7 +117,7 @@ WITH batch AS (
   UPDATE memories AS m SET scope = 'persistent', promoted_at = timezone('UTC', now())
   FROM batch
   WHERE m.id = batch.id
-    AND m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS NULL
+    AND m.scope = 'working' AND m.deleted_at IS NULL
     AND m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
     AND m.resource_version IS NOT NULL AND m.summary_embedding_id IS NOT NULL
     AND m.summary_embedding_id <> m.id
@@ -147,15 +149,23 @@ def persist_resource_rows(conn: sa.engine.Connection, *, batch_size: int = BATCH
             after = row.last_id
             if batches % PROGRESS_EVERY == 0:
                 logger.info("#2996: %d resource rows made persistent so far", moved)
-    finally:
-        # Also on a failure: the batches before it committed.
-        left = conn.execute(sa.text(COUNT_SQL)).scalar_one()
+    except Exception:
+        # The batches before the failure committed. No further statement here:
+        # the connection may be unusable, and the original error is what fails
+        # the migration (a rerun resumes).
         logger.info(
-            "#2996: %d resource rows made persistent; %d left working "
-            "(held by a request, or written since: run RERUN_SQL, docs/deployment.md)",
+            "#2996: %d resource rows made persistent before the walk failed; "
+            "running the migration again resumes",
             moved,
-            left,
         )
+        raise
+    left = conn.execute(sa.text(COUNT_SQL)).scalar_one()
+    logger.info(
+        "#2996: %d resource rows made persistent; %d left working "
+        "(held by a request, or written since: run RERUN_SQL, docs/deployment.md)",
+        moved,
+        left,
+    )
     return moved
 
 

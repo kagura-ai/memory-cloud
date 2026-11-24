@@ -1,8 +1,9 @@
 """#2996 (f62): the indexer's live working rows become persistent, nothing else changes.
 
-1. The upgrade moves exactly the live working rows that own their indexer
-   point (``source='resource_ingest'``); a tombstone, a plain working row, a
-   context-merge copy of an indexer row, a re-pointed ``remember`` row and an
+1. The upgrade moves exactly the live working rows that are resource-owned
+   (``resource_owned_predicate``): the indexer's rows and the
+   ``remember(external_id)`` rows it re-pointed. A tombstone, a plain working
+   row, a context-merge copy of an indexer row (it names its own point) and an
    already persistent resource row stay as they are. ``version`` and
    ``updated_at`` are untouched.
 2. A rerun (``RERUN_SQL``, and the upgrade itself after an interrupted run) is
@@ -114,12 +115,19 @@ def test_f62_moves_only_live_working_indexer_rows_and_reruns_cleanly() -> None:
                 conn, owner
             )
             seed = lambda **kw: _seed(conn, owner, ws_id, ctx_id, **kw)  # noqa: E731
-            moved = [seed(doc_id="a"), seed(doc_id="b")]
+            moved = [
+                seed(doc_id="a"),
+                seed(doc_id="b"),
+                # A remember(external_id) row the indexer took over (#2164).
+                seed(doc_id="e", source="mcp_remember"),
+            ]
             kept = {
                 "tombstone": seed(doc_id="c", deleted=True),
                 "plain working row": seed(doc_id=None, source="mcp_remember"),
                 "merge copy": seed(doc_id="d", own_point=True),
-                "re-pointed remember row": seed(doc_id="e", source="mcp_remember"),
+                "remember(external_id) row": seed(
+                    doc_id="g", source="mcp_remember", own_point=True
+                ),
                 "persistent resource row": seed(doc_id="f", scope="persistent", promoted=True),
             }
             before = _rows(conn, [*moved, *kept.values()])
@@ -198,3 +206,20 @@ def test_f62_walk_pages_by_id_and_skips_a_held_row() -> None:
         finally:
             engine.dispose()
             holder.dispose()
+
+
+def test_f62_walk_failure_raises_the_original_error_and_runs_nothing_after() -> None:
+    """A failed batch fails the migration with its own error: no count runs on
+    the connection afterwards (it may be unusable), so nothing masks it."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    module = _migration()
+    conn = MagicMock()
+    conn.execute.side_effect = RuntimeError("batch failed")
+
+    with pytest.raises(RuntimeError, match="batch failed"):
+        module.persist_resource_rows(conn)
+
+    assert conn.execute.call_count == 1
