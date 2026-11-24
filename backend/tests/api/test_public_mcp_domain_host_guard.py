@@ -241,6 +241,8 @@ ROUTE_INVENTORY = [
     "/oidc/jwks",
     "/oidc/authorize",
     "/internal/public-mcp-domains/tls-permission",
+    "/internal/public-mcp-domains/tls-observation",
+    "/internal/public-mcp-domains/claims",
     "/internal/billing/plan",
     "/docs",
     "/openapi.json",

@@ -15,6 +15,8 @@ Rows (later work packages add theirs):
 - the certificate permission endpoint answers 404 and opens no session;
 - the certificate report endpoint answers 404 before its body is read or a
   statement runs (#2941);
+- the claims list answers 404 before any statement, with the reporter
+  credential (#2993);
 - every owner domain route answers 404 before any statement, signed in or not;
 - ``/api/v1/system/info`` reports ``features.public_mcp_domains = false``;
 - unpublishing an endpoint releases no domain and runs no statement on them.
@@ -245,6 +247,29 @@ async def test_certificate_report_endpoint_is_404_before_anything(switch_off, mo
         )
     assert r.status_code == 404
     assert r.content == b""
+    assert switch_off == []
+
+
+async def test_claims_list_is_404_before_any_statement(switch_off, monkeypatch) -> None:
+    """#2993: with the switch off the claims list is refused before a session opens."""
+    from api.routes import internal_public_mcp_domains as routes
+
+    opened: list[object] = []
+
+    async def spy_get_db():
+        opened.append(object())
+        yield None
+
+    token = "reporter-" + "t" * 40
+    monkeypatch.setattr(get_settings(), "mcp_public_domains_tls_reporter_token", token)
+    monkeypatch.setattr(routes, "get_db", spy_get_db)
+    async with _client("api-blue:8080") as c:
+        r = await c.get(
+            "/internal/public-mcp-domains/claims", headers={"Authorization": f"Bearer {token}"}
+        )
+    assert r.status_code == 404
+    assert r.content == b""
+    assert opened == []
     assert switch_off == []
 
 

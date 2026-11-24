@@ -1447,7 +1447,8 @@ class Settings(BaseSettings):
         ),
     )
     # #2941: the bearer credential of the certificate operator's reporter
-    # (PUT /internal/public-mcp-domains/tls-observation). Empty: reports are
+    # (PUT /internal/public-mcp-domains/tls-observation) and of the edge agent's
+    # claims list (GET /internal/public-mcp-domains/claims, #2993). Empty: reports are
     # refused (404) and none is shown. Use: openssl rand -hex 32.
     mcp_public_domains_tls_reporter_token: str = Field(
         default="",
