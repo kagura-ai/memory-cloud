@@ -193,6 +193,18 @@ async def world(async_engine, db_session, monkeypatch):
                 await db_session.execute(select(Context.id).where(Context.workspace_id.in_(ws_ids)))
             ).scalars()
         )
+        await db_session.execute(
+            text(
+                "DELETE FROM agent_context_bindings WHERE agent_id IN "
+                "(SELECT id FROM agents WHERE workspace_id = ANY(:ws))"
+            ),
+            {"ws": ws_ids},
+        )
+        for table in ("agents", "workspace_slot_suspensions"):
+            await db_session.execute(
+                text(f"DELETE FROM {table} WHERE workspace_id = ANY(:ws)"),  # noqa: S608 - fixed names
+                {"ws": ws_ids},
+            )
         for table in ("memory_revisions", "memory_access_events", "memories", "usage_stats"):
             await db_session.execute(
                 text(f"DELETE FROM {table} WHERE context_id = ANY(:ids)"),  # noqa: S608 - fixed names
@@ -215,6 +227,8 @@ async def world(async_engine, db_session, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_request_state():
+    from auth.agent_scope import set_agent_scope
+    from mcp_server.tools import invalidate_rate_limit_cache
     from mcp_server.tools._helpers import (
         set_mcp_credential_default_context,
         set_mcp_default_context_selection,
@@ -227,6 +241,8 @@ def _clean_request_state():
         set_mcp_key_workspace_scope(None)
         set_mcp_credential_default_context(None)
         set_mcp_workspace_binding(None)
+        set_agent_scope(None)
+        invalidate_rate_limit_cache()
 
     _reset()
     yield
@@ -261,6 +277,7 @@ async def _asgi_call(
     credential_default: UUID | None = None,
     key_workspace: UUID | None = None,
     url_workspace: UUID | None = None,
+    agent_id: UUID | None = None,
 ) -> dict:
     """One stateless ``tools/call`` through ``mcp_asgi_app``; the parsed reply."""
     import mcp_server.transport as transport
@@ -273,6 +290,13 @@ async def _asgi_call(
     )
 
     async def fake_auth(**_kwargs):
+        from auth.agent_scope import AgentScope, set_agent_scope
+
+        set_agent_scope(
+            AgentScope(agent_id=agent_id, enforcement_mode="enforce", workspace_id=key_workspace)
+            if agent_id is not None
+            else None
+        )
         set_mcp_credential_default_context(credential_default)
         return user_id, None, key_workspace
 
@@ -844,3 +868,265 @@ async def test_an_unbound_create_through_the_dispatcher_lands_in_the_picked_work
     )
     assert created["status"] == "success", created
     assert created["workspace"]["id"] == str(w["wa"])
+
+
+# ============================================= review fixes: metering and scope
+
+
+_NOTE = {"summary": "Metering note", "content": "body", "type": "note"}
+
+
+async def _cap_workspace_calls(db_session, workspace_id, limit: int, user_id: str) -> None:
+    """Hold the workspace's daily MCP call limit at ``limit`` and use it all today."""
+    from utils.datetime import utcnow
+
+    workspace = await db_session.get(Workspace, workspace_id)
+    base = workspace.effective_mcp_calls_per_day - (workspace.addon_mcp_quota_bonus or 0)
+    workspace.addon_mcp_quota_bonus = limit - base
+    now = utcnow()
+    db_session.add_all(
+        [
+            UsageStats(
+                user_id=user_id,
+                endpoint="mcp:list",
+                method="MCP",
+                status_code=200,
+                created_at=now,
+                date=now.date(),
+                workspace_id=workspace_id,
+            )
+            for _ in range(limit)
+        ]
+    )
+    await db_session.commit()
+    assert workspace.effective_mcp_calls_per_day == limit
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_daily_limit_is_the_workspace_of_the_context_the_call_names(
+    world, db_session, monkeypatch, no_embedding
+):
+    """Unbound connection in A; B has used its whole day. A call on a B context
+    is refused by B's limit, a call on an A context still passes, and the
+    usage row goes where the check looked."""
+    w = world
+    await _cap_workspace_calls(db_session, w["wb"], 2, w["other_id"])
+
+    refused = await _asgi_call(
+        monkeypatch, w["user_id"], "remember", {"context_id": str(w["b_shared"]), **_NOTE}
+    )
+    assert refused["error"] == "rate_limit_exceeded", refused
+    assert refused["daily_limit"] == 2
+
+    passed = await _asgi_call(
+        monkeypatch, w["user_id"], "remember", {"context_id": str(w["a_shared"]), **_NOTE}
+    )
+    assert passed["status"] == "success", passed
+    assert await _usage_workspaces(db_session, w["user_id"], "mcp:remember") == [w["wa"]]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_default_context_call_is_charged_to_the_default_context_workspace(
+    world, db_session, monkeypatch, no_embedding
+):
+    """Under /mcp/w/A a call without context_id runs in the default context of
+    B; it is checked against, and counted in, B."""
+    w = world
+    listed = await _asgi_call(
+        monkeypatch,
+        w["user_id"],
+        "remember",
+        dict(_NOTE),
+        credential_default=w["b_shared"],
+        url_workspace=w["wa"],
+    )
+    assert listed["status"] == "success", listed
+    assert await _usage_workspaces(db_session, w["user_id"], "mcp:remember") == [w["wb"]]
+    await _cap_workspace_calls(db_session, w["wb"], 1, w["other_id"])
+    from mcp_server.tools import invalidate_rate_limit_cache
+
+    invalidate_rate_limit_cache()
+    refused = await _asgi_call(
+        monkeypatch,
+        w["user_id"],
+        "remember",
+        dict(_NOTE),
+        credential_default=w["b_shared"],
+        url_workspace=w["wa"],
+    )
+    assert refused["error"] == "rate_limit_exceeded", refused
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_key_never_writes_a_usage_row_into_another_workspace(
+    world, db_session, monkeypatch
+):
+    """Key scoped to A, user also in B: a refused call naming a B context
+    (logged with the raw context_id) still counts in A."""
+    w = world
+    for name, args in (
+        ("list_revisions", {"context_id": str(w["b_shared"]), "memory_id": str(uuid4())}),
+        ("rollback_session", {"context_id": str(w["b_shared"]), "session_id": "s-1"}),
+        ("get_context_info", {"context_id": str(w["b_shared"])}),
+    ):
+        reply = await _asgi_call(monkeypatch, w["user_id"], name, args, key_workspace=w["wa"])
+        assert reply["status"] != "success", (name, reply)
+    db_session.expire_all()
+    rows = (
+        (
+            await db_session.execute(
+                select(UsageStats.workspace_id).where(UsageStats.user_id == w["user_id"])
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows, "the refused calls are still counted"
+    assert set(rows) == {w["wa"]}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_unbound_listing_names_a_suspended_workspace(world, db_session):
+    from models.workspace_slots import WorkspaceSlotSuspension
+
+    w = world
+    db_session.add(
+        WorkspaceSlotSuspension(
+            workspace_id=w["wc"],
+            owner_user_id=w["other_id"],
+            cause="billing_snapshot",
+            suspended_at=datetime(2031, 5, 1, 12, 0, 0),
+        )
+    )
+    await db_session.commit()
+    with patch("services.workspace_slots.workspace_slot_mode", return_value="enforce"):
+        payload = await _list(w)
+    assert payload["status"] == "success", payload
+    assert _ids(payload) == _reachable(w) - _s(w["c_allowed"])
+    assert {"id": str(w["wc"]), "name": w["wc_name"], "reason": "workspace_suspended"} in payload[
+        "skipped_workspaces"
+    ]
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def agent_in_a(world, db_session):
+    """An agent of the user in A, bound to ``a_shared`` only (enforce mode)."""
+    from models.agent import Agent
+    from services.agent_binding_service import AgentBindingService
+
+    w = world
+    agent = Agent(workspace_id=w["wa"], name=f"wb-agent-{w['tag']}", owner_user_id=w["user_id"])
+    db_session.add(agent)
+    await db_session.flush()
+    await AgentBindingService(db_session).create_binding(
+        agent=agent,
+        context_id=w["a_shared"],
+        created_by=w["user_id"],
+        can_read=True,
+        write_policy="direct",
+        is_default=True,
+    )
+    await db_session.commit()
+    return agent.id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_agent_bound_key_stays_in_its_workspace_and_binding(
+    world, agent_in_a, monkeypatch
+):
+    w = world
+    call = {"key_workspace": w["wa"], "agent_id": agent_in_a}
+    listed = await _asgi_call(monkeypatch, w["user_id"], "list_contexts", {}, **call)
+    assert _ids(listed) == _s(w["a_shared"])  # the binding still narrows the listing
+    assert all("workspace" not in item for item in listed["contexts"])
+    other = await _asgi_call(
+        monkeypatch, w["user_id"], "list_contexts", {"workspace_id": str(w["wb"])}, **call
+    )
+    assert other["error"] == "permission_denied", other
+    url_default = await _asgi_call(
+        monkeypatch,
+        w["user_id"],
+        "get_context_info",
+        {},
+        query=f"context={w['b_shared']}".encode(),
+        **call,
+    )
+    assert url_default["error"] == "context_not_found", url_default
+    created = await _asgi_call(
+        monkeypatch,
+        w["user_id"],
+        "create_context",
+        {"name": f"agent-escape-{w['tag']}", "is_private": False, "workspace_id": str(w["wb"])},
+        **call,
+    )
+    assert created["error"] == "permission_denied", created
+
+
+# ===================================== legacy sessions follow the workspace
+
+
+async def _legacy_post(monkeypatch, user_id: str, body: dict, session_id: str | None, **kw):
+    import mcp_server.transport as transport
+    from mcp_server.tools._helpers import set_mcp_credential_default_context
+    from tests.mcp_server.test_transport_tool_profiles import _receive_for, _Recorder
+
+    async def fake_auth(**_kwargs):
+        set_mcp_credential_default_context(kw.get("credential_default"))
+        return user_id, None, None
+
+    monkeypatch.setattr(transport, "authenticate_mcp_request", fake_auth)
+    headers = [(b"content-type", b"application/json"), (b"accept", b"application/json")]
+    if session_id:
+        headers.append((b"mcp-session-id", session_id.encode()))
+    send = _Recorder()
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp/",
+        "query_string": b"",
+        "headers": headers,
+    }
+    await transport.mcp_asgi_app(scope, _receive_for(body), send)
+    return send
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_session_re_initializes_when_its_workspace_binding_changes(
+    world, db_session, monkeypatch
+):
+    """A session opened while the default context bound it to B is the
+    caller's own only while that holds; once the user leaves B the session
+    reads as another workspace's and is answered 404, as for a change of the
+    current workspace, and the client opens a new one."""
+    w = world
+    init = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "t"},
+        },
+    }
+    opened = await _legacy_post(
+        monkeypatch, w["user_id"], init, None, credential_default=w["b_shared"]
+    )
+    assert opened.status == 200
+    session_id = opened.headers[b"mcp-session-id"].decode()
+    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}
+    same = await _legacy_post(
+        monkeypatch, w["user_id"], ping, session_id, credential_default=w["b_shared"]
+    )
+    assert same.status == 200
+
+    await db_session.execute(
+        WorkspaceMember.__table__.delete().where(
+            WorkspaceMember.workspace_id == w["wb"], WorkspaceMember.user_id == w["user_id"]
+        )
+    )
+    await db_session.commit()
+    gone = await _legacy_post(
+        monkeypatch, w["user_id"], ping, session_id, credential_default=w["b_shared"]
+    )
+    assert gone.status == 404
