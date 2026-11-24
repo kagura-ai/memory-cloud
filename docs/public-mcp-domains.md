@@ -618,6 +618,9 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 - It works while `MCP_PUBLIC_DOMAINS_ENABLED` is off: use it to remove host
   names after switching the feature off, since no job runs then.
 - Host names are printed to the terminal, never written to a log line.
+- It stays the view for people. A program that follows the claims (an edge
+  agent) reads the versioned claims list instead ("Claims list for an edge
+  agent"); the command's tables are not a contract.
 
 ## Settings
 
@@ -631,7 +634,7 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | Hours a released name stays closed to other workspaces (0–2160). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | Domains (`pending`, `active`, `suspended`) per workspace (1–50). |
 | `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` | *(empty)* | A zone of your own for the row-specific CNAME targets ("The CNAME proof"). Empty: off, answers and lookups as without it. Set: a host name outside the special-use suffixes, at most 200 characters, not an application host nor under one; reserved for claims. Needs the wildcard record `*.<zone>`. |
-| `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ("Edge certificate reports"). Empty: every report is `404`, nothing reads or writes `public_mcp_domain_tls_reports`, every certificate is `unreported`. No blanks; under `ENVIRONMENT=production` at least 32 characters and not another service credential. Never logged. |
+| `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ("Edge certificate reports") and of the claims list ("Claims list for an edge agent"). Empty: every report and every claims list is `404`, nothing reads or writes `public_mcp_domain_tls_reports`, every certificate is `unreported`. No blanks; under `ENVIRONMENT=production` at least 32 characters and not another service credential. Never logged. |
 | `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` | `false` | Experimental. The owner's claim, verify and remove through an installation's browser client ("Installation-bound owner operations"), advertised as `public.domains.operations.v1`. Takes effect only while `public.domains.observation.v1` is advertised (`OIDC_ENABLED`, `MCP_PUBLIC_ENDPOINTS_ENABLED`, `SYNC_INTEGRATIONS_ENABLED`, `MCP_PUBLIC_USAGE_BUDGET_ENABLED` and this file's switch); off: the three routes answer `404` before authentication and run no statement. No cross-check at start-up, so turning `MCP_PUBLIC_DOMAINS_ENABLED` off alone still closes everything. |
 
 A malformed host name in the routing target, an application host, a
@@ -650,7 +653,8 @@ query 3 s, 20 TXT values; CNAME label 32 hex characters of SHA-256 of
 `kagura-public-mcp-cname-v1:` + token, proof zone at most 200 characters; 20
 verify calls per workspace per hour; 6 activation
 attempts per workspace per day; host names 4–234 characters; permission call 4
-concurrent lookups per process and 3 s.
+concurrent lookups per process and 3 s; claims list 10,000 rows, 1 read per
+process and 5 s.
 
 ## Before switching on
 
@@ -852,6 +856,11 @@ installation-bound command also carries `client_id` (the browser client) and
 | `public_mcp_domain_tls_report_stored` | info | `domain_id`, `status` | an edge certificate report was stored |
 | `public_mcp_domain_tls_report_refused` | warning (`disabled`: debug) | `reason`, `domain_id` (when known) | an edge certificate report was refused |
 | `public_mcp_domain_tls_report_purge_failed` | error | `error_type` | the maintenance pass could not delete expired reports; the run goes on |
+| `public_mcp_domain_claims_listed` | debug | `count` | a claims list was answered |
+| `public_mcp_domain_claims_refused` | warning (`disabled`: debug) | `reason` (`disabled`, `credential`) | a claims list was refused by the reporter gate |
+| `public_mcp_domain_claims_busy` | warning | — | a claims list found the one read of this process running |
+| `public_mcp_domain_claims_over_limit` | warning | — | more held rows than the 10,000 a list carries |
+| `public_mcp_domain_claims_failed` | warning | `error_type` | a claims read failed or took longer than 5 s |
 
 No log line, usage event, job count or audit row carries a host name, a token,
 a CNAME target, a DNS answer, a resolved address or the `Origin` of an alias
@@ -1104,11 +1113,12 @@ Times carry an offset; KMC stores and shows them in UTC.
 **The binding.** A report names the claim's `domain_id`, its canonical
 `hostname` and its `endpoint_id`, and is accepted only for a claim in state
 `active` or `suspended`: a `pending` claim holds nothing, so no certificate can
-be its own. The reporter reads that tuple from the operator command, which runs
-where the API runs: `python -m src.cli.public_mcp_domains show --hostname <name>`
-lists every row of the name with its `domain_id`, `state`, `endpoint_id`,
-`created_at` and `check_seq`. Read it right before the probe and again after
-it, and skip the report when the row changed. A successful permission call alone
+be its own. The reporter reads that tuple from the claims list ("Claims list for
+an edge agent"), or by hand from the operator command, which runs where the API
+runs: `python -m src.cli.public_mcp_domains show --hostname <name>` lists every
+row of the name with its `domain_id`, `state`, `endpoint_id`, `created_at` and
+`check_seq`. Read it right before the probe and again after it, and skip the
+report when the row changed (another `domain_id` or `check_seq`). A successful permission call alone
 is never evidence of a certificate.
 
 **Freshness and retries.** `valid_until` is at most five minutes after
@@ -1159,3 +1169,76 @@ credential set and the table missing, the report route and the owner
 observation of a live domain answer errors, and the maintenance pass logs
 `public_mcp_domain_tls_report_purge_failed` on every run (its domain checks
 still run).
+
+### Claims list for an edge agent
+
+An edge agent that manages certificates for the custom domains (#2993), for
+example by registering each claimed host name with a CDN, reads which names
+are claimed and in which state from one internal route instead of the operator
+command. The list never authorizes serving; the permission call and the alias
+statement decide that at request time.
+
+**The route.** `GET /internal/public-mcp-domains/claims`, not in the OpenAPI
+document, with the reporter's credential: one
+`Authorization: Bearer <MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN>` header. It is
+internal like the report route and is reached the same way, for example
+`http://api-blue:8080/internal/public-mcp-domains/claims`. Query parameters are
+ignored (no filter in version 1). The gate is the report's, in the same order,
+and runs no statement:
+
+| Answer | When |
+|---|---|
+| `404` | not configured: `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` empty, or `MCP_PUBLIC_DOMAINS_ENABLED` or `MCP_PUBLIC_ENDPOINTS_ENABLED` off |
+| `401` | no `Authorization` header, more than one, or another credential |
+| `503` | the one claims read of this process is running (a call never waits for it); the read took longer than 5 s; a database or other error; more than 10,000 held rows |
+| `200` | the list, with `Cache-Control: no-store` |
+
+Every refusal has an empty body. On a `503` keep the previous list and ask
+again at the next poll: the list is never cut short, so an agent that removes
+records missing from the list never removes one because of a bound.
+
+**The shape.** Only the rows that hold their name, `active` (served while
+its lease runs) and `suspended` (held, not served), ordered by `hostname`
+then `domain_id`. A `pending` claim holds nothing and a `released` or deleted
+one is not listed.
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-24T09:00:00.123456Z",
+  "claims": [
+    {
+      "hostname": "mcp.example.com",
+      "state": "active",
+      "domain_id": "8d0f6c1e-2c4b-4c47-9f39-3a3a1c1f2b10",
+      "endpoint_id": "e0f1a2b3-c4d5-4e6f-8a7b-9c0d1e2f3a4b",
+      "check_seq": 42,
+      "created_at": "2026-11-01T12:30:05Z"
+    }
+  ]
+}
+```
+
+`generated_at` and `created_at` are UTC with a trailing `Z`. `check_seq`
+grows with every update of the row (each completed check, a suspension, a
+reinstatement):
+an agent that keeps the last value sees that a claim changed without
+comparing every field. The row has no update time; `check_seq` is the change
+indicator. `created_at` is the claim time. `domain_id`, `hostname` and
+`endpoint_id` are the tuple an edge certificate report names.
+
+**Version policy.** `schema_version` is `1`. A new key may be added to the
+envelope or to a claim within the same version; ignore keys you do not know.
+Renaming or removing a key, or changing a key's meaning, bumps the version.
+
+**Polling and records.** Poll about once a minute; one read per process at a
+time keeps the call cheap. Key the agent's records on the `hostname`: a name
+held by one claim at a time is unique in the list. A released name claimed
+again later is a new row with the same `hostname` and a new `domain_id` (and a
+later `created_at`); treat a changed `domain_id` as a new claim (for example
+start its certificate report from `unreported`). A name absent from a `200`
+list is no longer held.
+
+**Logs.** A list is logged at debug level as `public_mcp_domain_claims_listed`
+with the row count only; refusals, the busy case, the bound and failures as
+in "Audit and log events". No line carries a host name or the credential.
