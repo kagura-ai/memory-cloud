@@ -406,6 +406,8 @@ def owns_resource_point(memory: Memory) -> bool:
     ``details.resource_id`` alone does not say so: ``remember(external_id=...)``
     sets it on memories the API wrote, whose point is their own id. An indexer
     row carries the full natural key and names the point derived from it.
+    ``models.memory.resource_owned_predicate`` is the SQL counterpart the
+    automated passes exclude such rows with (#2996).
     """
     return names_own_resource_point(
         memory.summary_embedding_id,
@@ -1739,7 +1741,13 @@ class ResourceIndexer:
                     type=memory_type,
                     # P0-2: Fix - use 'is not None' to allow importance=0.0
                     importance=event.importance if event.importance is not None else 0.6,
-                    scope="working",
+                    # #2996: the source owns the row's lifecycle, so it is
+                    # persistent from creation, stamped as PROMOTE stamps a
+                    # promotion. Every page change creates a new row (a new
+                    # version), so the create branch is the only place; the
+                    # rows created working before are moved by f62.
+                    scope="persistent",
+                    promoted_at=utcnow(),
                     source=INDEXER_SOURCE,  # Issue #262: Track provenance
                     # Issue #887: server-stamped provenance — connector/external
                     # ingestion is 'connector', never client-set. (Trust is

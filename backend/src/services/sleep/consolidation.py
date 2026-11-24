@@ -37,6 +37,7 @@ from models.memory import (
     DELETED_BY_SLEEP_ARCHIVE,
     Memory,
     not_pinned_predicate,
+    not_resource_owned_predicate,
     not_tool_triggered_predicate,
 )
 from repositories.memory import MemoryRepository
@@ -568,8 +569,15 @@ class ConsolidationPhase(LLMSpendTracker):
             memory_id,
             deleted_by=DELETED_BY_SLEEP_ARCHIVE,
             # Tool guardrails share the exemption: an archived guardrail would
-            # silently stop firing in every client hook.
-            only_if=and_(not_pinned_predicate(), not_tool_triggered_predicate()),
+            # silently stop firing in every client hook. #2996: a row the
+            # resource indexer owns is the source's to remove; it can become
+            # one between the fetch and here (the indexer re-points a
+            # ``remember(external_id)`` row it matches by natural key).
+            only_if=and_(
+                not_pinned_predicate(),
+                not_tool_triggered_predicate(),
+                not_resource_owned_predicate(),
+            ),
         )
         if stamped == 0:
             logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
@@ -648,6 +656,11 @@ class ConsolidationPhase(LLMSpendTracker):
             not_pinned_predicate(),
             # Tool guardrails: same exemption, the guardrail lane.
             not_tool_triggered_predicate(),
+            # #2996: the source owns a resource-indexed row's lifecycle. The
+            # indexer writes its rows persistent; this also covers one still
+            # working (written before f62, or a rollback undid an earlier
+            # promotion of it).
+            not_resource_owned_predicate(),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))

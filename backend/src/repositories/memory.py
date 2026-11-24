@@ -20,6 +20,7 @@ from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
 from models.memory import (
     SOURCE_TYPE_CONNECTOR,
     Memory,
+    not_resource_owned_predicate,
     pinned_predicate,
     tool_triggered_predicate,
 )
@@ -825,6 +826,8 @@ class MemoryRepository(BaseRepository[Memory]):
                 Memory.user_id == user_id,
                 Memory.scope == "working",
                 Memory.created_at < cutoff_date,
+                # #2996: the source owns a resource-indexed row's lifecycle.
+                not_resource_owned_predicate(),
             )
             .order_by(Memory.importance, Memory.last_used_at)
         )

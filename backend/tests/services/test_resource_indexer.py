@@ -367,6 +367,50 @@ class TestResourceIndexerNamedVectorUpsert:
         return _mock_db(db)
 
     @pytest.mark.asyncio
+    async def test_apply_upsert_creates_a_persistent_row(self, indexer, mock_db):
+        """#2996: the source owns an indexed row's lifecycle, so the row is
+        persistent from creation, stamped like a promotion (``promoted_at``)."""
+        before = utcnow()
+
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            self.context,
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        assert memory.scope == "persistent"
+        assert memory.promoted_at is not None
+        assert before <= memory.promoted_at <= utcnow()
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_update_path_leaves_scope_as_it_is(self):
+        """#2996: only the create branch sets the scope; a re-index of a row
+        keeps its scope and promotion stamp (the f62 migration moved the old
+        working rows)."""
+        existing_memory = _indexed_row()
+        existing_memory.scope = "working"
+        existing_memory.promoted_at = None
+        db = self._db_with_existing(existing_memory)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            db.upsert_context,
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        assert existing_memory.scope == "working"
+        assert existing_memory.promoted_at is None
+
+    @pytest.mark.asyncio
     async def test_apply_upsert_update_path_projects_lineage(self):
         """#896: the UPDATE (re-index) branch also projects worker lineage onto
         the existing memory's details + source_uri."""

@@ -46,8 +46,10 @@ from models.memory import (
     MEMORY_TYPE_TIME,
     Memory,
     not_pinned_predicate,
+    not_resource_owned_predicate,
     not_tool_triggered_predicate,
     pinned_predicate,
+    resource_owned_predicate,
     tool_triggered_predicate,
 )
 from repositories.neural_edge import NeuralEdgeRepository
@@ -813,6 +815,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
         Tool guardrails (``details.tool_trigger``) are the third deterministic
         lane (``load_guardrails``): merge folds only tags, so a guardrail loser
         would silently stop firing in every client hook.
+
+        #2996: rows the resource indexer owns (``resource_owned_predicate``)
+        belong to their source, which alone removes or replaces them. They are
+        also no longer embedded here, one embedding call each per run.
         """
         stmt = (
             select(Memory)
@@ -826,6 +832,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 # #1524: time memories are served by their trigger window, not
                 # their summary — a same-summary occurrence is not a duplicate.
                 Memory.type != MEMORY_TYPE_TIME,
+                # #2996: a row the resource indexer owns is the source's: two
+                # documents that read alike are two records, and the source
+                # alone removes either.
+                not_resource_owned_predicate(),
             )
             # #1868: ``updated_at`` is NULL until a memory is edited, and
             # PostgreSQL sorts NULLs first under DESC — the bare column put
@@ -1551,9 +1561,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
         side. ``SELECT ... FOR UPDATE`` inside the phase transaction serializes
         against a concurrent ``update_memory``/``forget`` so the state read here
         is the state the merge would act on. Returns True (refuse) when either
-        row is now pinned, soft-deleted, missing, or (#1524) a time memory —
+        row is now pinned, soft-deleted, missing, (#1524) a time memory —
         ``update_memory`` can flip ``type`` in the same window, and a merge would
-        drop the loser's trigger window from ``recall_upcoming``.
+        drop the loser's trigger window from ``recall_upcoming`` — or (#2996) a
+        row the resource indexer owns (it re-points a ``remember(external_id)``
+        row it matches by natural key).
         """
         rows = (
             await self.db.execute(
@@ -1561,6 +1573,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     Memory.id,
                     pinned_predicate().label("pinned"),
                     tool_triggered_predicate().label("tool_triggered"),
+                    resource_owned_predicate().label("resource_owned"),
                     Memory.deleted_at,
                     Memory.type,
                 )
@@ -1580,6 +1593,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 reasons.append(f"{label}_pinned")
             elif row.tool_triggered:
                 reasons.append(f"{label}_tool_triggered")
+            elif row.resource_owned:
+                reasons.append(f"{label}_resource_owned")
             elif row.type == MEMORY_TYPE_TIME:
                 reasons.append(f"{label}_time")
         if not reasons:

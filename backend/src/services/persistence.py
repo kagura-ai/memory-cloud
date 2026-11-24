@@ -33,15 +33,19 @@ What this module states, all read off the code that enforces it:
 DELIBERATELY NOT CLAIMED — this is not a retention SLA:
 
 * Near-duplicate merge (``services/sleep/dedup_merge.py``) soft-deletes the
-  loser of a >= 0.98-cosine pair with **no age, scope, or adoption gate**;
-  ``_fetch_active_memories`` selects on user/workspace/context,
-  ``deleted_at IS NULL`` and two lane exemptions only (``delivery_mode=
-  'always'`` rows never enter candidacy, #1519, and since #1523 the same
-  predicate exempts them from consolidation archive and importance
-  re-evaluation too — ``pinned=True`` below carries that promise; ``type='time'``
-  rows never do either, #1524, since the Time Memory lane serves them by
-  trigger window, not summary). An unpinned, non-time memory written minutes
-  ago can lose a merge the
+  loser of a pair with **no age, scope, or adoption gate**: a pair at or above
+  ``SLEEP_DEDUP_SIMILARITY_THRESHOLD`` cosine (default 0.92) that the LLM judge
+  calls a duplicate, or, when no judge runs, a pair at or above 0.98
+  (``AUTO_MERGE_THRESHOLD``). ``_fetch_active_memories`` selects on
+  user/workspace/context, ``deleted_at IS NULL`` and the lane exemptions only
+  (``delivery_mode='always'`` rows never enter candidacy, #1519, and since
+  #1523 the same predicate exempts them from consolidation archive and
+  importance re-evaluation too — ``pinned=True`` below carries that promise;
+  ``type='time'`` rows never do either, #1524, since the Time Memory lane
+  serves them by trigger window, not summary; tool guardrails; and, since
+  #2996, rows the resource indexer owns, which are persistent from creation
+  and whose lifecycle belongs to their source). An unpinned, non-time memory
+  written minutes ago can lose a merge the
   same night (its tags and edges transfer to the winner, but its id stops
   resolving). Any global "nothing you write today can be removed" wording would
   therefore be false, which is why the age field is named for consolidation and

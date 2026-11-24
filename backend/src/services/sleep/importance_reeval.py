@@ -30,9 +30,13 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import update_memory_payload_in_qdrant
-from models.memory import Memory, not_pinned_predicate, not_tool_triggered_predicate
+from models.memory import (
+    Memory,
+    not_pinned_predicate,
+    not_resource_owned_predicate,
+    not_tool_triggered_predicate,
+)
 from services.llm_service import LLMService, billed_usage
-from services.resource_indexer import owns_resource_point
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     IMPORTANCE_REEVAL_SYSTEM,
@@ -150,9 +154,6 @@ class ImportanceReevalPhase(LLMSpendTracker):
 
                 # EMA smoothing: new = α * llm + (1-α) * old
                 old_importance = old_memory.importance
-                # Read before the UPDATE below: it expires the row's computed
-                # resource columns, which an async session cannot load lazily.
-                resource_row = owns_resource_point(old_memory)
                 smoothed = alpha * new_score + (1 - alpha) * old_importance
                 smoothed = max(0.0, min(1.0, smoothed))  # Clamp to [0, 1]
 
@@ -172,6 +173,10 @@ class ImportanceReevalPhase(LLMSpendTracker):
                         # Tool guardrails: load_guardrails orders by the
                         # importance the author set, so it is never rescored.
                         not_tool_triggered_predicate(),
+                        # #2996: the source owns a resource-indexed row's
+                        # importance (the event carries it); a row the indexer
+                        # took over since the fetch is refused here.
+                        not_resource_owned_predicate(),
                     )
                     .values(importance=smoothed, updated_at=utcnow())
                 )
@@ -179,20 +184,16 @@ class ImportanceReevalPhase(LLMSpendTracker):
                     logger.info("importance_reeval_skipped_since_fetch", memory_id=str(memory_id))
                     continue
 
-                # Update Qdrant payload. #2065: not for a resource-indexer row.
-                # Its point is the indexer's (``Memory.point_id``), whose
-                # payload carries no importance, and its id names no point of
-                # its own (or a stray label one, #2053): a write there was
-                # lost. Nor is it handed to the reindex, which would rebuild
-                # the whole indexer point for a change the point does not hold.
+                # Update Qdrant payload. The row's point is under its id: a row
+                # the resource indexer owns (whose point is the indexer's,
+                # #2065) never gets here since #2996.
                 try:
-                    if not resource_row:
-                        await update_memory_payload_in_qdrant(
-                            memory_id=memory_id,
-                            payload_updates={"importance": smoothed},
-                            collection_name=self.collection_name or "kagura_memories",
-                            cascade_chunks=await self._chunk_cascade(context_id),
-                        )
+                    await update_memory_payload_in_qdrant(
+                        memory_id=memory_id,
+                        payload_updates={"importance": smoothed},
+                        collection_name=self.collection_name or "kagura_memories",
+                        cascade_chunks=await self._chunk_cascade(context_id),
+                    )
                 except Exception as e:
                     logger.warning(
                         "importance_qdrant_update_failed",
@@ -200,8 +201,7 @@ class ImportanceReevalPhase(LLMSpendTracker):
                         error=str(e),
                     )
 
-                if not resource_row:
-                    result.changed_memory_ids.add(memory_id)
+                result.changed_memory_ids.add(memory_id)
                 updated_count += 1
                 if reporter and report_id:
                     await reporter.add_action(
@@ -259,6 +259,8 @@ class ImportanceReevalPhase(LLMSpendTracker):
             not_pinned_predicate(),
             # Tool guardrails: same rule for the load_guardrails lane.
             not_tool_triggered_predicate(),
+            # #2996: the source owns a resource-indexed row's importance.
+            not_resource_owned_predicate(),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))

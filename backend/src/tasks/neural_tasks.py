@@ -201,6 +201,7 @@ async def consolidation_task() -> JobResult:
     try:
         async for db in get_db():
             from services.memory_service import MemoryService
+            from services.resource_indexer import owns_resource_point
 
             memory_repo = MemoryRepository(db)
             graph_repo = GraphRepository(db)
@@ -210,6 +211,8 @@ async def consolidation_task() -> JobResult:
             total_users = 0
             total_promoted = 0
             total_deleted = 0
+            # #2996: rows the resource indexer owns, left to their source.
+            total_resource_skipped = 0
 
             # #2385: every user with a graph_memory row, one id-ordered page
             # per transaction.
@@ -250,6 +253,15 @@ async def consolidation_task() -> JobResult:
                         except (ConflictError, ManagedDataLockedError):
                             # A protected target must not abort retention of
                             # ordinary contexts sharing this scheduled page.
+                            continue
+                        # #2996: the source owns a resource-indexed row's
+                        # lifecycle, whatever the context's settings: neither
+                        # promoted nor deleted here (the indexer writes its
+                        # rows persistent; one still working was written
+                        # before f62, or a rollback undid an earlier Sleep
+                        # promotion of it).
+                        if owns_resource_point(memory):
+                            total_resource_skipped += 1
                             continue
                         age_days = (utcnow() - memory.created_at).days
 
@@ -345,8 +357,14 @@ async def consolidation_task() -> JobResult:
                 users=total_users,
                 promoted=total_promoted,
                 deleted=total_deleted,
+                resource_skipped=total_resource_skipped,
             )
-            return {"users": total_users, "promoted": total_promoted, "deleted": total_deleted}
+            return {
+                "users": total_users,
+                "promoted": total_promoted,
+                "deleted": total_deleted,
+                "resource_skipped": total_resource_skipped,
+            }
 
     except Exception as e:
         logger.error("consolidation_task_failed", error=str(e), exc_info=True)
