@@ -468,11 +468,20 @@ async def _create_context_workspace(
 
 
 async def _workspace_ref(db: Any, workspace_id: UUID) -> dict[str, Any]:
-    """``{id, name}`` of the workspace a context was created in (#3002)."""
+    """``{id, name}`` of the workspace a context is created in (#3002).
+
+    Advisory: a failed read leaves the name ``None`` (logged) and never fails
+    the call.
+    """
     from models.auth import Workspace
 
-    workspace = await db.get(Workspace, workspace_id)
-    return {"id": str(workspace_id), "name": workspace.name if workspace else None}
+    try:
+        workspace = await db.get(Workspace, workspace_id)
+        name = workspace.name if workspace else None
+    except Exception as e:  # noqa: BLE001 - the name is advisory
+        logger.warning("create_context_workspace_name_failed: %s", type(e).__name__)
+        name = None
+    return {"id": str(workspace_id), "name": name}
 
 
 async def handle_create_context(
@@ -562,6 +571,10 @@ async def handle_create_context(
                         help=f"Supported models: {', '.join(offered)}",
                     )
 
+            # #3002: the workspace's name for the reply, read before the
+            # context is created so nothing after the commit can fail the reply.
+            workspace_ref = await _workspace_ref(db, workspace_id)
+
             # Create context
             context_service = ContextService(db)
             context = await execute_with_timeout(
@@ -597,7 +610,7 @@ async def handle_create_context(
                             "status": "success",
                             "message": f"Context '{args['name']}' created successfully.",
                             **_context_response_fields(context),
-                            "workspace": await _workspace_ref(db, workspace_id),
+                            "workspace": workspace_ref,
                         }
                     ),
                 )
@@ -1276,7 +1289,9 @@ async def _list_contexts_across_workspaces(
     async for db in get_db():
         try:
             context_service = ContextService(db)
-            workspaces = await account_workspaces(db, user_id)
+            # A workspace-scoped key binds its connection, so it never gets
+            # here; confine to the key's workspace all the same.
+            workspaces = await account_workspaces(db, user_id, only=get_mcp_key_workspace_scope())
             skipped: list[dict[str, Any]] = []
             listed: list[tuple[Any, Any]] = []  # (context, workspace)
             for workspace in workspaces:
