@@ -634,7 +634,7 @@ python -m src.cli.public_mcp_domains release --domain-id <id> --skip-cooldown --
 | `MCP_PUBLIC_DOMAINS_REASSIGN_COOLDOWN_HOURS` | `168` | Hours a released name stays closed to other workspaces (0–2160). |
 | `MCP_PUBLIC_DOMAINS_MAX_PER_WORKSPACE` | `3` | Domains (`pending`, `active`, `suspended`) per workspace (1–50). |
 | `MCP_PUBLIC_DOMAINS_CNAME_PROOF_ZONE` | *(empty)* | A zone of your own for the row-specific CNAME targets ("The CNAME proof"). Empty: off, answers and lookups as without it. Set: a host name outside the special-use suffixes, at most 200 characters, not an application host nor under one; reserved for claims. Needs the wildcard record `*.<zone>`. |
-| `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ("Edge certificate reports") and of the claims list ("Claims list for an edge agent"). Empty: every report and every claims list is `404`, nothing reads or writes `public_mcp_domain_tls_reports`, every certificate is `unreported`. No blanks; under `ENVIRONMENT=production` at least 32 characters and not another service credential. Never logged. |
+| `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` | *(empty)* | Bearer credential of the edge certificate reporter ("Edge certificate reports") and of the claims list ("Claims list for an edge agent"). Empty: every report and every claims list is `404`, nothing reads or writes `public_mcp_domain_tls_reports`, every certificate is `unreported`. Setting it switches the reports and the certificate observation on, so apply the revision `f58_2941_domain_tls_reports` first, also when only the claims list is wanted. No blanks; under `ENVIRONMENT=production` at least 32 characters and not another service credential. Never logged. |
 | `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` | `false` | Experimental. The owner's claim, verify and remove through an installation's browser client ("Installation-bound owner operations"), advertised as `public.domains.operations.v1`. Takes effect only while `public.domains.observation.v1` is advertised (`OIDC_ENABLED`, `MCP_PUBLIC_ENDPOINTS_ENABLED`, `SYNC_INTEGRATIONS_ENABLED`, `MCP_PUBLIC_USAGE_BUDGET_ENABLED` and this file's switch); off: the three routes answer `404` before authentication and run no statement. No cross-check at start-up, so turning `MCP_PUBLIC_DOMAINS_ENABLED` off alone still closes everything. |
 
 A malformed host name in the routing target, an application host, a
@@ -1193,14 +1193,23 @@ and runs no statement:
 | `503` | the one claims read of this process is running (a call never waits for it); the read took longer than 5 s; a database or other error; more than 10,000 held rows |
 | `200` | the list, with `Cache-Control: no-store` |
 
+**Before setting the credential.** The one credential switches on the
+certificate reports too: once it is set (with both switches on), the report
+route and the owner's certificate observation read
+`public_mcp_domain_tls_reports`. Apply the revision `f58_2941_domain_tls_reports`
+before setting it, even when only the claims list is wanted ("Edge certificate
+reports", "Data and migration"). The claims list itself reads only
+`public_mcp_domains`.
+
 Every refusal has an empty body. On a `503` keep the previous list and ask
 again at the next poll: the list is never cut short, so an agent that removes
 records missing from the list never removes one because of a bound.
 
 **The shape.** Only the rows that hold their name, `active` (served while
-its lease runs) and `suspended` (held, not served), ordered by `hostname`
-then `domain_id`. A `pending` claim holds nothing and a `released` or deleted
-one is not listed.
+its lease runs) and `suspended` (held, not served), ordered by `hostname` in
+byte order, then by `domain_id` (the same order on every database, whatever its
+collation). A `pending` claim holds nothing and a `released` or deleted one is
+not listed.
 
 ```json
 {
@@ -1219,9 +1228,11 @@ one is not listed.
 }
 ```
 
-`generated_at` and `created_at` are UTC with a trailing `Z`. `check_seq`
-grows with every update of the row (each completed check, a suspension, a
-reinstatement):
+`generated_at` and `created_at` are ISO 8601 instants in UTC with a trailing
+`Z`; fractional seconds are present only when they are not zero
+(`2026-11-01T12:30:05Z`, `2026-11-24T09:00:00.123456Z`), so parse them with a
+standard ISO 8601 parser rather than a fixed format. `check_seq` grows with
+every update of the row (each completed check, a suspension, a reinstatement):
 an agent that keeps the last value sees that a claim changed without
 comparing every field. The row has no update time; `check_seq` is the change
 indicator. `created_at` is the claim time. `domain_id`, `hostname` and

@@ -239,15 +239,16 @@ CLAIMS_TIMEOUT_SECONDS: float = 5
 _CLAIMS_SLOT = asyncio.Semaphore(1)
 
 # The held states as literals, so the statement carries the predicate of the
-# partial index ``ux_public_mcp_domains_hostname_held`` (also under a generic plan).
+# partial indexes on held rows (also under a generic plan).
 _HELD = PublicMcpDomain.state.in_([literal(state, literal_execute=True) for state in HELD_STATES])
 
 
 def claims_statement() -> Select[str, str, UUID, UUID, int, datetime]:
-    """The one claims read: six columns of the held rows, ordered, at most ``CLAIMS_LIMIT + 1``.
+    """The one claims read: six columns of the held rows, at most ``CLAIMS_LIMIT + 1``.
 
-    No entity load and no lock; ``ux_public_mcp_domains_hostname_held`` serves
-    the predicate and the order.
+    No entity load, no lock and no ``ORDER BY``: a database orders text by its
+    collation, so the answer is sorted in byte order after the read (a read
+    over the limit is refused whole, so which rows it stopped at never matters).
     """
     return (
         select(
@@ -259,7 +260,6 @@ def claims_statement() -> Select[str, str, UUID, UUID, int, datetime]:
             PublicMcpDomain.created_at,
         )
         .where(_HELD)
-        .order_by(PublicMcpDomain.hostname, PublicMcpDomain.id)
         .limit(CLAIMS_LIMIT + 1)
     )
 
@@ -313,6 +313,8 @@ async def list_claims(request: Request) -> Response:
     if len(claims) > CLAIMS_LIMIT:
         logger.warning("public_mcp_domain_claims_over_limit")
         return Response(status_code=503)
+    # Byte (code point) order on every database, whatever its collation.
+    claims.sort(key=lambda claim: (str(claim["hostname"]), str(claim["domain_id"])))
     logger.debug("public_mcp_domain_claims_listed", count=len(claims))
     return JSONResponse(
         {

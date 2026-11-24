@@ -297,7 +297,7 @@ def _sql(statement: Any) -> str:
     )
 
 
-async def test_the_statement_reads_the_held_rows_in_order_without_a_lock(
+async def test_the_statement_reads_the_held_rows_without_an_order_or_a_lock(
     configured, sessions
 ) -> None:
     await _list()
@@ -309,9 +309,26 @@ async def test_the_statement_reads_the_held_rows_in_order_without_a_lock(
         "public_mcp_domains.created_at FROM public_mcp_domains"
     ), sql
     assert "WHERE public_mcp_domains.state IN ('active', 'suspended')" in sql
-    assert "ORDER BY public_mcp_domains.hostname, public_mcp_domains.id" in sql
+    assert "ORDER BY" not in sql  # sorted after the read, in byte order
     assert sql.endswith(f"LIMIT {routes.CLAIMS_LIMIT + 1}")
     assert "FOR UPDATE" not in sql and "FOR SHARE" not in sql
+
+
+async def test_the_list_is_in_byte_order_of_host_name_then_domain_id(configured, sessions):
+    """Not the database collation: ``a-c`` (``-`` is 0x2d) sorts before ``ab``."""
+    same = [_row("same.example.org"), _row("same.example.org")]
+    sessions.rows = [_row("ab.example.org"), *same, _row("a-c.example.org"), _row("a.example.org")]
+    body = (await _list()).json()
+    keys = [(claim["hostname"], claim["domain_id"]) for claim in body["claims"]]
+    assert [name for name, _ in keys] == [
+        "a-c.example.org",
+        "a.example.org",
+        "ab.example.org",
+        "same.example.org",
+        "same.example.org",
+    ]
+    assert keys[3:] == sorted((row.hostname, str(row.id)) for row in same)
+    assert keys == sorted(keys)
 
 
 async def test_the_success_line_carries_the_count_only(configured, sessions, caplog) -> None:

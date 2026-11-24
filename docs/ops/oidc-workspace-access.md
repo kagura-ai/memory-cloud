@@ -125,9 +125,12 @@ uses the deployment's existing trusted-proxy policy, never raw forwarded headers
 (see [OIDC provider](oidc-provider.md#protocol-burst-limits)).
 
 The budget does not depend on a workspace or a plan. The workspace ID in the
-path does not choose the bucket, and every plan gets the same budget: one per
-operation (`workspace-list`, `workspace-access`), first per peer, then per
-client and user. A client application that reads many workspaces paces its
+path does not choose the bucket, and every plan gets the same budget per
+operation (`workspace-list`, `workspace-access`). Each request is counted per
+peer; over the peer budget, a request with an access token this server issued
+is admitted against a bucket of its client and user instead. That bucket gives
+more allowance to a client whose users share a peer; it is not a second limit
+on top of the first. A client application that reads many workspaces paces its
 reads instead of re-reading all of them every minute. For example, it reads a
 workspace's `/access` once, caches it, and reads it again when it acts on that
 workspace. On a 429 it waits for `Retry-After` before it retries. An operator

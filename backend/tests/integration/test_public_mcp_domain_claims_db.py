@@ -1,11 +1,11 @@
 """The edge agent's claims list on PostgreSQL (#2993).
 
 ``GET /internal/public-mcp-domains/claims`` lists exactly the ``active`` and
-``suspended`` rows, ordered by host name then domain id, in the versioned
+``suspended`` rows, in byte order of host name then domain id, in the versioned
 shape; a pending, released or deleted row is absent, and a name released and
 claimed again shows only its new row. Without the gate no statement runs, the
 read holds no lock, more rows than ``CLAIMS_LIMIT`` answer 503, and the
-partial index on the held rows serves the statement. Every test uses its own
+statement is answered from an index, not a sequential scan. Every test uses its own
 host names and deletes its rows.
 """
 
@@ -161,12 +161,18 @@ async def test_a_name_claimed_again_lists_only_its_new_row(edge):
     assert [claim["domain_id"] for claim in listed] == [str(new.id)]
 
 
-async def test_the_list_is_ordered_by_host_name_then_domain_id(edge):
-    for label in ("zulu", "alpha", "mike"):
-        await add(edge, hostname(label), "active")
+async def test_the_list_is_in_byte_order_of_host_name_then_domain_id(edge):
+    """Byte order whatever the collation: ``a-c`` (``-`` is 0x2d) before ``ab``."""
+    tag = "o" + uuid4().hex[:10]
+    rows = [
+        await add(edge, f"{tag}ab.example.org", "active"),
+        await add(edge, f"{tag}a-c.example.org", "suspended"),
+        await add(edge, f"{tag}a.example.org", "active"),
+    ]
     body = (await claims(edge)).json()
+    listed = [claim["hostname"] for claim in mine(body, rows)]
+    assert listed == [f"{tag}a-c.example.org", f"{tag}a.example.org", f"{tag}ab.example.org"]
     keys = [(claim["hostname"], claim["domain_id"]) for claim in body["claims"]]
-    assert len(keys) >= 3
     assert keys == sorted(keys)
 
 
@@ -217,7 +223,9 @@ async def test_more_rows_than_the_limit_is_503(edge):
     assert (r.status_code, r.content) == (503, b"")
 
 
-async def test_the_partial_index_on_held_rows_serves_the_statement(edge):
+async def test_the_statement_is_answered_from_an_index(edge):
+    """With sequential scans off the plan reads an index of the table (which one
+    is the planner's choice), never a sequential scan of it."""
     await add(edge, hostname("index"), "active")
     sql = str(
         routes.claims_statement().compile(
@@ -228,4 +236,5 @@ async def test_the_partial_index_on_held_rows_serves_the_statement(edge):
         await db.execute(text("SET LOCAL enable_seqscan = off"))
         plan = "\n".join(row[0] for row in (await db.execute(text("EXPLAIN " + sql))).all())
         await db.rollback()
-    assert "ux_public_mcp_domains_hostname_held" in plan, plan
+    assert "Seq Scan on public_mcp_domains" not in plan, plan
+    assert "Index" in plan and "public_mcp_domains" in plan, plan
