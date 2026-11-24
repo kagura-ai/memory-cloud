@@ -11,7 +11,7 @@ recall (no ``order``, or ``order="relevance"``) is byte-identical to before.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -83,6 +83,18 @@ class TestRowDate:
     def test_created_at_is_the_day_it_renders(self):
         # The day of the rendered UTC value: a naive stored time is UTC.
         assert row_date(_memory(datetime(2026, 9, 1, 23, 59))) == ("2026-09-01", "created")
+
+    @pytest.mark.parametrize(
+        ("created", "day"),
+        [
+            # 23:30 at UTC-5 is 04:30 the next day in UTC.
+            (datetime(2026, 9, 1, 23, 30, tzinfo=timezone(timedelta(hours=-5))), "2026-09-02"),
+            # 00:30 at UTC+9 is 15:30 the previous day in UTC.
+            (datetime(2026, 9, 2, 0, 30, tzinfo=timezone(timedelta(hours=9))), "2026-09-01"),
+        ],
+    )
+    def test_an_aware_created_at_takes_its_utc_day(self, created, day):
+        assert row_date(_memory(created)) == (day, "created")
 
     def test_a_legacy_observed_value_falls_through_to_created(self):
         row = _memory(_day(9, 1))
@@ -356,3 +368,80 @@ class TestHandler:
         item = json.loads(text)["results"][0]
         assert item["date"] == "2026-09-01"
         assert item["tags"] == ["falcon"]
+
+
+# ============================================================================
+# The LLM selector: off under the defaulted include_superseded
+# ============================================================================
+
+
+async def _selector_gate(request: RecallRequest) -> tuple[list[MemoryResponse], Any, AsyncMock]:
+    """The service's real selector gate on a selector-enabled context."""
+    from types import SimpleNamespace
+
+    from models.schemas import SelectorReport
+    from services.memory_service import MemoryService
+    from services.recall_selector import SelectorResult
+    from services.recall_timings import RecallTimings
+
+    page = [
+        _memory(_day(9, 2), content="Body sentence long enough to be its own segment."),
+        _memory(_day(9, 1), content="Another body sentence, long enough as well."),
+    ]
+
+    def selected(*_a: Any, **kw: Any) -> SelectorResult:
+        rows = kw["responses"]
+        return SelectorResult(
+            responses=rows[:1],
+            report=SelectorReport(applied=True, model="m", kept=1, dropped=len(rows) - 1),
+        )
+
+    run = AsyncMock(side_effect=selected)
+    with (
+        patch("services.recall_selector.run_selector", new=run),
+        patch(
+            "services.llm_selector_policy.llm_selector_effective", new=AsyncMock(return_value=True)
+        ),
+    ):
+        responses, report = await MemoryService(MagicMock())._recall_apply_llm_selector(
+            request,
+            page,
+            llm_selector=True,
+            search_config=SimpleNamespace(llm_selector_enabled=True),
+            cross_context=False,
+            selection_config=None,
+            degradation={},
+            user_id="u",
+            context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+            timings=RecallTimings(),
+        )
+    return responses, report, run
+
+
+class TestSelector:
+    @pytest.mark.asyncio
+    async def test_date_order_does_not_run_the_selector(self):
+        # order="date" defaults include_superseded to true, and the selector
+        # never runs with include_superseded: the page is the unselected one.
+        request = RecallRequest(query="q", full=3, order="date")
+        responses, report, run = await _selector_gate(request)
+        run.assert_not_awaited()
+        assert report is None
+        assert len(responses) == 2
+        reply = mcp_memory._recall_reply(
+            RecallResponse(results=responses, selector=report),
+            _context(),
+            "compact",
+            20_000,
+            order="date",
+        )
+        assert "selector" not in reply
+
+    @pytest.mark.asyncio
+    async def test_date_order_with_include_superseded_false_runs_it(self):
+        request = RecallRequest(query="q", full=3, order="date", include_superseded=False)
+        responses, report, run = await _selector_gate(request)
+        run.assert_awaited_once()
+        assert report is not None and report.applied is True
+        assert len(responses) == 1

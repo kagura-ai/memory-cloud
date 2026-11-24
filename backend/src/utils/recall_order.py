@@ -7,11 +7,12 @@ sorted by it, ties keeping relevance order (a stable sort).
 
 A row's day is the event's own day (``event_start``), else the day the fact
 was stated (``observed_at``), else the day of ``created_at``, each read the
-way the row already renders it (UTC, no timezone conversion of its own).
+way the row already renders it, in UTC.
 """
 
 from __future__ import annotations
 
+from datetime import UTC
 from typing import Any, Literal
 
 from utils.datetime import to_utc_iso
@@ -42,8 +43,12 @@ def row_date(row: Any) -> tuple[str, DateSource]:
     # a legacy value that does not falls through to created_at.
     if isinstance(observed_at, str) and observed_weekday(observed_at) is not None:
         return observed_at[:10], "observed"
-    created = to_utc_iso(row.created_at)
-    return (created or "")[:10], "created"
+    created = row.created_at
+    # An aware value with another offset is moved to UTC first, so its day is
+    # the UTC day (a naive stored value is UTC already).
+    if created.tzinfo is not None:
+        created = created.astimezone(UTC)
+    return (to_utc_iso(created) or "")[:10], "created"
 
 
 def date_ordered(result: Any) -> Any:

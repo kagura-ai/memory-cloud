@@ -327,17 +327,17 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, date?, date_so
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 100,
-                        "description": "Top results with content (default 3), 1500 chars each.",
+                        "description": "Top results with content (default 3; 0 none), 1500 chars each.",
                     },
                     "max_chars": {
                         "type": "integer",
                         "minimum": 10000,
                         "maximum": 100000,
-                        "description": "Default 20000 chars.",
+                        "description": "Default 20000.",
                     },
                     "use_rerank": {
                         "type": "boolean",
-                        "description": "Omitted: context config; true needs permission, a provider.",
+                        "description": "Omitted: context config; true needs permission + provider.",
                     },
                     "filters": {
                         "type": "object",
@@ -377,7 +377,7 @@ Returns: {confidence: {level, ...}, status, results: [{memory_id, date?, date_so
                     "order": {
                         "type": "string",
                         "enum": ["relevance", "date"],
-                        "description": "date: oldest first, with superseded rows.",
+                        "description": "date: oldest first, superseded rows too.",
                     },
                 },
             },

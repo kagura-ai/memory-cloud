@@ -14,9 +14,11 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SerializerFunctionWrapHandler,
     StrictBool,
     ValidationError,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -617,20 +619,32 @@ class MemoryResponse(TZAwareBaseModel):
     spans: list[SpanRef] | None = None
     # #3004: set only by recall with order="date": the row's day (YYYY-MM-DD,
     # UTC) and where it came from. Absent from every body otherwise, explore's
-    # and reference's included (exclude_if, not only the routes' exclude_none).
+    # included, which serializes this model without exclude_none
+    # (``_omit_unset_date`` below).
     date: str | None = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description="recall with order='date' only: the row's day (YYYY-MM-DD, UTC).",
     )
     date_source: Literal["event", "observed", "created"] | None = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description=(
             "recall with order='date' only: event (event_start), observed "
             "(observed_at) or created (created_at)."
         ),
     )
+
+    # No return annotation on purpose: an annotated wrap serializer replaces
+    # the model's JSON schema with that annotation in the OpenAPI document.
+    @model_serializer(mode="wrap")
+    def _omit_unset_date(self, handler: SerializerFunctionWrapHandler):
+        """#3004: leave ``date`` / ``date_source`` out of the body when unset."""
+        payload = handler(self)
+        if isinstance(payload, dict):
+            if self.date is None:
+                payload.pop("date", None)
+            if self.date_source is None:
+                payload.pop("date_source", None)
+        return payload
 
     class Config:
         from_attributes = True
@@ -955,12 +969,21 @@ class RecallResponse(BaseModel):
         exclude=True,
         description="MCP recall tool only: the optional pointer at list().",
     )
-    # #3004: "date" when the rows were returned oldest first; absent otherwise.
+    # #3004: "date" when the rows were returned oldest first; absent otherwise
+    # (``_omit_unset_order`` below; both recall routes also use exclude_none).
     order: Literal["date"] | None = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description="'date' when the results are oldest first (order='date'); absent otherwise.",
     )
+
+    # No return annotation on purpose: see MemoryResponse._omit_unset_date.
+    @model_serializer(mode="wrap")
+    def _omit_unset_order(self, handler: SerializerFunctionWrapHandler):
+        """#3004: leave ``order`` out of the body when unset."""
+        payload = handler(self)
+        if isinstance(payload, dict) and self.order is None:
+            payload.pop("order", None)
+        return payload
 
 
 class ReferenceRequest(BaseModel):

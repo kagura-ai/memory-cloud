@@ -142,3 +142,63 @@ class TestWire:
     def test_unknown_value_is_422(self):
         response = _app(_rows()).post("/r", json={"query": "q", "order": "newest"})
         assert response.status_code == 422
+
+
+# ============================================================================
+# The share-key /recall: the same request model, the same option
+# ============================================================================
+
+
+SHARE_CTX = uuid4()
+
+
+def _share_client(svc: AsyncMock) -> TestClient:
+    """``share_recall`` behind its response model, with a fixed share-key principal."""
+    from api.routes.share_keys import share_recall
+
+    principal = {
+        "user_id": "owner-1",
+        "role": "share-key",
+        "current_context_id": SHARE_CTX,
+        "current_workspace_id": uuid4(),
+        "share_key_id": 7,
+        "share_key_context_id": SHARE_CTX,
+        "scope": "memory:read",
+    }
+    app = FastAPI()
+
+    @app.post("/share/recall", response_model=RecallResponse, response_model_exclude_none=True)
+    async def route(request: RecallRequest) -> RecallResponse:
+        with patch("api.routes.share_keys.ensure_context_not_capacity_locked", new=AsyncMock()):
+            return await share_recall(request=request, principal=principal, memory_service=svc)
+
+    return TestClient(app)
+
+
+class TestShareKeyRecall:
+    def test_date_order(self):
+        svc = AsyncMock()
+        svc.recall = AsyncMock(return_value=RecallResponse(results=_rows()))
+        response = _share_client(svc).post(
+            "/share/recall", json={"query": "q", "order": "date", "full": 3}
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["order"] == "date"
+        assert [r["summary"] for r in body["results"]] == ["old", "mid", "new"]
+        assert [r["date"] for r in body["results"]] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+        assert [r["date_source"] for r in body["results"]] == ["created", "observed", "created"]
+        # Still the bound context only, and still summaries only (full forced to 0).
+        svc.recall.assert_awaited_once()
+        request, kwargs = svc.recall.await_args.args[0], svc.recall.await_args.kwargs
+        assert kwargs["current_context_id"] == SHARE_CTX
+        assert request.full == 0
+        assert request.order == "date"
+        assert request.include_superseded is True
+
+    def test_unknown_value_is_422(self):
+        svc = AsyncMock()
+        response = _share_client(svc).post("/share/recall", json={"query": "q", "order": "newest"})
+        assert response.status_code == 422
+        svc.recall.assert_not_awaited()
