@@ -623,7 +623,7 @@ class MemoryResponse(TZAwareBaseModel):
     # (``_omit_unset_date`` below).
     date: str | None = Field(
         default=None,
-        description="recall with order='date' only: the row's day (YYYY-MM-DD, UTC).",
+        description="recall with order='date' only: the row's day (YYYY-MM-DD; an event day as stored, the others UTC).",
     )
     date_source: Literal["event", "observed", "created"] | None = Field(
         default=None,
