@@ -30,6 +30,7 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "default_context_keep": "Keep the current default",
         "default_context_hint": (
             "Tools this app calls without naming a context use this one. "
+            "It also decides the workspace this app's connection works in. "
             "You can change it later under Credentials & Integrations."
         ),
         "permissions": {
@@ -103,7 +104,8 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "default_context_keep": "現在の既定を変更しない",
         "default_context_hint": (
             "このアプリがコンテキストを指定せずに呼び出すツールは、ここで選んだ"
-            "コンテキストを使います。あとから「認証情報・連携」で変更できます。"
+            "コンテキストを使います。このアプリの接続が使うワークスペースも、この"
+            "コンテキストで決まります。あとから「認証情報・連携」で変更できます。"
         ),
         "permissions": {
             "read": "メモリーの読み取り",

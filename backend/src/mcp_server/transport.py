@@ -1800,6 +1800,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # global-key auth and would over-confine those (non-key-scoped) callers.
         from mcp_server.tools._default_context import select_default_context
         from mcp_server.tools._helpers import (
+            get_mcp_default_context_selection,
             set_mcp_default_context_selection,
             set_mcp_guardrails_selection,
             set_mcp_key_workspace_scope,
@@ -1853,17 +1854,47 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         except Exception:  # pragma: no cover - defensive; correlation is advisory
             set_correlation(None)
 
+        # #3000: how this request's workspace is decided (``tools._workspace_binding``):
+        # the URL's workspace, else a workspace-scoped key's, else the workspace
+        # of the connection's default context when it passes the check, else
+        # the user's current workspace (unbound). Reset first, so nothing of an
+        # earlier request in the same context survives a refusal below.
+        from mcp_server.tools._helpers import get_mcp_credential_default_context
+        from mcp_server.tools._workspace_binding import (
+            WorkspaceBinding,
+            resolve_default_context_binding,
+            set_mcp_workspace_binding,
+        )
+
+        set_mcp_workspace_binding(None)
+        workspace_id_from_url = scope.get("workspace_id_from_url")
+        binding: WorkspaceBinding
         # Issue #169: For workspace-scoped API keys, use workspace_id from key; otherwise get from user
         if api_key_workspace_id:
             workspace_id = api_key_workspace_id
-        else:
+            binding = "key"
+        elif workspace_id_from_url:
             workspace_id = await _get_user_workspace_id(user_id)
+            binding = "url"
+        else:
+            # #3000: one indexed read, only when a default context is set; a
+            # failed read raises to the 503 below (#1742).
+            default_workspace_id = await resolve_default_context_binding(
+                user_id,
+                get_mcp_default_context_selection(),
+                get_mcp_credential_default_context(),
+            )
+            if default_workspace_id is not None:
+                workspace_id = default_workspace_id
+                binding = "default_context"
+            else:
+                workspace_id = await _get_user_workspace_id(user_id)
+                binding = "unbound"
 
         logger.debug(f"MCP authenticated: user={user_id}, workspace={workspace_id}")
 
         # Issue #XXX: Validate workspace_id from URL matches API key workspace
         # This enables workspace-scoped URLs for Claude Desktop multi-workspace support
-        workspace_id_from_url = scope.get("workspace_id_from_url")
         if workspace_id_from_url:
             if api_key_workspace_id:
                 # API Key authentication: Strict validation required
@@ -1934,6 +1965,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                             )
                             return
                         break
+
+        set_mcp_workspace_binding(binding)
 
     except AuthenticationError as auth_error:
         from utils.exceptions import InvalidTokenError, TokenExpiredError, TokenRevokedError
