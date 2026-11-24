@@ -94,10 +94,12 @@ def _make_schema() -> MagicMock:
 
 
 def _make_context() -> MagicMock:
+    """A live context that holds the slug of ``_make_event``."""
     ctx = MagicMock()
     ctx.id = uuid4()
     ctx.workspace_id = uuid4()
     ctx.created_by = uuid4()
+    ctx.resource_id = "res_test"
     return ctx
 
 
@@ -621,16 +623,22 @@ class TestApplyDeleteCollectionRouting:
 
     @pytest.mark.asyncio
     async def test_delete_all_versions_uses_passed_collection_name(self, indexer):
+        """The deleted rows' points are queued for the drain after the commit,
+        which keeps a point another live row names; nothing is deleted by
+        payload filter inside the event."""
         event = _make_event()
         event.version = None
+        rows = indexer.db.execute.return_value.scalars.return_value
+        first, second = _indexed_row(), _indexed_row()
+        rows.all.return_value = [first, second]
         await indexer._apply_delete(
             event, _make_context(), "kagura_memories_qwen3_embedding_8b_4096"
         )
-        assert indexer.qdrant_client.delete.await_count == 1
-        assert (
-            indexer.qdrant_client.delete.await_args.kwargs["collection_name"]
-            == "kagura_memories_qwen3_embedding_8b_4096"
-        )
+        indexer.qdrant_client.delete.assert_not_awaited()
+        assert [(row.memory_id, row.version_point, row.collection) for row in indexer._retired] == [
+            (first.id, first.point_id, "kagura_memories_qwen3_embedding_8b_4096"),
+            (second.id, second.point_id, "kagura_memories_qwen3_embedding_8b_4096"),
+        ]
 
     @pytest.mark.asyncio
     async def test_delete_specific_version_uses_passed_collection_name(self, indexer):
@@ -1333,12 +1341,14 @@ class TestResyncOfForgottenDoc:
         )
         db_session.add(ws)
         await db_session.flush()
+        # The context holds the slug the events carry (never committed).
         ctx = Context(
             id=uuid4(),
             workspace_id=ws.id,
             name=f"ctx-{uuid4().hex[:8]}",
             created_by=owner,
             is_private=False,
+            resource_id="res_test",
         )
         db_session.add(ctx)
         await db_session.flush()
@@ -3074,11 +3084,14 @@ class TestSameVersionReindexKeepsEdits:
 
 class TestOldVersionPointSharedAfterSlugRelease:
     """#2248, against the real DB: a context that released its slug keeps rows
-    naming the slug's version points. When the context that took the slug over
-    retires that version, the point stays for the other context's live row."""
+    naming the slug's version points. The context that took the slug over
+    owns them: indexing the version detaches the other context's row (a point
+    of its own; the vector store has no copy to give here, so the row is
+    queued for embedding under its own id), and retiring the version then
+    drops the point, which no live row names any more."""
 
     @pytest.mark.asyncio
-    async def test_the_drain_keeps_a_point_another_contexts_row_names(self, db_session):
+    async def test_the_holder_detaches_the_row_then_retires_the_point(self, db_session):
         from sqlalchemy import delete
 
         from services.resource_indexer import resource_point_id
@@ -3129,17 +3142,21 @@ class TestOldVersionPointSharedAfterSlugRelease:
             with (
                 patch("services.resource_indexer.delete_points_from_qdrant", _delete),
                 patch("services.resource_indexer.delete_chunk_points", AsyncMock()),
-                patch("services.resource_indexer.logger") as log,
+                patch(
+                    "services.resource_indexer.retrieve_vectors_and_contexts",
+                    AsyncMock(return_value={}),
+                ),
             ):
                 metrics = await _db_process(indexer, embedder, slug, ctx_id)
 
             assert metrics.errors == 0, metrics.reason
             assert metrics.applied_upserts == 2
-            assert str(v1_point) not in [p for batch in deleted for p in batch]
-            kept = [c for c in log.info.call_args_list if c.args[0] == "memory_point_shared_kept"]
-            assert kept and kept[0].kwargs["point_id"] == str(v1_point)
+            assert str(v1_point) in [p for batch in deleted for p in batch]
             db_session.expire_all()
-            assert await db_session.get(Memory, kept_row_id) is not None
+            kept = await db_session.get(Memory, kept_row_id)
+            assert kept is not None and kept.deleted_at is None
+            assert kept.summary_embedding_id == kept_row_id
+            assert kept.embedding_status == "pending"
         finally:
             await db_session.rollback()
             await db_session.execute(delete(Memory).where(Memory.context_id == released_id))

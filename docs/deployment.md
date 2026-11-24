@@ -3133,6 +3133,42 @@ live traffic takes longer.
 Downgrade is a no-op: a moved row cannot be told from one the new code created
 persistent, and no release needs them working.
 
+## Resource points follow the slug holder
+
+Since v0.181.0 the search point of a resource document version belongs to the
+memory of the context that holds the resource's slug. A context that was
+unpublished or changed its `resource_id` keeps its memories; when another
+context takes the slug, or such a memory is re-embedded, each of them becomes
+an ordinary memory with a search point of its own (its content, workspace and
+context unchanged). [Concepts](concepts.md#sleep-maintenance) describes the
+rule. No migration.
+
+**Upgrade.** Memories written before v0.181.0 can still share a point with the
+memory of another context. After deploying the new code, run the one-shot
+repair where the API runs, from `backend/`:
+
+```bash
+python -m src.cli.repair_resource_point_holders --all                # plan: counts only
+python -m src.cli.repair_resource_point_holders --all --apply --yes  # only if the plan reports rows
+```
+
+The plan reads Postgres and the vector store and writes nothing. It reports
+`released_rows` (memories whose context no longer holds the slug of the point
+they name), `shared_points` (memories of the holder whose point a memory of
+another context names too) and `foreign_points` (memories of the holder whose
+point carries another context). Apply gives each released or other-context
+memory a point of its own (copied from the shared point when it still holds
+that memory's document, otherwise queued for the embedding pipeline) and
+rebuilds a `foreign_points` point from the holder's memory (one embedding
+request per document). It takes the locks the indexer takes (the holder's
+context `FOR SHARE`, the memory rows `FOR UPDATE NOWAIT`, and the point-writer
+lock that keeps the orphan sweep's delete pass out while a point is written); a
+memory another transaction holds is counted `skipped` and taken by a later run.
+Each memory commits on its own, so a run can be stopped (`--limit N` prints a `resume --after <id>`
+line) and run again; once everything is repaired the plan counts nothing.
+`missing_points` (a holder memory whose point is gone) are counted only; the
+orphan sweep's and the embedding pipeline's own repairs are unchanged.
+
 ## Supersede catch-up pass — Issue #2256
 
 The post-embed supersede detection ([`supersede_candidate`](mcp-tools.md))
