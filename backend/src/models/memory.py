@@ -29,8 +29,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
     event,
     func,
+    not_,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -1019,6 +1021,45 @@ def not_tool_triggered_predicate() -> ColumnElement[bool]:
     is the exact complement — a row without details is safely "not a guardrail".
     """
     return Memory.details["tool_trigger"].is_(None)
+
+
+def resource_owned_predicate() -> ColumnElement[bool]:
+    """The one definition of "a row the resource indexer owns" (#2996).
+
+    The row carries the full natural key (``resource_id``, ``doc_id``, a
+    numeric ``version``) and names a point other than its own id. Every
+    automated pass that removes, merges or rescores memories (the Sleep
+    archive, dedup merge and importance re-evaluation, the legacy
+    consolidation task, the working-memory cleanup) decides by it, with
+    ``not_resource_owned_predicate()`` or the flag selected with the row:
+    the source owns such a row's lifecycle, whatever the context's settings.
+
+    ``services.resource_indexer.owns_resource_point`` answers a narrower
+    question, for the code that addresses the indexer's point: whether the
+    point the row names is the uuid5 of the key it carries now. The two differ
+    on a row whose ``details`` key was edited after the indexer wrote it (it
+    still names the old version's point): it is resource-owned here, and
+    ``owns_resource_point`` is false. Plain SQL cannot compute the uuid5.
+    """
+    return and_(
+        Memory.resource_id.is_not(None),
+        Memory.resource_doc_id.is_not(None),
+        Memory.resource_version.is_not(None),
+        Memory.summary_embedding_id.is_not(None),
+        Memory.summary_embedding_id != Memory.id,
+    )
+
+
+def not_resource_owned_predicate() -> ColumnElement[bool]:
+    """Exclusion side of ``resource_owned_predicate()`` for the automated passes
+    (Sleep archive, dedup merge, importance re-evaluation, working-memory
+    cleanup).
+
+    Never NULL: each conjunct of the inclusion side is an ``IS NOT NULL`` test
+    or a comparison of two columns those tests guarantee, so the negation is the
+    exact complement.
+    """
+    return not_(resource_owned_predicate())
 
 
 # The ``idx_memories_summary_trgm`` GIN index (#818) uses the ``gin_trgm_ops``

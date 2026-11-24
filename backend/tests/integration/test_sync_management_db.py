@@ -1195,3 +1195,51 @@ async def test_working_retention_skips_managed_data_and_cleans_ordinary_context(
     async with managed.factory() as db:
         assert await db.get(Memory, source_id) is not None
         assert await db.get(Memory, ordinary_id) is None
+
+
+async def test_indexed_rows_are_persistent_and_f62_keeps_the_canonical_index_complete(
+    managed, monkeypatch
+):
+    """#2996: the indexer creates its row persistent; a row written working
+    before v0.181.0, moved by the f62 walk, still proves the index complete
+    (``version`` stays 1)."""
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "alembic"
+        / "versions"
+        / "f62_2996_resource_rows_persist.py"
+    )
+    spec = importlib.util.spec_from_file_location("f62_2996_resource_rows_persist", path)
+    assert spec is not None and spec.loader is not None
+    f62 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(f62)
+
+    await committed(managed, [product()])
+    await apply_pending(managed, monkeypatch)
+    async with managed.factory() as db:
+        installation = await db.get(SyncInstallation, managed.iid)
+        memory = await db.scalar(
+            select(Memory).where(
+                Memory.context_id == UUID(managed.target["context_id"]),
+                Memory.deleted_at.is_(None),
+            )
+        )
+        assert (memory.scope, memory.version) == ("persistent", 1)
+        assert memory.promoted_at is not None
+        assert await sync_management.canonical_index_complete(db, installation)
+        memory_id = memory.id
+        # The shape the indexer wrote before #2996.
+        memory.scope, memory.promoted_at = "working", None
+        await db.commit()
+    async with managed.factory() as db:
+        assert await db.run_sync(lambda s: f62.persist_resource_rows(s.connection())) >= 1
+        await db.commit()
+    async with managed.factory() as db:
+        installation = await db.get(SyncInstallation, managed.iid)
+        memory = await db.get(Memory, memory_id)
+        assert (memory.scope, memory.version) == ("persistent", 1)
+        assert memory.promoted_at is not None
+        assert await sync_management.canonical_index_complete(db, installation)

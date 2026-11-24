@@ -46,8 +46,10 @@ from models.memory import (
     MEMORY_TYPE_TIME,
     Memory,
     not_pinned_predicate,
+    not_resource_owned_predicate,
     not_tool_triggered_predicate,
     pinned_predicate,
+    resource_owned_predicate,
     tool_triggered_predicate,
 )
 from repositories.neural_edge import NeuralEdgeRepository
@@ -250,6 +252,10 @@ class _MergeTally:
     # deleted or gone between the candidate fetch and merge execution — the
     # execution-time recheck refused them (neither mode mutated anything).
     skipped_pinned: int = 0
+    # #2996: pairs the same recheck refused because a side is a row the
+    # resource indexer owns (counted here, not in ``skipped_pinned``, when any
+    # reason of the refusal is that one).
+    skipped_resource_owned: int = 0
     # #2584: eligible merges not planned because the loser carries an exempt
     # tag (an open review memo). Kept apart from the vetoes above: the judge
     # was right that the pair is a duplicate.
@@ -278,6 +284,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #1183: judge-failure counter (init here so ``_llm_judge`` can be
         # unit-tested without execute()).
         self._llm_failures: int = 0
+        # #2996: recheck refusals with a resource-owned side (init here so
+        # the executors can be unit-tested without execute()).
+        self._resource_owned_refusals: int = 0
         # #1195/#1198: newer-wins override counter (init here so
         # ``_judge_cluster`` can be unit-tested without execute()).
         self._winner_overrides: int = 0
@@ -484,6 +493,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         """
         for winner_id, loser_id, winner, loser, audit in merge_jobs:
             prior_edge: dict[str, Any] | None = None
+            resource_owned_before = self._resource_owned_refusals
             if shadow_mode:
                 executed, prior_edge = await self._execute_shadow_merge(
                     winner, loser, user_id, workspace_id, context_id
@@ -497,7 +507,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
             # not counted as merged (rollback would otherwise "restore" a
             # merge that never happened).
             if not executed:
-                tally.skipped_pinned += 1
+                if self._resource_owned_refusals > resource_owned_before:
+                    tally.skipped_resource_owned += 1
+                else:
+                    tally.skipped_pinned += 1
                 continue
             if not shadow_mode:
                 # The winner's content is merged: both sets (#2015 D5).
@@ -765,6 +778,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
             # #1519: planned merges refused at execution because a row was
             # pinned/deleted after the candidate fetch (both modes).
             "skipped_pinned": tally.skipped_pinned,
+            # #2996: the same refusal for a row the resource indexer owns
+            # (it took a ``remember(external_id)`` row over since the fetch).
+            "skipped_resource_owned": tally.skipped_resource_owned,
             # #2584: merges not planned because the loser carries an exempt
             # tag (sleep_archive_exempt_tags, default status:open).
             "skipped_exempt": tally.skipped_exempt,
@@ -813,6 +829,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
         Tool guardrails (``details.tool_trigger``) are the third deterministic
         lane (``load_guardrails``): merge folds only tags, so a guardrail loser
         would silently stop firing in every client hook.
+
+        #2996: rows the resource indexer owns (``resource_owned_predicate``)
+        belong to their source, which alone removes or replaces them. They are
+        also no longer embedded here, one embedding call each per run.
         """
         stmt = (
             select(Memory)
@@ -826,6 +846,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 # #1524: time memories are served by their trigger window, not
                 # their summary — a same-summary occurrence is not a duplicate.
                 Memory.type != MEMORY_TYPE_TIME,
+                # #2996: a row the resource indexer owns is the source's: two
+                # documents that read alike are two records, and the source
+                # alone removes either.
+                not_resource_owned_predicate(),
             )
             # #1868: ``updated_at`` is NULL until a memory is edited, and
             # PostgreSQL sorts NULLs first under DESC — the bare column put
@@ -858,13 +882,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
         compete for the per-memory neighbour slots in ``_find_similar_pairs``.
         The count widens that search by exactly the rows that can crowd it.
         Tool guardrails leave the candidate set the same way (the fetch above),
-        so they are counted here too; the method keeps its name because the
-        rows it counts are "the exempt rows that still answer Qdrant".
+        so they are counted here too, and so are rows the resource indexer
+        owns (#2996: out of the candidate set, but their points answer the
+        search); the method keeps its name because the rows it counts are "the
+        exempt rows that still answer Qdrant".
         """
         stmt = select(func.count()).where(
             Memory.user_id == user_id,
             Memory.deleted_at.is_(None),
-            or_(pinned_predicate(), tool_triggered_predicate()),
+            or_(pinned_predicate(), tool_triggered_predicate(), resource_owned_predicate()),
         )
         if workspace_id:
             stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
@@ -1551,9 +1577,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
         side. ``SELECT ... FOR UPDATE`` inside the phase transaction serializes
         against a concurrent ``update_memory``/``forget`` so the state read here
         is the state the merge would act on. Returns True (refuse) when either
-        row is now pinned, soft-deleted, missing, or (#1524) a time memory —
+        row is now pinned, soft-deleted, missing, (#1524) a time memory —
         ``update_memory`` can flip ``type`` in the same window, and a merge would
-        drop the loser's trigger window from ``recall_upcoming``.
+        drop the loser's trigger window from ``recall_upcoming`` — or (#2996) a
+        row the resource indexer owns (it re-points a ``remember(external_id)``
+        row it matches by natural key).
         """
         rows = (
             await self.db.execute(
@@ -1561,6 +1589,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     Memory.id,
                     pinned_predicate().label("pinned"),
                     tool_triggered_predicate().label("tool_triggered"),
+                    resource_owned_predicate().label("resource_owned"),
                     Memory.deleted_at,
                     Memory.type,
                 )
@@ -1580,10 +1609,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 reasons.append(f"{label}_pinned")
             elif row.tool_triggered:
                 reasons.append(f"{label}_tool_triggered")
+            elif row.resource_owned:
+                reasons.append(f"{label}_resource_owned")
             elif row.type == MEMORY_TYPE_TIME:
                 reasons.append(f"{label}_time")
         if not reasons:
             return False
+        if any(reason.endswith("_resource_owned") for reason in reasons):
+            self._resource_owned_refusals += 1
         logger.info(
             "dedup_merge_skipped_pinned",
             winner_id=str(winner.id),

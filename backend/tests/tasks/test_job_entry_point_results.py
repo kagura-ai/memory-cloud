@@ -397,7 +397,12 @@ class TestNeuralJobs:
         monkeypatch.setattr(mod, "get_db", mock_get_db_factory(_db()))
         monkeypatch.setattr(mod, "_graph_pages", _no_pages)
         with patch("services.memory_service.MemoryService", return_value=MagicMock()):
-            assert await mod.consolidation_task() == {"users": 0, "promoted": 0, "deleted": 0}
+            assert await mod.consolidation_task() == {
+                "users": 0,
+                "promoted": 0,
+                "deleted": 0,
+                "resource_skipped": 0,
+            }
             monkeypatch.setattr(mod, "_graph_pages", _failing_pages)
             assert await mod.consolidation_task() == _failed(RuntimeError)
 

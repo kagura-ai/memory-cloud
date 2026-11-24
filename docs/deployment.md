@@ -3071,6 +3071,68 @@ Set-payload only, idempotent, no migration; `--workspace <id>` limits it to
 one workspace. The full procedure and the report lines are in
 [ops/resource-indexer-backfill.md](ops/resource-indexer-backfill.md#metadata-backfill-for-points-indexed-before-v01220-2254).
 
+## Resource-indexed memories are persistent — Issue #2996
+
+Since v0.181.0 the resource indexer writes the memory of each document version
+with `scope='persistent'` and `promoted_at` set (also on a working memory it
+takes over, such as a `remember(external_id)` memory it matches by document
+key), and every automated pass leaves
+such a memory to its source: Sleep's dedup merge, importance re-evaluation and
+consolidation archive, the legacy consolidation task (`SLEEP_ENABLED` off) and
+the working-memory cleanup. The rule follows the row, not the context's
+settings, so a sync target that left feed management keeps its rows whatever
+its `sleep_mode`. [Concepts](concepts.md#sleep-maintenance) describes it.
+
+**Upgrade.** Migration `f62_2996_resource_rows_persist` moves the memories left
+from before: live (not soft-deleted) rows with `scope='working'` that carry the
+full resource key and name a point other than their own id (the indexer's
+rows, and the `remember(external_id)` memories it took over) get
+`scope='persistent'` and `promoted_at` = the time of the update (UTC). It
+changes nothing else: not `version`, not `updated_at`, not the vector store (a
+resource point's payload carries no `scope`). Tombstones, memories that name
+their own point (other writers' rows, and the copies a context merge made of
+indexer rows) stay as they are.
+
+1. `alembic upgrade head`. The walk runs in batches of 1,000 rows by id, each
+   committing on its own: the locks are `ROW EXCLUSIVE` on `memories` (the lock
+   of any UPDATE, which blocks no reads or writes) and row locks on the rows of
+   the current batch. A row a request holds is skipped rather than waited for;
+   the last log line (`#2996: N resource rows made persistent; M left
+   working`) counts what is left. No other table is touched. The migration's
+   `lock_timeout` applies (`KAGURA_MIGRATION_LOCK_TIMEOUT`). It needs a
+   session-pinned connection (a direct connection or the Cloud SQL proxy, not
+   a transaction-pooling proxy); offline (`alembic upgrade --sql`) it emits the
+   statement below instead.
+2. Deploy the new code (either order works: the new code needs no schema
+   change). The previous release keeps creating working rows until it stops,
+   so once it is stopped, and whenever the log line above reports rows left,
+   run the same change as one statement. It matches exactly the rows to move,
+   so running it again is always safe:
+
+   ```sql
+   UPDATE memories AS m SET scope = 'persistent', promoted_at = timezone('UTC', now())
+   WHERE m.scope = 'working' AND m.deleted_at IS NULL
+     AND m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
+     AND m.resource_version IS NOT NULL AND m.summary_embedding_id IS NOT NULL
+     AND m.summary_embedding_id <> m.id;
+   ```
+
+A sync resume preview (manual mode back to feed mode) opened before the
+migration no longer matches, because its snapshot hash covers `scope` and
+`promoted_at`: confirming it is refused with "Resume diff changed; obtain a
+fresh preview" and nothing is changed. Run the upgrade when no resume preview
+is open, or prepare the preview again afterwards. The canonical-index check of
+a sync target does not read the scope and stays complete.
+
+Time: each batch moves at most 1,000 rows; about 5 seconds per 10,000
+resource memories, measured locally (an otherwise idle Postgres in a
+container on one machine, the resource rows mixed 1:1 with other rows). A
+deployment with a larger table, fewer resource rows among more others, or
+live traffic takes longer.
+
+Downgrade is a no-op: a moved row cannot be told from one the new code created
+persistent, and no release needs them working.
+
 ## Supersede catch-up pass — Issue #2256
 
 The post-embed supersede detection ([`supersede_candidate`](mcp-tools.md))

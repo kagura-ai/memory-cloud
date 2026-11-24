@@ -367,6 +367,57 @@ class TestResourceIndexerNamedVectorUpsert:
         return _mock_db(db)
 
     @pytest.mark.asyncio
+    async def test_apply_upsert_creates_a_persistent_row(self, indexer, mock_db):
+        """#2996: the source owns an indexed row's lifecycle, so the row is
+        persistent from creation, stamped like a promotion (``promoted_at``)."""
+        before = utcnow()
+
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            self.context,
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        memory = mock_db.add.call_args.args[0]
+        assert memory.scope == "persistent"
+        assert memory.promoted_at is not None
+        assert before <= memory.promoted_at <= utcnow()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scope", ["working", "persistent"])
+    async def test_apply_upsert_update_path_makes_a_working_row_persistent(self, scope):
+        """#2996: the update branch points the row at the indexer's point, so
+        its source owns it: a working row (a ``remember(external_id)`` row the
+        indexer takes over, or one written before f62) becomes persistent with
+        a fresh stamp; a persistent row keeps its stamp."""
+        existing_memory = _indexed_row()
+        existing_memory.scope = scope
+        stamp = datetime(2026, 1, 2)
+        existing_memory.promoted_at = None if scope == "working" else stamp
+        db = self._db_with_existing(existing_memory)
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db)
+        indexer.embedding_service = MagicMock()
+        indexer.embedding_service.embed = AsyncMock(return_value=[0.1] * 512)
+        before = utcnow()
+
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            db.upsert_context,
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        assert existing_memory.scope == "persistent"
+        if scope == "working":
+            assert before <= existing_memory.promoted_at <= utcnow()
+        else:
+            assert existing_memory.promoted_at == stamp
+
+    @pytest.mark.asyncio
     async def test_apply_upsert_update_path_projects_lineage(self):
         """#896: the UPDATE (re-index) branch also projects worker lineage onto
         the existing memory's details + source_uri."""

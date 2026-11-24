@@ -3,12 +3,12 @@
 A row the resource indexer wrote owns the indexer's point, whose id is
 ``Memory.point_id`` (the uuid5 of the document version), never the row id; the
 same document indexed into two contexts that share a collection is one point
-for two rows. The archive and merge vector deletes go to that point, by
-forget's rule, and leave a point another live row still names alone; they are
-queued in the phase's transaction and run after the commit (#2565). The
-importance payload writes skip such a row: the indexer's point carries no
-importance, and the reindex rebuilds it whole. Rows are real; the vector
-store is faked.
+for two rows; ``unshared_point_id`` leaves a point another live row still
+names alone. Since #2996 the archive, the merge and the importance
+re-evaluation refuse such a row outright (the source owns its lifecycle), so
+its point is never queued for a delete and its importance is never rescored.
+A plain row's archive still queues the point under its id (#2565). Rows are
+real; the vector store is faked.
 """
 
 from __future__ import annotations
@@ -45,14 +45,18 @@ def _row(**overrides) -> Memory:
 
 
 def _indexer_row(doc_id: str = "doc-1", version: int = 2, **overrides) -> Memory:
-    """A row the resource indexer wrote: it names its document's uuid5 point."""
-    return _row(
-        summary=f"[resource] {doc_id} v{version}",
-        content='{"title": "Annual report"}',
-        details={"resource_id": "reports", "doc_id": doc_id, "version": str(version)},
-        summary_embedding_id=resource_point_id("reports", doc_id, version),
-        **overrides,
-    )
+    """A row the resource indexer wrote: it names its document's uuid5 point and
+    is persistent from creation (#2996)."""
+    fields = {
+        "summary": f"[resource] {doc_id} v{version}",
+        "content": '{"title": "Annual report"}',
+        "details": {"resource_id": "reports", "doc_id": doc_id, "version": str(version)},
+        "summary_embedding_id": resource_point_id("reports", doc_id, version),
+        "scope": "persistent",
+        "promoted_at": utcnow(),
+    }
+    fields.update(overrides)
+    return _row(**fields)
 
 
 async def _queued_points(db: AsyncSession, memory_id: UUID) -> list[UUID]:
@@ -160,25 +164,18 @@ class TestArchiveDeletesTheRowsOwnPoint:
         with patch("services.sleep.consolidation.GraphService"):
             return ConsolidationPhase(db_session, AsyncMock())
 
-    async def test_an_archived_indexer_row_loses_the_indexer_point(self, db_session: AsyncSession):
-        row = _indexer_row()
+    @pytest.mark.parametrize("scope", ["working", "persistent"])
+    async def test_an_indexer_row_is_never_archived_and_keeps_its_point(
+        self, db_session: AsyncSession, scope: str
+    ):
+        """#2996: the stamp refuses it (a row written as working before the
+        f62 migration included), so nothing is queued for the point."""
+        row = _indexer_row(scope=scope)
         db_session.add(row)
         await db_session.flush()
 
         phase = self._phase(db_session)
-        assert await phase._archive_tombstone(_USER, row) is True
-
-        point = resource_point_id("reports", "doc-1", 2)
-        assert phase.pending_point_deletes == [(row.id, point, "kagura_memories")]
-        assert await _queued_points(db_session, row.id) == [point]
-
-    async def test_a_point_another_live_row_names_stays(self, db_session: AsyncSession):
-        row, other = _indexer_row(), _indexer_row()
-        db_session.add_all([row, other])
-        await db_session.flush()
-
-        phase = self._phase(db_session)
-        assert await phase._archive_tombstone(_USER, row) is True
+        assert await phase._archive_tombstone(_USER, row) is False
 
         assert phase.pending_point_deletes == []
         assert await _queued_points(db_session, row.id) == []
@@ -209,9 +206,11 @@ class TestMergeDeletesTheLosersOwnPoint:
         return phase
 
     @pytest.mark.parametrize("shared", [False, True])
-    async def test_the_losers_point_goes_unless_another_row_names_it(
+    async def test_an_indexer_loser_is_never_merged_and_keeps_its_point(
         self, db_session: AsyncSession, shared: bool
     ):
+        """#2996: the locked re-check refuses the pair, so the point stays
+        whether or not another row names it."""
         winner, loser = _row(summary="winner"), _indexer_row()
         db_session.add_all([winner, loser])
         if shared:
@@ -220,15 +219,21 @@ class TestMergeDeletesTheLosersOwnPoint:
         await db_session.flush()
 
         phase = self._phase(db_session)
-        await phase._execute_merge(winner, loser, _USER, None, None)
+        assert await phase._execute_merge(winner, loser, _USER, None, None) is False
 
-        if shared:
-            assert phase.pending_point_deletes == []
-            assert await _queued_points(db_session, loser.id) == []
-        else:
-            point = resource_point_id("reports", "doc-1", 2)
-            assert phase.pending_point_deletes == [(loser.id, point, "kagura_memories")]
-            assert await _queued_points(db_session, loser.id) == [point]
+        assert phase.pending_point_deletes == []
+        assert await _queued_points(db_session, loser.id) == []
+
+    async def test_a_plain_losers_point_goes(self, db_session: AsyncSession):
+        winner, loser = _row(summary="winner"), _row(summary="loser")
+        db_session.add_all([winner, loser])
+        await db_session.flush()
+
+        phase = self._phase(db_session)
+        assert await phase._execute_merge(winner, loser, _USER, None, None) is True
+
+        assert phase.pending_point_deletes == [(loser.id, loser.id, "kagura_memories")]
+        assert await _queued_points(db_session, loser.id) == [loser.id]
 
 
 class TestImportanceSkipsTheIndexerPoint:
@@ -268,9 +273,12 @@ class TestImportanceSkipsTheIndexerPoint:
     async def test_only_a_summary_point_gets_the_payload(
         self, db_session: AsyncSession, indexer_row: bool
     ):
-        """An indexer row's id names no point of its own (or a stray label one),
-        and the indexer's point carries no importance: neither the payload
-        write nor the reindex (a whole rebuild of that point) is spent on it."""
+        """#2996: the source owns an indexer row's importance. Even handed to the
+        write (the row became the indexer's after the candidate fetch), the
+        UPDATE refuses it: its importance stays, and neither the payload write
+        nor the reindex is spent on it."""
+        from services.sleep.importance_reeval import ImportanceReevalPhase
+
         user = f"{_USER}-{uuid4()}"
         stale = utcnow() - timedelta(days=60)
         make = _indexer_row if indexer_row else _row
@@ -278,14 +286,20 @@ class TestImportanceSkipsTheIndexerPoint:
         db_session.add(row)
         await db_session.flush()
 
-        payload, changed = await self._run(db_session, row)
+        with patch.object(
+            ImportanceReevalPhase, "_fetch_candidates", AsyncMock(return_value=[row])
+        ):
+            payload, changed = await self._run(db_session, row)
 
+        await db_session.refresh(row)
         if indexer_row:
             payload.assert_not_awaited()
             assert changed == set()
+            assert row.importance == 0.5
         else:
             assert payload.await_args.kwargs["memory_id"] == row.id
             assert changed == {row.id}
+            assert row.importance != 0.5
 
 
 class TestRollbackImportanceSkipsTheIndexerPoint:

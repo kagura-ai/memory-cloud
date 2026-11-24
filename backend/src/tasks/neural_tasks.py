@@ -210,6 +210,8 @@ async def consolidation_task() -> JobResult:
             total_users = 0
             total_promoted = 0
             total_deleted = 0
+            # #2996: rows the resource indexer owns, left to their source.
+            total_resource_skipped = 0
 
             # #2385: every user with a graph_memory row, one id-ordered page
             # per transaction.
@@ -224,24 +226,29 @@ async def consolidation_task() -> JobResult:
                     # #1985: deleting a memory cascades to its edge rows; take the
                     # graph learning lock first (users in a fixed order).
                     await lock_graph_learning(db, user_id)
-                    # Get working memories
-                    working_memories = await memory_repo.list(
-                        filters={"user_id": user_id, "scope": "working"}
+                    # Working memories, each with whether the resource indexer
+                    # owns it (#2996: ``resource_owned_predicate``, read with
+                    # the row, the rule every automated pass applies).
+                    working_memories = await memory_repo.list_working_with_resource_owned(
+                        user_id=user_id
                     )
                     # #2918: nothing is promoted or deleted in a slot-suspended
                     # workspace (no statement unless the mode is enforce).
                     suspended = await suspended_workspace_ids(
-                        db, {m.workspace_id for m in working_memories if m.workspace_id is not None}
+                        db,
+                        {m.workspace_id for m, _ in working_memories if m.workspace_id is not None},
                     )
                     if suspended:
                         working_memories = [
-                            m for m in working_memories if m.workspace_id not in suspended
+                            (m, owned)
+                            for m, owned in working_memories
+                            if m.workspace_id not in suspended
                         ]
 
                     # #1985: promotions are written in one id-ordered statement
                     # after the loop (no row locks taken against recall's order).
                     to_promote: dict[Any, tuple[Any, int]] = {}
-                    for memory in working_memories:
+                    for memory, resource_owned in working_memories:
                         from services.sync_managed_guard import assert_memory_mutable
                         from utils.exceptions import ConflictError, ManagedDataLockedError
 
@@ -250,6 +257,15 @@ async def consolidation_task() -> JobResult:
                         except (ConflictError, ManagedDataLockedError):
                             # A protected target must not abort retention of
                             # ordinary contexts sharing this scheduled page.
+                            continue
+                        # #2996: the source owns a resource-indexed row's
+                        # lifecycle, whatever the context's settings: neither
+                        # promoted nor deleted here (the indexer writes its
+                        # rows persistent; one still working was written
+                        # before f62, or a rollback undid an earlier Sleep
+                        # promotion of it).
+                        if resource_owned:
+                            total_resource_skipped += 1
                             continue
                         age_days = (utcnow() - memory.created_at).days
 
@@ -345,8 +361,14 @@ async def consolidation_task() -> JobResult:
                 users=total_users,
                 promoted=total_promoted,
                 deleted=total_deleted,
+                resource_skipped=total_resource_skipped,
             )
-            return {"users": total_users, "promoted": total_promoted, "deleted": total_deleted}
+            return {
+                "users": total_users,
+                "promoted": total_promoted,
+                "deleted": total_deleted,
+                "resource_skipped": total_resource_skipped,
+            }
 
     except Exception as e:
         logger.error("consolidation_task_failed", error=str(e), exc_info=True)
