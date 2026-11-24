@@ -4,6 +4,52 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.181.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.181.0) — 2026-11-24
+
+Rows that the resource indexer writes are persistent and left to their source. A public MCP endpoint describes its dataset in its instructions, and a managing application can set the endpoint's public text. A resource document's search point belongs to the context that holds the resource's slug. There is one migration (`f62`) and one one-shot repair command. A new switch, off by default, controls the managing application's route.
+
+### Added
+- **Public MCP instructions describe the dataset** ([#2995](https://github.com/kagura-ai/memory-cloud/issues/2995)): `initialize` returns a fixed sentence written by KMC with these parts:
+  - the endpoint's public name, flattened and at most 40 characters as before;
+  - the kinds of entries in the bound context (`products`, `FAQ`, `other entries`) with their counts (exact below 100, otherwise rounded to two significant digits plus `+`);
+  - fixed guidance (call `get_context_info` first, what `recall` searches by, `list_tags` for categories).
+
+  No owner text is inserted, and the whole text is at most 330 characters. Counts are cached for 5 minutes. A failed count is remembered for 60 s, and the sentence is then sent without counts.
+- **Where a published context's public text lives** ([#2995](https://github.com/kagura-ai/memory-cloud/issues/2995)): on a context that backs a live public MCP endpoint, the settings tab explains:
+  - public clients get the endpoint's own public description and usage guide, not the context's summary and usage guide;
+  - who manages that text: the owner, or the application that manages the context;
+  - the owner can always set it through `PATCH /api/v1/resources/{resource_id}/public-mcp`.
+
+  `ContextResponse` has a new field, `public_mcp_endpoint_live`.
+- **A managing application can set the public text** ([#2995](https://github.com/kagura-ai/memory-cloud/issues/2995)): experimental `POST /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-text`, contract capability `public.text.operations.v1`.
+  - Who can call it: the installation's own client, acting for the workspace's canonical owner under the existing `integrations:manage` scope.
+  - What it sets: the public description and usage guide of that installation's endpoint. The public name stays as it is.
+  - Limits and audit: the same limits as the owner's PATCH, and the same `integration.updated` record, which also names the acting client. It also writes a synchronization audit row, `public_mcp_endpoint.text_updated`.
+  - It answers 404 until `SYNC_PUBLICATION_TEXT_OPERATIONS_ENABLED=true`.
+- **`python -m src.cli.repair_resource_point_holders`**: a one-shot command that brings resource search points written before this release in line with the slug-holder rule below.
+  - By default it plans and prints counts only. `--apply --yes` makes the changes. It also takes `--context` / `--all`, and `--after` / `--limit` to resume.
+  - It can be rerun; a second run finds nothing.
+
+### Changed
+- **A revoked installation's client can no longer claim, verify or remove custom domains** ([#2995](https://github.com/kagura-ai/memory-cloud/issues/2995)). It gets the same 404 as a non-matching installation, and the new public-text route follows the same rule.
+- **Text containing NUL is refused** in the public description and usage guide. The managing-application route answers 400. The owner's create and PATCH routes answer 422.
+
+### Fixed
+- **Resource-indexed memories are persistent and left to their source** ([#2996](https://github.com/kagura-ai/memory-cloud/issues/2996)).
+  - The indexer writes them persistent, including a `remember(external_id)` row it takes over.
+  - None of the following touches them, whatever the context's settings: Sleep's archive, dedup merge (which also widens its neighbour cap for them), importance re-evaluation, and the legacy consolidation task.
+  - One SQL rule decides which memories these are.
+- **A resource document's search point follows the context that holds the resource's slug.** A memory that another context kept after unpublishing or renaming its resource becomes an ordinary memory with its own search vector. This happens when the slug is claimed again, or when the memory is edited, re-embedded, reindexed or migrated. The orphan sweep, whole-document deletes, forget and metadata edits keep a point that another live memory still uses.
+
+### Operators
+- **Order:**
+  1. `alembic upgrade head` runs `f62_2996_resource_rows_persist`. It makes the existing resource-indexed working rows persistent in batches of 1,000 under row locks only (about 5 s per 10,000 rows on a local database).
+  2. Deploy the new code (backend and web).
+  3. Once the old image has stopped, run the rerun statement in docs/deployment.md once. It catches rows written in between and rows skipped as locked.
+  4. Run `python -m src.cli.repair_resource_point_holders --all` (plan). If it reports rows, run it again with `--apply --yes`.
+- A sync resume preview opened before the upgrade no longer matches. Its confirmation is refused with "obtain a fresh preview"; prepare it again.
+- `SYNC_PUBLICATION_TEXT_OPERATIONS_ENABLED` (default `false`). Turning it on gives every existing `integrations:manage` grant of an installation's client the power to set that installation's public text.
+
 ## [v0.180.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.180.0) — 2026-11-24
 
 Edge agents that manage certificates for public MCP custom domains can read the held claims from an internal route; the docs give the real rebuild time of the v0.179.0 upgrade and the request budget of the scoped OIDC and sync routes. No migration, no new setting.
