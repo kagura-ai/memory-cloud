@@ -4175,6 +4175,11 @@
     "descriptionPlaceholder": "このコンテキストの用途は？",
     "aiConfigTitle": "このコンテキストについて",
     "aiConfigDesc": "このコンテキストが何のためのもので、どう整理されているかについてのメモ",
+    "publicEndpointNote": {
+      "title": "公開 MCP エンドポイントとして公開中",
+      "owner": "公開 MCP クライアントには、以下の概要と利用ガイドは返されません。公開エンドポイントの get_context_info は、エンドポイント自身の公開説明と公開利用ガイドを返します。これはワークスペースのオーナーが公開 MCP エンドポイント API (PATCH /api/v1/resources/{resourceId}/public-mcp) で管理します。",
+      "managed": "公開 MCP クライアントには、以下の概要と利用ガイドは返されません。公開エンドポイントの get_context_info は、エンドポイント自身の公開説明と公開利用ガイドを返します。これはこのコンテキストを管理するアプリケーションがワークスペースのオーナーに代わって設定します。"
+    },
     "templateLabel": "テンプレート（任意）",
     "templatePlaceholder": "テンプレートを選択してサマリーと使用ガイドを自動入力...",
     "templateHelp": "または以下のフィールドを手動でカスタマイズしてください。",

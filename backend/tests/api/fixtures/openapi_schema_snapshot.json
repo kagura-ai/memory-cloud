@@ -2978,6 +2978,7 @@
           "member_count": {},
           "memory_count": {},
           "name": {},
+          "public_mcp_endpoint_live": {},
           "reranker_provider": {},
           "resource_id": {},
           "sleep_mode": {},

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
 
 from config.settings import get_settings
 from models.memory import Memory
+from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource
 from models.sync_installation import SyncInstallation
 from models.sync_management import SyncManagedTarget
@@ -41,6 +42,26 @@ async def management_modes(db: AsyncSession, context_ids: list[UUID]) -> dict[UU
         for context_id in legacy:
             result.setdefault(context_id, "feed")
     return result
+
+
+async def live_public_endpoint_context_ids(db: AsyncSession, context_ids: list[UUID]) -> set[UUID]:
+    """The contexts among ``context_ids`` that back a live public MCP endpoint (#2995).
+
+    Display metadata only, like ``management_modes``: one lookup on the
+    partial unique index of live endpoints, no public id and no text.
+    """
+    if not context_ids:
+        return set()
+    return set(
+        (
+            await db.scalars(
+                select(PublicMcpEndpoint.context_id).where(
+                    PublicMcpEndpoint.context_id.in_(context_ids),
+                    PublicMcpEndpoint.revoked_at.is_(None),
+                )
+            )
+        ).all()
+    )
 
 
 @dataclass

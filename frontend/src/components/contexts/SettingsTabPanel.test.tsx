@@ -877,3 +877,82 @@ describe("SettingsTabPanel — dirty-field-only save (#1193)", () => {
     expect(mockGetContext).not.toHaveBeenCalled();
   });
 });
+
+// ---------- Public endpoint note (#2995) -------------------------------------
+
+describe("SettingsTabPanel — public endpoint note (#2995)", () => {
+  const publicContext = (overrides: Partial<Context> = {}) =>
+    makeContext({
+      is_private: false,
+      is_public: true,
+      resource_id: "example-shop",
+      ...overrides,
+    });
+
+  it.each([
+    ["false", { public_mcp_endpoint_live: false }],
+    ["undefined", {}],
+  ])("shows no note when the flag is %s", (_label, overrides) => {
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={publicContext(overrides)}
+        onContextUpdated={noop}
+      />,
+    );
+    expect(screen.queryByTestId("public-endpoint-note")).toBeNull();
+    expect(screen.queryByText("publicEndpointNote.title")).toBeNull();
+  });
+
+  it("shows the owner-managed note on a live endpoint", () => {
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={publicContext({ public_mcp_endpoint_live: true })}
+        onContextUpdated={noop}
+      />,
+    );
+    const note = screen.getByTestId("public-endpoint-note");
+    expect(within(note).getByText("publicEndpointNote.title")).toBeInTheDocument();
+    expect(within(note).getByText("publicEndpointNote.owner")).toBeInTheDocument();
+    expect(within(note).queryByText("publicEndpointNote.managed")).toBeNull();
+  });
+
+  it.each(["feed", "stopping"] as const)(
+    "shows the app-managed note while the context is %s-managed",
+    (mode) => {
+      render(
+        <SettingsTabPanel
+          contextId={CTX_ID}
+          context={publicContext({
+            public_mcp_endpoint_live: true,
+            feed_management_mode: mode,
+          })}
+          onContextUpdated={noop}
+        />,
+      );
+      const note = screen.getByTestId("public-endpoint-note");
+      expect(within(note).getByText("publicEndpointNote.managed")).toBeInTheDocument();
+      expect(within(note).queryByText("publicEndpointNote.owner")).toBeNull();
+    },
+  );
+
+  it("is shown to an admin as well as the owner", () => {
+    setRole("admin");
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={publicContext({
+          public_mcp_endpoint_live: true,
+          feed_management_mode: "manual",
+        })}
+        onContextUpdated={noop}
+      />,
+    );
+    expect(
+      within(screen.getByTestId("public-endpoint-note")).getByText(
+        "publicEndpointNote.owner",
+      ),
+    ).toBeInTheDocument();
+  });
+});
