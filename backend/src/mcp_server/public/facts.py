@@ -11,11 +11,17 @@ feed configuration, record types) are never read here.
 The counts come from one statement over the rows the endpoint serves
 (``scope.public_rows``), bounded by a two-second statement timeout, and are
 cached per process for the ``tools/list`` TTL. A failure is logged with its
-error type only, is not cached, and leaves the instructions without counts.
+error type only and remembered for ``DATASET_FACTS_FAILURE_TTL_SECONDS``:
+until then the instructions go without counts and the statement is not run
+again. One lookup per endpoint runs at a time in a process (single flight);
+every handshake waits for it at most ``DATASET_FACTS_WAIT_SECONDS`` and
+otherwise goes without counts, while the lookup finishes in the background and
+fills the cache.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import time
 from collections.abc import AsyncIterator, Callable
@@ -42,6 +48,10 @@ DATASET_FACTS_CACHE_MAXSIZE: Final = 1024
 DATASET_FACTS_DISPLAY_CAP: Final = 100_000
 _EXACT_BELOW: Final = 100
 _STATEMENT_TIMEOUT_SQL: Final = text("SET LOCAL statement_timeout = '2s'")
+# A failed or timed-out count is not tried again for this long.
+DATASET_FACTS_FAILURE_TTL_SECONDS: Final = 60
+# The longest a handshake waits for a lookup: the statement timeout and a margin.
+DATASET_FACTS_WAIT_SECONDS: Final = 2.5
 
 # sync_feeds.kind -> the group it is counted in. Closed: anything else is "other".
 _KIND_GROUPS: Final = {"product": "products", "faq": "faq"}
@@ -67,6 +77,12 @@ _clock: Callable[[], float] = time.monotonic
 _cache: TTLCache[_CacheKey, DatasetFacts] = TTLCache[_CacheKey, DatasetFacts](
     maxsize=DATASET_FACTS_CACHE_MAXSIZE, ttl=DATASET_FACTS_TTL_SECONDS, timer=_now
 )
+# Negative cache: the keys whose last lookup failed.
+_failed: TTLCache[_CacheKey, bool] = TTLCache[_CacheKey, bool](
+    maxsize=DATASET_FACTS_CACHE_MAXSIZE, ttl=DATASET_FACTS_FAILURE_TTL_SECONDS, timer=_now
+)
+# Single flight: the one running lookup per key.
+_inflight: dict[_CacheKey, asyncio.Task[DatasetFacts | None]] = {}
 
 
 def render_count(count: int) -> str:
@@ -147,21 +163,46 @@ async def _facts_session() -> AsyncIterator[AsyncSession]:
             return
 
 
-async def dataset_facts(endpoint: ServingEndpoint) -> DatasetFacts | None:
-    """The endpoint's counts, cached for the ``tools/list`` TTL; ``None`` when they cannot be read.
-
-    The key is the endpoint's binding, so a republished endpoint (new id) or a
-    rebound context starts afresh. Workers may disagree for one TTL.
-    """
-    key = (endpoint.id, endpoint.context_id, endpoint.resource_pk)
-    cached = _cache.get(key)
-    if cached is not None:
-        return cached
+async def _lookup(key: _CacheKey, endpoint: ServingEndpoint) -> DatasetFacts | None:
+    """Run the count once and record the outcome in the cache or the negative cache."""
     try:
         async with _facts_session() as db:
             facts = await count_dataset_facts(db, endpoint)
     except Exception as exc:  # noqa: BLE001 - the instructions never fail on counts
         logger.warning("public_mcp_dataset_facts_failed", error_type=type(exc).__name__)
+        _failed[key] = True
         return None
     _cache[key] = facts
     return facts
+
+
+def _forget_inflight(key: _CacheKey, task: asyncio.Task[DatasetFacts | None]) -> None:
+    if _inflight.get(key) is task:
+        del _inflight[key]
+
+
+async def dataset_facts(endpoint: ServingEndpoint) -> DatasetFacts | None:
+    """The endpoint's counts, or ``None`` when they are not available right now.
+
+    Cached for the ``tools/list`` TTL; a failure is remembered for
+    ``DATASET_FACTS_FAILURE_TTL_SECONDS``. The key is the endpoint's binding,
+    so a republished endpoint (new id) or a rebound context starts afresh.
+    Concurrent misses share one lookup; none waits longer than
+    ``DATASET_FACTS_WAIT_SECONDS`` (the lookup is never cancelled by a waiter
+    giving up). Workers may disagree for one TTL.
+    """
+    key = (endpoint.id, endpoint.context_id, endpoint.resource_pk)
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
+    if key in _failed:
+        return None
+    task = _inflight.get(key)
+    if task is None:
+        task = asyncio.create_task(_lookup(key, endpoint))
+        _inflight[key] = task
+        task.add_done_callback(lambda done, key=key: _forget_inflight(key, done))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), DATASET_FACTS_WAIT_SECONDS)
+    except TimeoutError:
+        return None

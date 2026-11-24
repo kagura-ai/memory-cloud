@@ -8,6 +8,7 @@ on any failure.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import itertools
@@ -44,9 +45,11 @@ def _endpoint(name: str = "Example Shop") -> ServingEndpoint:
 
 @pytest.fixture(autouse=True)
 def _empty_cache():
-    facts._cache.clear()
+    for store in (facts._cache, facts._failed, facts._inflight):
+        store.clear()
     yield
-    facts._cache.clear()
+    for store in (facts._cache, facts._failed, facts._inflight):
+        store.clear()
 
 
 # ----------------------------------------------------------------------------
@@ -263,9 +266,11 @@ async def test_the_cache_key_is_the_endpoint_binding(monkeypatch) -> None:
     assert count.await_count == 3
 
 
-async def test_a_failed_count_degrades_logs_the_type_only_and_is_not_cached(
-    monkeypatch, caplog
+async def test_a_failed_count_degrades_logs_the_type_only_and_is_cached_for_a_while(
+    monkeypatch,
 ) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(facts, "_clock", lambda: now[0])
     count = AsyncMock(side_effect=RuntimeError("canceling statement due to statement timeout"))
     _patch_session(monkeypatch, count)
     endpoint = _endpoint()
@@ -274,7 +279,64 @@ async def test_a_failed_count_degrades_logs_the_type_only_and_is_not_cached(
 
     assert await facts.dataset_facts(endpoint) is None
     assert seen == [{"public_mcp_dataset_facts_failed": {"error_type": "RuntimeError"}}]
+    # Within the window: no second statement, still the count-less text.
+    now[0] += facts.DATASET_FACTS_FAILURE_TTL_SECONDS - 1
     assert await facts.dataset_facts(endpoint) is None
-    assert count.await_count == 2
+    assert count.await_count == 1
     text = pt.public_instructions(endpoint, None)
     assert text.startswith("Read-only public data of Example Shop. Call get_context_info first")
+    # After it: tried again, and a success is cached as usual.
+    now[0] += 2
+    count.side_effect = None
+    count.return_value = DatasetFacts(faq=3)
+    assert await facts.dataset_facts(endpoint) == DatasetFacts(faq=3)
+    assert await facts.dataset_facts(endpoint) == DatasetFacts(faq=3)
+    assert count.await_count == 2
+    assert facts.DATASET_FACTS_FAILURE_TTL_SECONDS == 60
+
+
+async def test_concurrent_cold_misses_run_one_query(monkeypatch) -> None:
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow(db, endpoint):
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        return DatasetFacts(products=4)
+
+    _patch_session(monkeypatch, AsyncMock(side_effect=slow))
+    endpoint = _endpoint()
+    waiting = [asyncio.create_task(facts.dataset_facts(endpoint)) for _ in range(10)]
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    release.set()
+    assert await asyncio.gather(*waiting) == [DatasetFacts(products=4)] * 10
+    assert calls == 1
+    assert facts._inflight == {}
+
+
+async def test_a_slow_lookup_never_holds_a_handshake_past_the_wait(monkeypatch) -> None:
+    monkeypatch.setattr(facts, "DATASET_FACTS_WAIT_SECONDS", 0.05)
+    release = asyncio.Event()
+    calls = 0
+
+    async def slow(db, endpoint):
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        return DatasetFacts(faq=9)
+
+    _patch_session(monkeypatch, AsyncMock(side_effect=slow))
+    endpoint = _endpoint()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert await facts.dataset_facts(endpoint) is None  # gave up waiting
+    assert await facts.dataset_facts(endpoint) is None  # joined the same lookup
+    assert loop.time() - started < 1
+    assert calls == 1
+    # The lookup was not cancelled: it finishes and fills the cache.
+    release.set()
+    await asyncio.sleep(0.01)
+    assert await facts.dataset_facts(endpoint) == DatasetFacts(faq=9)
+    assert calls == 1
