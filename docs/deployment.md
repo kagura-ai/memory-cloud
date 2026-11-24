@@ -3074,20 +3074,24 @@ one workspace. The full procedure and the report lines are in
 ## Resource-indexed memories are persistent — Issue #2996
 
 Since v0.181.0 the resource indexer writes the memory of each document version
-with `scope='persistent'` and `promoted_at` set, and every automated pass leaves
+with `scope='persistent'` and `promoted_at` set (also on a working memory it
+takes over, such as a `remember(external_id)` memory it matches by document
+key), and every automated pass leaves
 such a memory to its source: Sleep's dedup merge, importance re-evaluation and
 consolidation archive, the legacy consolidation task (`SLEEP_ENABLED` off) and
 the working-memory cleanup. The rule follows the row, not the context's
 settings, so a sync target that left feed management keeps its rows whatever
 its `sleep_mode`. [Concepts](concepts.md#sleep-maintenance) describes it.
 
-**Upgrade.** Migration `f62_2996_resource_rows_persist` moves the memories the
-indexer wrote before: live (not soft-deleted) rows with `scope='working'`,
-`source='resource_ingest'`, the full resource key and the indexer's point get
+**Upgrade.** Migration `f62_2996_resource_rows_persist` moves the memories left
+from before: live (not soft-deleted) rows with `scope='working'` that carry the
+full resource key and name a point other than their own id (the indexer's
+rows, and the `remember(external_id)` memories it took over) get
 `scope='persistent'` and `promoted_at` = the time of the update (UTC). It
 changes nothing else: not `version`, not `updated_at`, not the vector store (a
-resource point's payload carries no `scope`). Tombstones, other writers' rows
-and the copies a context merge made of indexer rows stay as they are.
+resource point's payload carries no `scope`). Tombstones, memories that name
+their own point (other writers' rows, and the copies a context merge made of
+indexer rows) stay as they are.
 
 1. `alembic upgrade head`. The walk runs in batches of 1,000 rows by id, each
    committing on its own: the locks are `ROW EXCLUSIVE` on `memories` (the lock
@@ -3107,7 +3111,7 @@ and the copies a context merge made of indexer rows stay as they are.
 
    ```sql
    UPDATE memories AS m SET scope = 'persistent', promoted_at = timezone('UTC', now())
-   WHERE m.scope = 'working' AND m.source = 'resource_ingest' AND m.deleted_at IS NULL
+   WHERE m.scope = 'working' AND m.deleted_at IS NULL
      AND m.resource_id IS NOT NULL AND m.resource_doc_id IS NOT NULL
      AND m.resource_version IS NOT NULL AND m.summary_embedding_id IS NOT NULL
      AND m.summary_embedding_id <> m.id;
@@ -3120,10 +3124,11 @@ fresh preview" and nothing is changed. Run the upgrade when no resume preview
 is open, or prepare the preview again afterwards. The canonical-index check of
 a sync target does not read the scope and stays complete.
 
-Time: about 5 seconds per 10,000 resource memories, measured locally (an
-otherwise idle Postgres in a container on one machine, the resource rows
-mixed 1:1 with other rows). A deployment with a larger table and live traffic
-takes longer; the walk reads the table once by id.
+Time: each batch moves at most 1,000 rows; about 5 seconds per 10,000
+resource memories, measured locally (an otherwise idle Postgres in a
+container on one machine, the resource rows mixed 1:1 with other rows). A
+deployment with a larger table, fewer resource rows among more others, or
+live traffic takes longer.
 
 Downgrade is a no-op: a moved row cannot be told from one the new code created
 persistent, and no release needs them working.
