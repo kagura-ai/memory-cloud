@@ -8179,6 +8179,8 @@
           "context_summary": {},
           "contradicts": {},
           "created_at": {},
+          "date": {},
+          "date_source": {},
           "folded": {},
           "importance": {},
           "memory_id": {},
@@ -11162,6 +11164,14 @@
             "minimum": 1.0,
             "type": "integer"
           },
+          "order": {
+            "default": "relevance",
+            "enum": [
+              "relevance",
+              "date"
+            ],
+            "type": "string"
+          },
           "query": {
             "maxLength": 8000,
             "minLength": 1,
@@ -11233,6 +11243,17 @@
                   "$ref": "#/components/schemas/ExploreHint"
                 },
                 "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "order": {
+            "anyOf": [
+              {
+                "const": "date",
+                "type": "string"
               },
               {
                 "type": "null"

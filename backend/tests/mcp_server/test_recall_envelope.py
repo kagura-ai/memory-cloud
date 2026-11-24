@@ -264,7 +264,7 @@ class TestEnvelope:
         assert "_recall_reply(" in src
         assert "_dumps(" in src
         reply = inspect.getsource(mcp_memory._recall_reply)
-        assert "_recall_envelope(result, context, verbosity, explore_hints_omitted)" in reply
+        assert "_recall_envelope(result, context, verbosity, explore_hints_omitted, order)" in reply
 
 
 # ============================================================================

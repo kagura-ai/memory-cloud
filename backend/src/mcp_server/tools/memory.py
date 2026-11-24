@@ -64,6 +64,7 @@ from utils.exceptions import (
 )
 from utils.logger import get_logger
 from utils.observed_at import observed_fields
+from utils.recall_order import RECALL_ORDERS, row_date
 from utils.recall_projection import (
     COMPACT_SUMMARY_CHARS,
     RECALL_CONTENT_KEYS,
@@ -1177,6 +1178,7 @@ def _recall_envelope(
     context: Any,
     verbosity: str = "full",
     explore_hints_omitted: str | None = None,
+    order: str = "relevance",
 ) -> dict[str, Any]:
     """Build the recall MCP envelope from a ``RecallResponse``.
 
@@ -1189,11 +1191,19 @@ def _recall_envelope(
         context: The resolved primary context.
         verbosity: ``"full"`` or ``"compact"`` (#2002).
         explore_hints_omitted: Why hints were not generated, when asked for (#2470).
+        order: ``"relevance"`` or ``"date"`` (#3004). With ``"date"`` each item
+            carries ``date`` / ``date_source`` right after ``memory_id`` and the
+            envelope says ``order: "date"``; the items stay in relevance order
+            here (``_recall_reply`` sorts them after the budget steps).
 
     Returns:
         The envelope ``handle_recall`` serializes.
     """
     results_data = [recall_result_item(r, verbosity) for r in result.results]
+    if order == "date":
+        results_data = [
+            _dated_item(item, r) for item, r in zip(results_data, result.results, strict=True)
+        ]
     response_data: dict[str, Any] = {}
     # Issue #1047: top-level relevance confidence (level=none → the agent
     # can stop probing early / go external instead of hallucinating). #2002:
@@ -1205,6 +1215,8 @@ def _recall_envelope(
         "results": results_data,
         "count": len(results_data),
     }
+    if order == "date":
+        response_data["order"] = "date"
     # #2144: what the LLM selector did — absent (never null) unless the stage
     # ran or was refused on a context with the flag on. Right after count:
     # count is the selected page's and the dropped ids are listed here. The
@@ -1249,6 +1261,14 @@ def _recall_envelope(
     # was impaired", not "nothing relevant is stored".
     response_data.update(_degraded_response_fields(result))
     return response_data
+
+
+def _dated_item(item: dict[str, Any], r: Any) -> dict[str, Any]:
+    """``item`` with ``date`` and ``date_source`` right after ``memory_id`` (#3004)."""
+    day, source = row_date(r)
+    memory_id = item["memory_id"]
+    rest = {key: value for key, value in item.items() if key != "memory_id"}
+    return {"memory_id": memory_id, "date": day, "date_source": source, **rest}
 
 
 # What _bound_recall_envelope keeps back before it counts a reply as fitting:
@@ -1315,18 +1335,28 @@ def _recall_reply(
     verbosity: str,
     max_chars: int,
     explore_hints_omitted: str | None = None,
+    order: str = "relevance",
 ) -> dict[str, Any]:
     """The reply ``handle_recall`` serializes: the envelope, fitted then cut.
 
     One function, so that whatever measures a recall reply (the local
     related-index runner, #2728) builds the text the tool sends.
+
+    #3004: under ``order="date"`` the content fit and the cut run on the
+    relevance order, as without it (a row loses content or is cut because it
+    ranks lowest, never because of its day); only then are the rows sorted by
+    day. Sorting moves no character, so the reply still fits ``max_chars``.
     """
-    return _bound_recall_envelope(
+    reply = _bound_recall_envelope(
         _fit_recall_content(
-            _recall_envelope(result, context, verbosity, explore_hints_omitted), max_chars
+            _recall_envelope(result, context, verbosity, explore_hints_omitted, order),
+            max_chars,
         ),
         max_chars,
     )
+    if order == "date":
+        reply["results"] = sorted(reply["results"], key=lambda item: item["date"])
+    return reply
 
 
 async def handle_recall(
@@ -1382,6 +1412,16 @@ async def handle_recall(
             received=full,
         )
 
+    # #3004: "date" returns the same rows oldest first. Omitted (or null) is
+    # "relevance", the reply as before.
+    order = args.get("order")
+    if order is None:
+        order = "relevance"
+    if not isinstance(order, str) or order not in RECALL_ORDERS:
+        return _error_response(
+            "invalid_argument", "order must be 'relevance' or 'date'", received=order
+        )
+
     # #2470: a hint is a seed for explore(), so a URL that does not list explore
     # gets a reason instead of seeds its model cannot follow up.
     include_explore_hints = args.get("include_explore_hints", False)
@@ -1404,7 +1444,10 @@ async def handle_recall(
         # MemoryService resolves None to "hybrid" everywhere else.
         search_mode=args.get("search_mode"),
         include_explore_hints=False if explore_hints_omitted else include_explore_hints,
-        include_superseded=args.get("include_superseded", False),  # #1208
+        # #1208; #3004: a date-ordered recall is a change history, so it
+        # includes superseded rows unless the caller says otherwise.
+        include_superseded=args.get("include_superseded", order == "date"),
+        order=order,
     )
 
     start_time = time.time()
@@ -1538,7 +1581,7 @@ async def handle_recall(
             # Built before the usage row / commit, as the item projection always
             # was: a result that cannot be rendered fails the call as a whole.
             response_data = _recall_reply(
-                result, current_context, verbosity, max_chars, explore_hints_omitted
+                result, current_context, verbosity, max_chars, explore_hints_omitted, order
             )
 
             await _log_tool_usage(

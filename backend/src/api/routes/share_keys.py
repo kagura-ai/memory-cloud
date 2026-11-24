@@ -47,6 +47,7 @@ from utils.exceptions import (
 )
 from utils.logger import get_logger
 from utils.public_id import PublicIdPrefix, ShareKeyPublicId, public_id_pattern
+from utils.recall_order import date_ordered
 
 logger = get_logger(__name__)
 
@@ -334,6 +335,10 @@ async def share_recall(
     except ValueError as e:
         raise ValidationError(str(e)) from e
 
+    # #3004: the request model is shared with /memory/recall, so its order
+    # option means the same here: the same rows, oldest first.
+    if request.order == "date":
+        return date_ordered(result)
     return result
 
 

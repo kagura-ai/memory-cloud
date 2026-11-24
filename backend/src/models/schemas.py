@@ -430,6 +430,24 @@ class RecallRequest(BaseModel):
             "Omit or 0 for summaries only."
         ),
     )
+    # #3004: "date" returns the same rows oldest first, each with ``date`` /
+    # ``date_source``; the search itself is unchanged. "relevance" (default)
+    # is the response as before.
+    order: Literal["relevance", "date"] = Field(
+        default="relevance",
+        description=(
+            "relevance (default) or date: the same results oldest first, each with "
+            "date (YYYY-MM-DD) and date_source (event, observed or created). With "
+            "date, include_superseded defaults to true."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _date_order_includes_superseded(self) -> "RecallRequest":
+        """#3004: a change history needs the older rows; an explicit value wins."""
+        if self.order == "date" and "include_superseded" not in self.model_fields_set:
+            self.include_superseded = True
+        return self
 
 
 class SupersedeAcceptance(TZAwareBaseModel):
@@ -597,6 +615,22 @@ class MemoryResponse(TZAwareBaseModel):
     # verbatim passages: ``content`` is those passages joined with " … " and
     # spans are their offsets in the stored content. MCP recall only.
     spans: list[SpanRef] | None = None
+    # #3004: set only by recall with order="date": the row's day (YYYY-MM-DD,
+    # UTC) and where it came from. Absent from every body otherwise, explore's
+    # and reference's included (exclude_if, not only the routes' exclude_none).
+    date: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="recall with order='date' only: the row's day (YYYY-MM-DD, UTC).",
+    )
+    date_source: Literal["event", "observed", "created"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "recall with order='date' only: event (event_start), observed "
+            "(observed_at) or created (created_at)."
+        ),
+    )
 
     class Config:
         from_attributes = True
@@ -920,6 +954,12 @@ class RecallResponse(BaseModel):
         default=None,
         exclude=True,
         description="MCP recall tool only: the optional pointer at list().",
+    )
+    # #3004: "date" when the rows were returned oldest first; absent otherwise.
+    order: Literal["date"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="'date' when the results are oldest first (order='date'); absent otherwise.",
     )
 
 

@@ -50,6 +50,7 @@ from utils.exceptions import MemoryCloudException, NotFoundException, Validation
 from utils.logger import get_logger
 from utils.observed_at import observed_at_from_details
 from utils.query_log import query_log_fields
+from utils.recall_order import date_ordered
 
 logger = get_logger(__name__)
 
@@ -337,6 +338,10 @@ async def recall(
         # rather than letting it surface as 500.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
+    # #3004: the same rows oldest first, each dated; relevance (the default)
+    # returns the service's response as before.
+    if request.order == "date":
+        return date_ordered(result)
     return result
 
 

@@ -202,7 +202,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     },
     "recall": {
         _D: (
-            "9a7f497e13c9a09f",
+            "2047086b1bb2f52a",
             "Search by meaning and keywords. Read-only here: a search changes no memory and no "
             "association. confidence.level (high|moderate|low|none): none/low suggests an "
             "external source; degraded=true: no semantic search. The store is the authority, "
@@ -215,7 +215,8 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "`observed_after`/`observed_before` around it with a margin (`observed_at` = the "
             "date a fact was stated); nothing matches: recall again without the filter. In one "
             "row: `event_start`..`event_end` = when it happened, `observed_at` = when it was "
-            "said; a date in the summary loses to the event fields.\n"
+            "said; a date in the summary loses to the event fields. How something changed over "
+            "time: order='date'.\n"
             "Likely/would/might: recall again on concrete entities and category words (brand, "
             'sponsor, shop, friend), `search_mode="keyword"` for surfaced names; answer with the '
             "best-supported inference, name the memory, mark it as an inference; decline only at "
@@ -223,20 +224,14 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "subject's name and the fact's key noun (`search_mode=\"keyword\"`); a row that "
             "states it answers — name it. A general statement beats single instances for "
             '"how often".\n'
-            "Returns: {confidence: {level, ...}, status, results: [{memory_id, summary, "
-            "summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, "
+            "Returns: {confidence: {level, ...}, status, results: [{memory_id, date?, "
+            "date_source?, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, "
             "observed_weekday?, event_start?, event_end?, event_weekday?, superseded_by?, "
-            "contradicts?, supersede_candidate?, ...}], count, full_applied?, related_tags?: "
+            "contradicts?, supersede_candidate?, ...}], count, order?, full_applied?, related_tags?: "
             "[{tag, count}], ...}. Optional keys omitted: absent, never null. "
             "content_next_offset marks where cut content continues. verbosity='full' adds "
             "context_summary?, scope, tags, version. supersede_candidate: an older "
             "near-duplicate (a suggestion).",
-        ),
-        _p("filters"): (
-            "68d1da260ea6e99e",
-            "Keys ANDed: type, scope, tags (tags_match, tags_normalize), importance "
-            "{gte|lte|gt|lt}, created_/updated_/observed_after/before, event_after/before, "
-            "source_uri_prefix, source_type, trust_tier='trusted', near, within.",
         ),
         _p("context_id"): (
             "6184f955e0c6dce6",
