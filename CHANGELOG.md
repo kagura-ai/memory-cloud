@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.180.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.180.0) — 2026-11-24
+
+Edge agents that manage certificates for public MCP custom domains can read the held claims from an internal route; the docs give the real rebuild time of the v0.179.0 upgrade and the request budget of the scoped OIDC and sync routes. No migration, no new setting.
+
+### Added
+- **Claims list for custom-domain edges** ([#2993](https://github.com/kagura-ai/memory-cloud/issues/2993)): `GET /internal/public-mcp-domains/claims` returns the `active` and `suspended` public MCP custom-domain claims as versioned JSON (`schema_version` 1: `hostname`, `state`, `domain_id`, `endpoint_id`, `check_seq`, `created_at`, sorted by hostname in byte order). It uses the TLS reporter credential `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN`: 404 while reporting is not configured, 401 for another credential. Pending and released claims are never listed. At most 10,000 rows, one read per process at a time, within 5 seconds; otherwise 503, never a partial list. Not in the OpenAPI schema. An edge agent keys its records on the hostname (a name claimed again is a new row with the same hostname). See docs/public-mcp-domains.md, "Claims list for an edge agent".
+
+### Docs
+- **Keyword vector rebuild time** ([#2992](https://github.com/kagura-ai/memory-cloud/issues/2992)): the v0.179.0 upgrade step now says about a minute per 10,000 memories, scaling with collection size and load (the earlier figure came from an empty local database).
+- **Budget of the scoped OIDC and sync routes** ([#2988](https://github.com/kagura-ai/memory-cloud/issues/2988)): `OIDC_RATE_LIMIT_PER_MINUTE` bounds them per peer and then per client and user. The workspace in the path and the plan do not change the budget. docs/ops/oidc-workspace-access.md says how a client application paces its reads and honours `Retry-After`.
+
+### Operators
+- No migration, no new setting, backend only. To use the claims list, set `MCP_PUBLIC_DOMAINS_TLS_REPORTER_TOKEN` (and both public switches) as for the TLS reports; the token also enables the reports and the owner's certificate observation, so `f58_2941_domain_tls_reports` (v0.173.0 and later) must be applied first; the edge agent polls the route about once a minute from the internal network.
+
 ## [v0.179.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.179.0) — 2026-11-23
 
 Keyword recall scores like Okapi BM25 and treats Japanese spelling variants as one term, and a context's search settings offer purpose presets. One migration (`f61`): run it before starting the new code, then run the keyword rebuild once.
