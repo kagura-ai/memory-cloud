@@ -363,6 +363,118 @@ def _validate_context_field_lengths(args: dict[str, Any]) -> list[TextContent] |
     return None
 
 
+def _workspace_id_argument(
+    args: dict[str, Any],
+) -> tuple[UUID | None, list[TextContent] | None]:
+    """The ``workspace_id`` argument (``null`` / ``""`` = omitted), or its refusal."""
+    raw = args.get("workspace_id")
+    if raw is None or raw == "":
+        return None, None
+    try:
+        if not isinstance(raw, str):
+            raise ValueError(raw)
+        return UUID(raw), None
+    except ValueError:
+        return None, _error_response(
+            "invalid_argument",
+            "'workspace_id' must be a workspace UUID.",
+            received=raw,
+            help="list_workspaces() returns the ids of your workspaces.",
+        )
+
+
+def _may_create(role: str, *, is_private: bool) -> bool:
+    """The role rule of ``ContextService.create_context``: owners create private and
+    shared contexts, admins shared ones only."""
+    if is_private:
+        return role == "owner"
+    return role in ("owner", "admin")
+
+
+async def _create_context_workspace(
+    db: Any,
+    args: dict[str, Any],
+    user_id: str,
+    connection_workspace_id: UUID | None,
+    *,
+    is_private: bool,
+) -> tuple[UUID | None, list[TextContent] | None]:
+    """``(workspace_id, refusal)``: the workspace create_context creates in (#3002).
+
+    * ``workspace_id`` argument: that workspace. Under a workspace-scoped key
+      or a URL workspace only that one (the key: the non-member answer, #963;
+      the URL: ``workspace_mismatch``). Membership, role, slot, seat, plan and
+      quota are checked there by the steps that follow, as for the
+      connection's workspace.
+    * Otherwise a bound connection (or an undecided request) creates in its
+      workspace, as before.
+    * An unbound one creates in the only workspace where the caller's role
+      allows this kind of context; with two or more it is refused with
+      ``workspace_required`` and the candidates (current workspace first);
+      with none the steps that follow refuse on the current workspace, as
+      before.
+    """
+    from mcp_server.tools._helpers import _outside_key_workspace, _workspace_not_accessible
+    from mcp_server.tools._workspace_binding import get_mcp_workspace_binding
+
+    target, arg_error = _workspace_id_argument(args)
+    if arg_error:
+        return None, arg_error
+    binding = get_mcp_workspace_binding()
+    if target is not None:
+        if _outside_key_workspace(target):
+            return None, _workspace_not_accessible("create context", "member")
+        if binding == "url" and target != connection_workspace_id:
+            return None, _error_response(
+                "workspace_mismatch",
+                "This connection's URL names another workspace; create_context creates there only.",
+                help="Omit workspace_id, or connect with that workspace's MCP URL.",
+            )
+        return target, None
+    if binding != "unbound":
+        return connection_workspace_id, None
+
+    from sqlalchemy import select
+
+    from models.auth import Workspace, WorkspaceMember
+
+    rows = (
+        await db.execute(
+            select(Workspace.id, Workspace.name, WorkspaceMember.role)
+            .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+            .where(WorkspaceMember.user_id == user_id, Workspace.deleted_at.is_(None))
+            .order_by(Workspace.name, Workspace.id)
+        )
+    ).all()
+    candidates = [
+        (workspace_id, name, str(role))
+        for workspace_id, name, role in rows
+        if _may_create(str(role), is_private=is_private)
+    ]
+    if not candidates:
+        return connection_workspace_id, None
+    if len(candidates) == 1:
+        return candidates[0][0], None
+    candidates.sort(key=lambda c: c[0] != connection_workspace_id)  # current first, stable
+    return None, _error_response(
+        "workspace_required",
+        "You can create this context in more than one workspace; pass workspace_id to choose one.",
+        candidates=[
+            {"id": str(workspace_id), "name": name, "role": role}
+            for workspace_id, name, role in candidates
+        ],
+        help="Call create_context again with workspace_id set to one of the candidates.",
+    )
+
+
+async def _workspace_ref(db: Any, workspace_id: UUID) -> dict[str, Any]:
+    """``{id, name}`` of the workspace a context was created in (#3002)."""
+    from models.auth import Workspace
+
+    workspace = await db.get(Workspace, workspace_id)
+    return {"id": str(workspace_id), "name": workspace.name if workspace else None}
+
+
 async def handle_create_context(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -385,6 +497,16 @@ async def handle_create_context(
         try:
             from services.context_service import ContextService
             from services.quota_service import QuotaService
+
+            # #3002: where the context is created — the workspace_id argument,
+            # else the connection's workspace, else (unbound) the one workspace
+            # where the caller may create this kind of context.
+            is_private = args.get("is_private", True)
+            workspace_id, target_refusal = await _create_context_workspace(
+                db, args, user_id, workspace_id, is_private=is_private is not False
+            )
+            if target_refusal:
+                return target_refusal
 
             # Check workspace_id is available
             if not workspace_id:
@@ -441,7 +563,6 @@ async def handle_create_context(
                     )
 
             # Create context
-            is_private = args.get("is_private", True)
             context_service = ContextService(db)
             context = await execute_with_timeout(
                 context_service.create_context(
@@ -476,6 +597,7 @@ async def handle_create_context(
                             "status": "success",
                             "message": f"Context '{args['name']}' created successfully.",
                             **_context_response_fields(context),
+                            "workspace": await _workspace_ref(db, workspace_id),
                         }
                     ),
                 )
