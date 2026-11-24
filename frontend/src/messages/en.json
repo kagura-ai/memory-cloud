@@ -4175,6 +4175,11 @@
     "descriptionPlaceholder": "What is this context for?",
     "aiConfigTitle": "About this context",
     "aiConfigDesc": "Your notes on what this context is for and how it is organized",
+    "publicEndpointNote": {
+      "title": "Published as a public MCP endpoint",
+      "owner": "Public MCP clients do not receive the summary and usage guide below. get_context_info on the public endpoint returns the endpoint's own public description and usage guide, which the workspace owner manages through the public MCP endpoint API (PATCH /api/v1/resources/{resourceId}/public-mcp).",
+      "managed": "Public MCP clients do not receive the summary and usage guide below. get_context_info on the public endpoint returns the endpoint's own public description and usage guide, which the application that manages this context sets for the workspace owner where this deployment allows it. The owner can always set them through PATCH /api/v1/resources/{resourceId}/public-mcp."
+    },
     "templateLabel": "Template (optional)",
     "templatePlaceholder": "Choose a template to auto-fill Summary and Usage Guide...",
     "templateHelp": "Or customize the fields below manually.",

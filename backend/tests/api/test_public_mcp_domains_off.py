@@ -290,6 +290,8 @@ async def test_fixed_address_is_served_under_any_host(switch_off, monkeypatch) -
     load = AsyncMock(return_value=(endpoint, False))
     monkeypatch.setattr(pt, "_load", load)
     monkeypatch.setattr(pt, "check_public_rate_limit", AsyncMock(return_value=None))
+    # The instructions' dataset counts (#2995) are their own read, on memories.
+    monkeypatch.setattr(pt, "dataset_facts", AsyncMock(return_value=None))
     async with _client(ALIAS) as c:
         r = await c.post(f"/mcp/public/{endpoint.public_id}", json=INIT)
     assert r.status_code == 200, r.text

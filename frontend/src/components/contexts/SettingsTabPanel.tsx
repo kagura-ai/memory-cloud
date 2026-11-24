@@ -549,6 +549,22 @@ export function SettingsTabPanel({
             <CardDescription>{t("aiConfigDesc")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* #2995: public clients get the endpoint's own public text, not these notes. */}
+            {context.public_mcp_endpoint_live === true && (
+              <Alert data-testid="public-endpoint-note">
+                <AlertCircle className="h-4 w-4" />
+                <AlertTitle>{t("publicEndpointNote.title")}</AlertTitle>
+                <AlertDescription>
+                  {t(
+                    context.feed_management_mode === "feed" ||
+                      context.feed_management_mode === "stopping"
+                      ? "publicEndpointNote.managed"
+                      : "publicEndpointNote.owner",
+                    { resourceId: context.resource_id ?? "" },
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
             <div className="space-y-2">
               <Label>{t("templateLabel")}</Label>
               <Select

@@ -230,6 +230,13 @@ class ContextResponse(TZAwareBaseModel):
     feed_management_mode: str | None = Field(
         default=None, description="Feed ownership mode; display only"
     )
+    public_mcp_endpoint_live: bool = Field(
+        default=False,
+        description=(
+            "Whether the context backs a live public MCP endpoint, whose clients get the "
+            "endpoint's own public description and usage guide; display only"
+        ),
+    )
 
     id: UUID = Field(..., description="Context UUID")
     workspace_id: UUID | None = Field(default=None, description="Workspace that owns this context")
@@ -448,9 +455,10 @@ async def list_contexts(
         }
 
     context_responses = []
-    from services.sync_managed_guard import management_modes
+    from services.sync_managed_guard import live_public_endpoint_context_ids, management_modes
 
     managed_modes = await management_modes(db, context_ids)
+    live_public = await live_public_endpoint_context_ids(db, context_ids)
     linked_ids: frozenset[str] | None = None
     for context in contexts_list:
         # Issue #165: Privacy filtering
@@ -490,6 +498,7 @@ async def list_contexts(
                 is_locked=context.is_locked,  # Issue #85
                 writes_paused=context.id in writes_paused_ids,  # #1943
                 feed_management_mode=managed_modes.get(context.id),
+                public_mcp_endpoint_live=context.id in live_public,
                 sleep_mode=context.sleep_mode,
                 created_by=context.created_by,  # Issue #165
                 created_by_name=creator_names.get(context.created_by)
@@ -707,9 +716,13 @@ async def get_context(
     try:
         context = await service.get_context(user_id, context_id)
 
-        from services.sync_managed_guard import management_modes
+        from services.sync_managed_guard import (
+            live_public_endpoint_context_ids,
+            management_modes,
+        )
 
         managed_modes = await management_modes(db, [context.id])
+        live_public = await live_public_endpoint_context_ids(db, [context.id])
 
         # Get creator name
         creator_name = None
@@ -738,6 +751,7 @@ async def get_context(
             resource_id=context.resource_id,
             is_locked=context.is_locked,
             feed_management_mode=managed_modes.get(context.id),
+            public_mcp_endpoint_live=context.id in live_public,
             sleep_mode=context.sleep_mode,
             created_by=context.created_by,
             created_by_name=creator_name,

@@ -706,7 +706,11 @@ async def test_each_binding_field_is_compared(env, field):
 
 
 async def test_a_generation_change_makes_earlier_commands_stale(env):
-    """Unlink advances the generation; the revoked installation's current binding is admitted."""
+    """Unlink advances the generation: earlier commands are stale.
+
+    #2995: the revoked installation's current binding is refused too, with
+    the same 404 as an installation that does not match, and changes nothing.
+    """
     store = env.store
     target = await installed(store)
     _hostname, domain_id = await claimed(env, target)
@@ -727,12 +731,16 @@ async def test_a_generation_change_makes_earlier_commands_stale(env):
         assert (response.status_code, response.json()) == (409, STALE), action
     assert env.counts == {}
 
-    verified = await command(store, current, "verify", row_body(current, domain_id, "pending"))
-    assert verified.json()["domain"] == {"domain_id": domain_id, "state": "pending"}
-    removed = await command(store, current, "remove", row_body(current, domain_id, "pending"))
-    assert (removed.status_code, removed.json()["domain"]) == (200, None)
-    claim = await command(store, current, "claim", claim_body(current, name("new")))
-    assert claim.status_code == 200, claim.text
+    for action, body in (
+        ("verify", row_body(current, domain_id, "pending")),
+        ("remove", row_body(current, domain_id, "pending")),
+        ("claim", claim_body(current, name("new"))),
+    ):
+        response = await command(store, current, action, body)
+        assert (response.status_code, response.content) == (404, NOT_FOUND), action
+    rows = await rows_of(store)
+    assert [(str(row.id), row.state, row.check_seq) for row in rows] == [(domain_id, "pending", 0)]
+    assert env.counts == {} and env.dns.calls == []
 
 
 async def test_a_replaced_publication_is_404_and_never_adopted(env):

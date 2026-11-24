@@ -45,6 +45,7 @@ from config.constants import APP_VERSION
 from mcp_server.public.definitions import public_tool_definitions, public_tool_view
 from mcp_server.public.dispatch import call_public_tool
 from mcp_server.public.domains import public_domains_enabled
+from mcp_server.public.facts import DatasetFacts, dataset_facts, render_facts
 from mcp_server.public.limits import (
     PUBLIC_MAX_REQUEST_BYTES,
     check_public_rate_limit,
@@ -89,10 +90,12 @@ logger = get_logger(__name__)
 PUBLIC_SERVER_INFO = {"name": "kagura-memory-cloud-public", "version": APP_VERSION}
 
 PUBLIC_INSTRUCTIONS_NAME_CAP = 40
+# The whole text, name and counts included (worst case 323, #2995).
+PUBLIC_INSTRUCTIONS_MAX = 330
 _PUBLIC_INSTRUCTIONS = (
-    "Read-only public data: {name}. recall searches it; reference reads an entry in full; "
-    "explore finds related entries; list_tags lists categories; get_context_info "
-    "describes it. Nothing you send is stored."
+    "Read-only public data of {name}{facts}. Call get_context_info first for the owner's "
+    "description and usage guide. recall searches it{by}; list_tags lists categories. "
+    "Nothing you send is stored."
 )
 
 NOT_PUBLISHED_BODY = {
@@ -107,15 +110,24 @@ _PAUSED_RETRY_AFTER_SECONDS = 300
 _CONTROL_METHODS = frozenset({"initialize", "tools/list", "ping", "server/discover"})
 
 
-def public_instructions(endpoint: ServingEndpoint) -> str:
-    """The server ``instructions`` for one endpoint (at most 240 characters).
+def public_instructions(endpoint: ServingEndpoint, facts: DatasetFacts | None) -> str:
+    """The server ``instructions`` for one endpoint (at most ``PUBLIC_INSTRUCTIONS_MAX``).
 
-    The owner's public name is flattened and cut, so it cannot forge the
-    instruction boundary; the description and usage guide are data, returned
-    by ``get_context_info``.
+    A fixed template (#2995): the owner's public name, flattened and cut so it
+    cannot forge the instruction boundary; the dataset's entry kinds and
+    counts in fixed words (``facts.render_facts``), left out when they could
+    not be read; and a fixed search hint per kind. The description and usage
+    guide are data, returned by ``get_context_info``.
     """
     name = cut_summary(flatten_summary(endpoint.public_name), PUBLIC_INSTRUCTIONS_NAME_CAP)
-    return _PUBLIC_INSTRUCTIONS.format(name=name or "this dataset")
+    shown, by = render_facts(facts) if facts is not None else (None, "")
+    return _PUBLIC_INSTRUCTIONS.format(
+        name=name or "this dataset", facts=f": {shown}" if shown else "", by=by
+    )
+
+
+async def _instructions(endpoint: ServingEndpoint) -> str:
+    return public_instructions(endpoint, await dataset_facts(endpoint))
 
 
 def _public_complete(result: dict[str, Any]) -> dict[str, Any]:
@@ -123,10 +135,11 @@ def _public_complete(result: dict[str, Any]) -> dict[str, Any]:
     return {**_complete(result), "_meta": {SERVER_INFO_META_KEY: PUBLIC_SERVER_INFO}}
 
 
-def _public_discover(endpoint: ServingEndpoint) -> dict[str, Any]:
-    # The tools/list TTL instead of an hour: an unpublish must reach clients.
+def _public_discover(instructions: str) -> dict[str, Any]:
+    # The tools/list TTL instead of an hour: an unpublish must reach clients,
+    # and the counts in the instructions are cached for as long.
     return {
-        **_discover_result(public_instructions(endpoint)),
+        **_discover_result(instructions),
         "ttlMs": TOOLS_LIST_TTL_MS,
         "_meta": {SERVER_INFO_META_KEY: PUBLIC_SERVER_INFO},
     }
@@ -352,7 +365,9 @@ async def _serve_stateless(
     if method in _CONTROL_METHODS and not await _control_allowed(send, endpoint):
         return
     if method == "server/discover":
-        await _send_jsonrpc_result(send, None, request_id, _public_discover(endpoint))
+        await _send_jsonrpc_result(
+            send, None, request_id, _public_discover(await _instructions(endpoint))
+        )
     elif method == "ping":
         await _send_jsonrpc_result(send, None, request_id, _public_complete({}))
     elif method == "tools/list":
@@ -505,7 +520,7 @@ async def _dispatch_public_message(
                 "protocolVersion": protocol_version,
                 "capabilities": SERVER_CAPABILITIES,
                 "serverInfo": PUBLIC_SERVER_INFO,
-                "instructions": public_instructions(endpoint),
+                "instructions": await _instructions(endpoint),
             },
         )
     elif method == "tools/list":

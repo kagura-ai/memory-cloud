@@ -499,3 +499,86 @@ async def test_usage_budget_idle_without_a_row(world: World, monkeypatch) -> Non
             )
         ).scalar_one()
         assert count == 0
+
+
+async def test_a_nul_in_any_text_is_refused_before_the_database(world: World, switch_on) -> None:
+    """#2995: refused with the owner API's 422 VAL-001, never a 503 at the flush."""
+    async with _client(world, world.owner) as c:
+        for field in ("public_name", "public_description", "public_usage_guide"):
+            r = await c.post(_path(world.slugs["public"]), json={**BODY, field: "a\x00b"})
+            assert (r.status_code, r.json()["error"]) == (422, "VAL-001"), field
+        r = await c.post(_path(world.slugs["public"]), json=BODY)
+        assert r.status_code == 201, r.text
+        try:
+            for field in ("public_name", "public_description", "public_usage_guide"):
+                r = await c.patch(_path(world.slugs["public"]), json={field: "a\x00b"})
+                assert (r.status_code, r.json()["error"]) == (422, "VAL-001"), field
+            r = await c.get(_path(world.slugs["public"]))
+            assert (r.json()["public_name"], r.json()["public_usage_guide"]) == (
+                BODY["public_name"],
+                BODY["public_usage_guide"],
+            )
+        finally:
+            assert (await c.delete(_path(world.slugs["public"]))).status_code == 204
+    async with world.factory() as s:
+        events = (
+            await s.scalars(
+                select(OperationHistory.operation).where(
+                    OperationHistory.workspace_id == world.ws,
+                    OperationHistory.operation == "integration.updated",
+                )
+            )
+        ).all()
+        assert events == []
+        await s.execute(delete(OperationHistory).where(OperationHistory.workspace_id == world.ws))
+        await s.execute(delete(PublicMcpEndpoint).where(PublicMcpEndpoint.workspace_id == world.ws))
+        await s.commit()
+
+
+async def test_the_owner_patch_locks_the_row_it_edits(world: World, switch_on) -> None:
+    """#2995: the changed fields are computed against the locked row.
+
+    While another transaction holds the row, the owner's PATCH waits (it does
+    not fail and does not read the row before the holder commits); it then
+    sees the holder's text and records only what it changes itself.
+    """
+    import asyncio
+
+    async with _client(world, world.owner) as c:
+        r = await c.post(_path(world.slugs["public"]), json=BODY)
+        assert r.status_code == 201, r.text
+        try:
+            async with world.factory() as holder:
+                await holder.execute(
+                    text(
+                        "UPDATE public_mcp_endpoints SET public_description = 'Held text' "
+                        "WHERE workspace_id = :ws AND revoked_at IS NULL"
+                    ),
+                    {"ws": world.ws},
+                )
+                patch = asyncio.create_task(
+                    c.patch(
+                        _path(world.slugs["public"]),
+                        json={"public_description": "Held text", "public_usage_guide": "New"},
+                    )
+                )
+                await asyncio.sleep(0.5)
+                assert not patch.done()
+                await holder.commit()
+            r = await patch
+            assert r.status_code == 200, r.text
+        finally:
+            assert (await c.delete(_path(world.slugs["public"]))).status_code == 204
+    async with world.factory() as s:
+        changed = (
+            await s.scalars(
+                select(OperationHistory.changed_fields).where(
+                    OperationHistory.workspace_id == world.ws,
+                    OperationHistory.operation == "integration.updated",
+                )
+            )
+        ).all()
+        assert changed == [["usage_guide"]]
+        await s.execute(delete(OperationHistory).where(OperationHistory.workspace_id == world.ws))
+        await s.execute(delete(PublicMcpEndpoint).where(PublicMcpEndpoint.workspace_id == world.ws))
+        await s.commit()

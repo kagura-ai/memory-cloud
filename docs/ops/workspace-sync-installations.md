@@ -295,7 +295,69 @@ observation (experimental, #2921): advertised as
 `public.domains.operations.v1` while the operator turns
 `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` on. The states, limits, TXT proof
 and audit rows are those of the owner API. See "Installation-bound owner
-operations" in [Public MCP custom domains](../public-mcp-domains.md).
+operations" in [Public MCP custom domains](../public-mcp-domains.md). An
+unlinked (`revoked`) installation's client can no longer run these commands
+(#2995): they answer the same `404` `not_found` as an installation that does
+not match. The owner API keeps managing the domain.
+
+**Public text of the installation's endpoint (experimental, #2995).** The
+endpoint's public description and usage guide are what anonymous clients get
+from `get_context_info`; the context's own summary and usage guide are not
+served there (provisioning leaves them empty). Besides the owner API
+(`PATCH /api/v1/resources/{resource_id}/public-mcp`), a managing application
+acting for the canonical owner can set them through the installation's
+registered browser client, advertised as `public.text.operations.v1` while the
+operator turns `SYNC_PUBLICATION_TEXT_OPERATIONS_ENABLED` on (off: `404` before
+authentication, no statement):
+
+```
+POST /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-text
+Authorization: Bearer kmc_oidc_at_...
+Content-Type: application/json
+
+{"expected": { ...the seven binding fields of the domain observation... },
+ "public_description": "Example Shop product data.",
+ "public_usage_guide": "Search by product name or model number."}
+
+200 {"endpoint_id": "...", "public_id": "pmcp_...", "public_description": "...",
+     "public_usage_guide": "...", "updated_at": "...Z",
+     "changed_fields": ["description", "usage_guide"]}
+```
+
+- **Who**: as for the domain commands: the current canonical owner (an
+  `OWNER` member) with a token of the installation's browser client whose
+  token, grant and client carry `integrations:manage`. Any other member, a
+  second `OWNER`, another workspace or installation, an unlinked (`revoked`)
+  installation, or an endpoint that is no longer the binding's (unpublished or
+  republished) is `404` `not_found`; a `workspaces:read` token is `403`
+  `insufficient_scope`; a slot-suspended owner `403` `SLOT-001`. The endpoint
+  edited is the one the installation's binding names, never one a request
+  names.
+- **Body** (a text containing a NUL character is `400` `invalid_request`, and
+  the owner API answers `422` `VAL-001` for one): `expected` is the binding last read (all seven fields, as in
+  "Installation-bound owner operations" of [Public MCP custom
+  domains](../public-mcp-domains.md)); a binding that is not the current one is
+  `409` `public_mcp_domain_command_stale` (the same code as the domain
+  commands). At least one of `public_description` (≤ 2,000 characters) and
+  `public_usage_guide` (≤ 4,000) is present; an omitted field keeps its value,
+  `""`, a blank text or `null` clears it, as in the owner API. `public_name`
+  and any other key are `400` `invalid_request` (the name stays the owner's);
+  a body over 98,304 bytes is `413` `request_too_large`.
+- **Effect**: one transaction; the endpoint row is locked `NOWAIT` (held
+  elsewhere: `409` `RES-002`, send the same request again). A change writes one
+  `integration.updated` operation record (actor: the owner; `principal_kind`
+  `oauth` and the acting OIDC client's `client_id`, stored as `sha256:` plus a
+  digest prefix when longer than 48 characters; the changed field names, never
+  the text), the same record the owner API writes, and one `audit_logs` row
+  `public_mcp_endpoint.text_updated` with the fields of the domain commands'
+  audit rows (the owner as actor, the full `client_id`, the `installation_id`)
+  and the changed field names. Sending the text it already
+  has changes and records nothing (`changed_fields: []`). The owner's edits and
+  the application's are last-writer-wins.
+- **Limits**: the route counts in its own OIDC burst bucket,
+  `publication-text`. Operators: enabling the switch gives every existing
+  `integrations:manage` grant of an installation's client this power; no new
+  scope or consent is involved.
 
 The sync service id can never be `public-mcp-domains`: `sync_service register`
 refuses that reserved id.

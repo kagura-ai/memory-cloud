@@ -192,6 +192,9 @@ class Settings(BaseSettings):
     sync_observability_enabled: bool = False
     # #2921: the owner's custom-domain commands for an installation (experimental).
     sync_publication_domain_operations_enabled: bool = False
+    # #2995: a managing application sets the public text of its installation's
+    # endpoint through the installation's browser client (experimental).
+    sync_publication_text_operations_enabled: bool = False
     sync_authorization_ttl_seconds: int = Field(default=604800, ge=60, le=2592000)
     oidc_issuer: str = ""
     oidc_signing_keys_file: str = ""

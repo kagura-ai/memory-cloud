@@ -65,6 +65,7 @@ from utils.exceptions import NotFoundException, SyncLockBusyError
 __all__ = [
     "DomainCommand",
     "InstallationDomainGuard",
+    "admitted_command",
     "bound_installation",
     "claim_publication_domain",
     "remove_publication_domain",
@@ -144,22 +145,25 @@ def _expected(expected: PublicationBindingExpectation) -> tuple[object, ...]:
 
 
 @asynccontextmanager
-async def _admitted(
+async def admitted_command(
     db: AsyncSession, command: DomainCommand, *, paid_guarded: bool
 ) -> AsyncIterator[int]:
     """Admit the caller in the current transaction and yield the workspace's ownership epoch.
 
     The canonical owner and ``OWNER`` member with a live ``integrations:manage``
     token, the registered browser client, the installation of the path and
-    the binding exactly as the command names it. The locks are held until the
-    transaction ends.
+    the binding exactly as the command names it, and an installation that is
+    not unlinked (#2995: a ``revoked`` installation is the same 404 as one
+    that does not match). The locks are held until the transaction ends. The
+    owner's installation-bound commands all admit through here: the domain
+    commands and the public text (``services.public_mcp_text``).
     """
     async with sync_authority(
         db, command.workspace_id, command.principal, paid_guarded=paid_guarded
     ) as authority:
         service = await registered_service(db, browser_client_id=command.principal.client_id)
         try:
-            _installation, target = await bound_installation(
+            installation, target = await bound_installation(
                 db, command.workspace_id, command.installation_id, command.principal, service
             )
         except DBAPIError as exc:
@@ -168,12 +172,16 @@ async def _admitted(
             raise
         if _binding(target) != _expected(command.expected):
             raise PublicMcpDomainCommandStaleError()
+        # Read from the row this admission just locked, after the binding:
+        # an unlink between two admissions of one command stays stale.
+        if installation.state == "revoked":
+            raise NotFoundException("Synchronization installation")
         yield authority.workspace.ownership_epoch
 
 
 async def _precheck(db: AsyncSession, command: DomainCommand) -> int:
     """The pre-admission: decide before any counter, lookup or paid check; return the epoch."""
-    async with _admitted(db, command, paid_guarded=False) as epoch:
+    async with admitted_command(db, command, paid_guarded=False) as epoch:
         await db.commit()
     return epoch
 
@@ -207,7 +215,7 @@ class InstallationDomainGuard:
     @asynccontextmanager
     async def admitted(self, db: AsyncSession, *, paid_guarded: bool) -> AsyncIterator[None]:
         """Admit the caller again; held until the lifecycle's commit."""
-        async with _admitted(db, self.command, paid_guarded=paid_guarded) as epoch:
+        async with admitted_command(db, self.command, paid_guarded=paid_guarded) as epoch:
             if epoch != self.epoch:
                 raise PublicMcpDomainCommandStaleError()
             yield

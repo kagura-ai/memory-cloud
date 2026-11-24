@@ -33,6 +33,7 @@ advertise no enabled capabilities. A release version is never evidence of suppor
 | `public.domains.v1` | Public budget, `MCP_PUBLIC_DOMAINS_ENABLED` |
 | `public.domains.observation.v1` | Installations, public budget, `MCP_PUBLIC_DOMAINS_ENABLED` |
 | `public.domains.operations.v1` (experimental) | Domain observation, `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` |
+| `public.text.operations.v1` (experimental) | Installations, `SYNC_PUBLICATION_TEXT_OPERATIONS_ENABLED` |
 
 These profiles conservatively describe support for complete consumer workflows;
 they do not remove diagnostic reads which intentionally survive worker shutdown.
@@ -42,8 +43,11 @@ setup. A domain operation additionally requires `public.domains.v1` and its
 current independent entitlement/proof/TLS checks. Reading an installation's
 domain through scoped OIDC needs `public.domains.observation.v1`; claiming,
 verifying and removing it through the installation's browser client needs
-`public.domains.operations.v1` (experimental, optional for a consumer). A
-client that does not see a capability keeps to the paths it already supports.
+`public.domains.operations.v1` (experimental, optional for a consumer).
+Setting the public description and usage guide of the installation's endpoint
+through the installation's browser client needs `public.text.operations.v1`
+(experimental, optional for a consumer, #2995). A client that does not see a
+capability keeps to the paths it already supports.
 
 The producer model is `models.sync_contract.SyncConfigurationV1`. The pure
 `services.sync_contract.require_sync_contract` helper is an executable consumer
@@ -78,6 +82,7 @@ operate feeds; only the current brand owner controls consent/contracts.
 | `/workspaces/{wid}/sync-authorizations`, `/sync-installations` | `integrations:manage`, current owner and recorded paid consent | [Installations](workspace-sync-installations.md) |
 | `GET /workspaces/{wid}/sync-installations/{iid}/publication-domains` | `workspaces:read`, current canonical owner | [Domains](../public-mcp-domains.md) |
 | `POST /workspaces/{wid}/sync-installations/{iid}/publication-domains/claim`, `/verify`, `/remove` (experimental) | `integrations:manage`, current canonical owner, the confirmed binding | [Domains](../public-mcp-domains.md) |
+| `POST /workspaces/{wid}/sync-installations/{iid}/publication-text` (experimental) | `integrations:manage`, current canonical owner, the confirmed binding, installation not unlinked | [Installations](workspace-sync-installations.md) |
 | `/sync/installations/{iid}`, `/schema`, `/runs/*` | Installation-bound worker token; `schema:read`, `records:write`, `results:read` | [Credentials](sync-service-credentials.md), [feed protocol](staged-feed-sync.md) |
 | Human `/workspaces/{wid}/sync-installations/{iid}/records` and diff | `sync.records:read`, current Context read rights | [Feed protocol](staged-feed-sync.md) |
 | Human feed config/approval and `/management/*` | `integrations:manage`, current Editor; ownership where required | [Managed data](feed-managed-sync.md) |
@@ -106,7 +111,8 @@ targets or a disabled surface, 409 for changing authority/baselines/approval or
 `SYNC-LOCKED`, 429 for the fail-closed OIDC burst limiter (per peer, and per
 credential holder over the peer budget: client and user for the human control
 routes, sync client for the service routes; every human control
-route, `sync-authorizations` included, counts in one `sync-human` bucket), and 503
+route, `sync-authorizations` included, counts in one `sync-human` bucket, except
+`publication-text`, which has its own `publication-text` bucket), and 503
 `temporarily_unavailable` for unavailable authority/replay/burst stores. The
 installation-bound domain operations also answer 429 `RATE-001` with
 `Retry-After` for the workspace's domain verification limits, and 409
