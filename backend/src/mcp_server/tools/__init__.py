@@ -295,8 +295,21 @@ async def _charge_workspace(
     from mcp_server.tools._helpers import get_mcp_key_workspace_scope
     from mcp_server.tools._workspace_binding import charge_workspace
 
+    # #3002: create_context counts in the workspace it names. An unbound one
+    # without workspace_id counts in the connection's workspace (picking the
+    # creatable workspace is the handler's).
+    target = None
+    if tool_name == "create_context":
+        try:
+            target = UUID(str(args["workspace_id"])) if args.get("workspace_id") else None
+        except ValueError:
+            target = None
     return await charge_workspace(
-        user_id, workspace_id, _call_context_id(tool_name, args), get_mcp_key_workspace_scope()
+        user_id,
+        workspace_id,
+        _call_context_id(tool_name, args),
+        get_mcp_key_workspace_scope(),
+        target_workspace_id=target,
     )
 
 

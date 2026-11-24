@@ -105,7 +105,9 @@ async def default_context_workspace(
     same statement), and the member's context access list
     (``reaches_context``). ``reason`` is ``ok`` or why the context does not
     bind: ``not_found`` (missing, deleted, or its workspace deleted),
-    ``not_a_member``, ``private`` or ``not_reachable``. Raises on a database
+    ``not_a_member``, ``private``, ``not_reachable``, or the workspace
+    cannot be used (``workspace_suspended``, ``feature_not_available``: no
+    seat), checked last and only then. Raises on a database
     error (the transport answers 503, like its other lookups).
     """
     from sqlalchemy import and_, select
@@ -117,12 +119,11 @@ async def default_context_workspace(
     row = (
         await db.execute(
             select(
-                Context.workspace_id,
+                Workspace,
+                WorkspaceMember,
                 (Context.is_private.is_(False) | owned_by(Context.created_by, user_id)).label(
                     "readable"
                 ),
-                WorkspaceMember.role,
-                WorkspaceMember.allowed_context_ids,
             )
             .join(Workspace, Workspace.id == Context.workspace_id)
             .outerjoin(
@@ -141,14 +142,22 @@ async def default_context_workspace(
     ).one_or_none()
     if row is None:
         return None, "not_found"
-    workspace_id, readable, role, allowed = row
-    if role is None:
+    workspace, member, readable = row
+    if member is None:
         return None, "not_a_member"
     if not readable:
         return None, "private"
-    if not reaches_context(role, allowed, context_id):
+    if not reaches_context(member.role, member.allowed_context_ids, context_id):
         return None, "not_reachable"
-    return workspace_id, "ok"
+    # The gates the resolvers run after membership: a suspended workspace slot
+    # (``workspace_suspended``) and a member without a seat on the plan
+    # (``feature_not_available``). Read only when every check above passed.
+    from mcp_server.tools.workspaces import _refusal
+
+    refusal = await _refusal(db, workspace, member, user_id)
+    if refusal is not None:
+        return None, refusal
+    return workspace.id, "ok"
 
 
 async def resolve_default_context_binding(
@@ -188,40 +197,46 @@ async def charge_workspace(
     connection_workspace_id: UUID | None,
     context_id: UUID | None,
     key_workspace_id: UUID | None,
+    *,
+    target_workspace_id: UUID | None = None,
 ) -> UUID | None:
     """The workspace a tool call counts against (#3001): limit, headroom and row.
 
     A call on a context counts in the context's workspace when the caller is a
     member there, else in the connection's workspace. Under a workspace-scoped
     key it is always the key's workspace (no read). One indexed read, only
-    when the call names a context. A failed read falls back to the
-    connection's workspace (logged): metering never fails a call.
+    when the call names a context. ``target_workspace_id`` is a workspace the
+    call names instead (``create_context(workspace_id=)``): it counts there
+    when the caller is a member. Only a live context in a live workspace
+    counts in its workspace. A failed read falls back to the connection's
+    workspace (logged): metering never fails a call.
     """
     if key_workspace_id is not None:
         return key_workspace_id
-    if context_id is None:
+    if context_id is None and target_workspace_id is None:
         return connection_workspace_id
     from sqlalchemy import and_, select
 
     from db.base import get_db
-    from models.auth import Context, WorkspaceMember
+    from models.auth import Context, Workspace, WorkspaceMember
+
+    if context_id is not None:
+        query = (
+            select(Workspace.id)
+            .join(Context, Context.workspace_id == Workspace.id)
+            .where(Context.id == context_id, Context.deleted_at.is_(None))
+        )
+    else:
+        query = select(Workspace.id).where(Workspace.id == target_workspace_id)
+    query = query.join(
+        WorkspaceMember,
+        and_(WorkspaceMember.workspace_id == Workspace.id, WorkspaceMember.user_id == user_id),
+    ).where(Workspace.deleted_at.is_(None))
 
     try:
         async with contextlib.aclosing(get_db()) as sessions:
             async for db in sessions:
-                workspace_id = (
-                    await db.execute(
-                        select(Context.workspace_id)
-                        .join(
-                            WorkspaceMember,
-                            and_(
-                                WorkspaceMember.workspace_id == Context.workspace_id,
-                                WorkspaceMember.user_id == user_id,
-                            ),
-                        )
-                        .where(Context.id == context_id, Context.deleted_at.is_(None))
-                    )
-                ).scalar_one_or_none()
+                workspace_id = (await db.execute(query)).scalar_one_or_none()
                 await db.commit()
                 return workspace_id if workspace_id is not None else connection_workspace_id
     except Exception as e:  # noqa: BLE001 - metering falls back, never fails the call
