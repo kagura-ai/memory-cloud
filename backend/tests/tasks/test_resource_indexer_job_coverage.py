@@ -198,6 +198,20 @@ class TestCanRunIndexer:
         assert reason == "redis_error_fail_open"
 
 
+class TestCapHoldsWhenTheTtlReadFails:
+    """#3009: a failed TTL read must not fail open past the hourly cap."""
+
+    async def test_refused_with_the_plain_retry(self):
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=str(MAX_RUNS_PER_HOUR))
+        client.pttl = AsyncMock(side_effect=ConnectionError("down"))
+        with patch("tasks.resource_indexer_job.get_redis_client", return_value=client):
+            verdict = await check_indexer_rate_limit("res", uuid.uuid4())
+        assert verdict.allowed is False
+        assert verdict.limit == "hourly_cap"
+        assert verdict.wait_seconds == RATE_LIMITED_RETRY.total_seconds()
+
+
 class TestRecordIndexerRun:
     """Token-bucket recording: increments counter + stores timestamp, errors swallowed."""
 
@@ -1021,15 +1035,15 @@ class TestIntervalSkipNextTick:
 
     @pytest.mark.parametrize(
         ("counter_ttl", "wait", "logged"),
-        [(200, 200, 200), (3000, 300, 3000), (None, 300, 300)],
+        [(200, 200, 200), (3000, 3000, 3000), (None, 300, 300)],
         ids=["expires-before-next-tick", "expires-later", "no-ttl"],
     )
     async def test_hourly_cap_skip_waits_for_the_counter(
         self, db_session, seeded_state, counter_ttl, wait, logged
     ):
         """A row refused by the hourly cap is due slack before the counter
-        expires, at most RATE_LIMITED_RETRY ahead (a counter without a TTL
-        waits the plain retry)."""
+        expires, however far ahead, so it is not picked and refused at every
+        tick in between (a counter without a TTL waits the plain retry)."""
         clock = _Clock(time.time())
         redis = _ClockRedis(clock)
         rid = seeded_state.resource_id
@@ -1180,6 +1194,13 @@ class TestRateLimitedRetryAt:
         assert (
             rate_limited_retry_at(now, 10_000)
             == now + RATE_LIMITED_RETRY - RATE_LIMITED_RETRY_SLACK
+        )
+
+    def test_no_cap_waits_the_whole_time(self):
+        now = datetime(2026, 1, 1, 0, 0, 0)
+        assert (
+            rate_limited_retry_at(now, 2700, cap=None)
+            == now + timedelta(seconds=2700) - RATE_LIMITED_RETRY_SLACK
         )
 
     def test_never_before_now(self):

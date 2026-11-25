@@ -80,15 +80,21 @@ class IndexerRateLimit:
     wait_seconds: float | None = None
 
 
-def rate_limited_retry_at(now: datetime, wait_seconds: float) -> datetime:
+def rate_limited_retry_at(
+    now: datetime, wait_seconds: float, *, cap: timedelta | None = RATE_LIMITED_RETRY
+) -> datetime:
     """``next_run_at`` of a row the rate limit refused (#3009).
 
     ``now`` is the process clock (``utcnow()``), the clock the pick query of
     the next tick compares ``next_run_at`` with. The row is due no later than
-    the moment the limit admits it, at most ``RATE_LIMITED_RETRY`` ahead, and
-    never before ``now``.
+    the moment the limit admits it, at most ``cap`` ahead, and never before
+    ``now``. ``cap=None`` (the hourly cap) waits the whole time: a row whose
+    hour counter has 45 minutes left is not picked and refused at every tick
+    in between, where it would take one of the pick's slots each time.
     """
-    retry = min(timedelta(seconds=max(wait_seconds, 0.0)), RATE_LIMITED_RETRY)
+    retry = timedelta(seconds=max(wait_seconds, 0.0))
+    if cap is not None:
+        retry = min(retry, cap)
     return max(now, now + retry - RATE_LIMITED_RETRY_SLACK)
 
 
@@ -114,7 +120,13 @@ async def check_indexer_rate_limit(resource_id: str, context_id: UUID) -> Indexe
         if runs_this_hour >= MAX_RUNS_PER_HOUR:
             # The cap admits again when the hour counter expires. A missing key
             # (-2) or one without a TTL (-1) waits the plain retry.
-            ttl_ms = await redis_client.pttl(redis_key)
+            # A failed TTL read keeps the refusal (it must not fail open past
+            # the cap) and waits the plain retry too.
+            try:
+                ttl_ms = await redis_client.pttl(redis_key)
+            except Exception as e:
+                logger.warning("redis_rate_limit_ttl_failed", error=str(e))
+                ttl_ms = -1
             wait_seconds = ttl_ms / 1000 if ttl_ms > 0 else RATE_LIMITED_RETRY.total_seconds()
             return IndexerRateLimit(
                 False,
@@ -257,7 +269,11 @@ async def run_queued_indexers() -> JobResult:
                     )
                     # #3009: due by the moment the limit admits it, so the
                     # first tick from then on runs it.
-                    state.next_run_at = rate_limited_retry_at(utcnow(), wait_seconds)
+                    state.next_run_at = rate_limited_retry_at(
+                        utcnow(),
+                        wait_seconds,
+                        cap=None if verdict.limit == "hourly_cap" else RATE_LIMITED_RETRY,
+                    )
                     await db.commit()
                     rate_limited += 1
                     continue
