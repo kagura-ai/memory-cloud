@@ -16,7 +16,7 @@ from config.settings import get_settings
 from services import sync_audit, sync_feed_index
 from services.resource_indexer import IndexerMetrics
 from services.sync_feed_index import ActivityPruneSchedule, maintain_sync_runs
-from tasks.resource_indexer_job import run_queued_indexers
+from tasks.resource_indexer_job import IndexerRateLimit, run_queued_indexers
 
 
 @pytest.fixture
@@ -104,8 +104,8 @@ async def test_failing_prune_is_logged_and_the_same_tick_still_processes_queued_
         patch("tasks.resource_indexer_job.get_db", get_db),
         patch("tasks.resource_indexer_job.ResourceIndexer", return_value=indexer),
         patch(
-            "tasks.resource_indexer_job.can_run_indexer",
-            AsyncMock(return_value=(True, "ok")),
+            "tasks.resource_indexer_job.check_indexer_rate_limit",
+            AsyncMock(return_value=IndexerRateLimit(True, "ok")),
         ),
         patch("tasks.resource_indexer_job.record_indexer_run", AsyncMock()),
         structlog.testing.capture_logs() as logs,
