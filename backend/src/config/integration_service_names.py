@@ -6,8 +6,9 @@ profile's workspaces page shows::
 
     {"example-sync": "Example Service", "example-sync-eu": "Example Service"}
 
-Each value is 1-60 characters after stripping surrounding whitespace and has
-no control characters. Empty (the default) or ``{}`` maps nothing: a service
+Each key is 1-128 characters, without surrounding whitespace or control
+characters. Each value is 1-60 characters after stripping surrounding
+whitespace and has no control characters. Empty (the default) or ``{}`` maps nothing: a service
 is then shown by its id. Services that map to the same name are shown as one
 line. A malformed value raises ``ValueError`` naming the variable, which the
 Settings validator turns into a refused start.
@@ -23,15 +24,34 @@ from datetime import datetime
 
 ENV_NAME = "INTEGRATION_SERVICE_DISPLAY_NAMES"
 MAX_DISPLAY_NAME_LENGTH = 60
+MAX_SERVICE_ID_LENGTH = 128
+
+
+def _has_control_character(value: str) -> bool:
+    return any(unicodedata.category(ch) == "Cc" for ch in value)
+
+
+def _check_key(key: str) -> None:
+    """Refuse a service id key that is empty, too long, padded or has a control character."""
+    stripped = key.strip()
+    if not 1 <= len(stripped) <= MAX_SERVICE_ID_LENGTH:
+        raise ValueError(
+            f"{ENV_NAME}: a service id must be 1-{MAX_SERVICE_ID_LENGTH} characters after strip"
+        )
+    if _has_control_character(key):
+        raise ValueError(f"{ENV_NAME}: a service id contains a control character")
+    if stripped != key:
+        raise ValueError(f"{ENV_NAME}: the service id {stripped!r} has surrounding whitespace")
 
 
 def parse_integration_service_display_names(raw: str) -> dict[str, str]:
     """``{service id: display name}`` from the setting's JSON; ``{}`` when empty.
 
     Raises:
-        ValueError: Not a JSON object, a value that is not a string, a name
-            empty or longer than 60 characters after strip, or a control
-            character in a name.
+        ValueError: Not a JSON object, a value that is not a string, a key
+            empty or longer than 128 characters after strip, with surrounding
+            whitespace or a control character, a name empty or longer than 60
+            characters after strip, or a control character in a name.
     """
     if not raw.strip():
         return {}
@@ -45,13 +65,14 @@ def parse_integration_service_display_names(raw: str) -> dict[str, str]:
     for key, name in value.items():
         if not isinstance(key, str) or not isinstance(name, str):
             raise ValueError(f"{ENV_NAME}: keys and values must be strings")
+        _check_key(key)
         stripped = name.strip()
         if not 1 <= len(stripped) <= MAX_DISPLAY_NAME_LENGTH:
             raise ValueError(
                 f"{ENV_NAME}: the name for {key!r} must be 1-{MAX_DISPLAY_NAME_LENGTH} "
                 "characters after strip"
             )
-        if any(unicodedata.category(ch) == "Cc" for ch in stripped):
+        if _has_control_character(stripped):
             raise ValueError(f"{ENV_NAME}: the name for {key!r} contains a control character")
         names[key] = stripped
     return names

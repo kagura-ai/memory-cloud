@@ -52,6 +52,28 @@ def test_a_malformed_value_is_refused(raw: str) -> None:
         parse_integration_service_display_names(raw)
 
 
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ('{"": "Example Service"}', "1-128 characters"),
+        ('{"   ": "Example Service"}', "1-128 characters"),
+        ('{"' + "k" * 129 + '": "Example Service"}', "1-128 characters"),
+        ('{"example\\u0007sync": "Example Service"}', "control character"),
+        ('{" example-sync": "Example Service"}', "surrounding whitespace"),
+        ('{"example-sync ": "Example Service"}', "surrounding whitespace"),
+        ('{"example-sync\\t": "Example Service"}', "control character"),
+    ],
+)
+def test_a_malformed_key_is_refused(raw: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_integration_service_display_names(raw)
+
+
+def test_a_128_character_key_is_allowed() -> None:
+    raw = '{"' + "k" * 128 + '": "Example Service"}'
+    assert parse_integration_service_display_names(raw) == {"k" * 128: "Example Service"}
+
+
 def test_sixty_characters_are_allowed() -> None:
     raw = '{"example-sync": "' + "x" * 60 + '"}'
     assert parse_integration_service_display_names(raw) == {"example-sync": "x" * 60}

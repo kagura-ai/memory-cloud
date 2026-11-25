@@ -242,7 +242,7 @@ and no license is read):
   `services.integration_entitlements` or `models.integration_entitlement`
   (relative imports resolved), uses a name of the service through a module
   object, names one of the entry functions (the three above and the display read
-`inspect_workspace_services`), references or defines a
+  `inspect_workspace_services`), references or defines a
   mapped paid-integration class (a `WorkspaceIntegration*` class or a
   `workspace_integration_*` table), or names those modules or a mapped
   `workspace_integration_*` table in a string (docstrings and other text such
@@ -277,7 +277,8 @@ member of the workspace does not see that workspace there.
 
 `INTEGRATION_SERVICE_DISPLAY_NAMES` maps service ids to display names (JSON
 object; each name 1-60 characters after strip, no control characters; a
-malformed value refuses to start). Ids that map to the same name are shown as
+malformed value refuses to start). Each service id key is 1-128 characters,
+without surrounding whitespace or control characters. Ids that map to the same name are shown as
 one line, ending at the latest end among them. An id without a mapping is shown
 by its id. Empty (the default) maps nothing.
 
