@@ -4,6 +4,26 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.183.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.183.0) — 2026-11-25
+
+The profile's workspaces page lists the integration services in force for each workspace, and the resource indexer runs a held-back resource at the first tick its limit allows. There is no migration. One new setting, empty by default, gives integration services their display names.
+
+### Added
+- **The workspaces page lists the integration services in force** ([#3010](https://github.com/kagura-ai/memory-cloud/issues/3010)): under each owned workspace's plan, `/profile/workspaces` shows one line per integration service in force now, with its name and the date access ends (in the viewer's locale and time zone).
+  - The account API returns the same as `workspaces[].services` (`[{name, valid_until}]`, sorted by name, empty when none) on `GET /api/v1/me/workspace-slots` and on the selection save.
+  - A service is in force by the rule that admits the service's own routes: the workspace is on the top tier, and the tier's window and the service's licence window are both open. One function decides both.
+  - The page lists owned workspaces, so only the owner sees the lines. A deployment without external billing has no licence rows and shows nothing new.
+
+### Fixed
+- **The indexer runs a held-back resource at the first tick its limit allows** ([#3009](https://github.com/kagura-ai/memory-cloud/issues/3009)). A resource held back by the minimum interval (10 minutes) or by the hourly cap ran one 5-minute tick later than the limit allows.
+  - The interval check allows 60 s for the run's duration. A resource whose queue never empties now runs every 10 minutes instead of every 15.
+  - The cap is unchanged at 6 runs per hour.
+  - An interval wait is logged as `indexer_waiting_for_interval` (before: `indexer_skipped`). A cap wait is still `indexer_skipped`. Both carry `reason` and `wait_seconds`.
+
+### Operators
+- `INTEGRATION_SERVICE_DISPLAY_NAMES` (JSON object, empty by default) maps integration service ids to the names the workspaces page shows. Ids with the same name are shown as one line, ending at the latest end among them. An id without a mapping is shown by its id. A malformed value stops the app from starting. See docs/ops/paid-integration-entitlements.md.
+- A resource that changes continuously is now indexed up to 6 times an hour instead of 4, so its embedding calls rise by the same ratio.
+
 ## [v0.182.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.182.0) — 2026-11-25
 
 An MCP connection's default context now decides the workspace it works in. A connection that is bound to no workspace lists the contexts of every workspace the user belongs to, and `create_context` names the workspace it creates in. `recall` can return its results in date order. There is no migration and no new setting.
