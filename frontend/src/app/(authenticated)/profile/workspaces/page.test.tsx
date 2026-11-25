@@ -21,6 +21,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/base";
+import { formatDate } from "@/lib/utils/datetime";
 import type {
   SlotWorkspace,
   WorkspaceSlotPreview,
@@ -1152,3 +1153,61 @@ describe("another change in progress (409 RES-002 workspace_slots_busy)", () => 
   });
 });
 
+
+describe("#3010 integration services in force, next to the plan", () => {
+  const until = (name: string, iso: string) =>
+    `services.until|${JSON.stringify({ name, date: formatDate(iso, "UTC", "en") })}`;
+  const servicesOf = (id: string, name: string) =>
+    within(row(id)).queryByRole("list", {
+      name: `services.label|${JSON.stringify({ name })}`,
+    });
+
+  it("one service: its name and end date under the plan", async () => {
+    const data = beforeTermEnd();
+    data.workspaces[1] = {
+      ...data.workspaces[1],
+      services: [
+        { name: "Example Service", valid_until: "2026-12-14T00:00:00Z" },
+      ],
+    };
+    await renderLoaded(data);
+    const list = servicesOf("w2", "Research");
+    expect(list).not.toBeNull();
+    expect(
+      within(list as HTMLElement)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual([until("Example Service", "2026-12-14T00:00:00Z")]);
+  });
+
+  it("two services: one line each, in the order given, as plain text", async () => {
+    const data = beforeTermEnd();
+    data.workspaces[1] = {
+      ...data.workspaces[1],
+      services: [
+        { name: "<b>Example Service</b>", valid_until: "2026-12-14T00:00:00Z" },
+        { name: "other-sync", valid_until: "2027-01-01T00:00:05Z" },
+      ],
+    };
+    await renderLoaded(data);
+    const list = servicesOf("w2", "Research") as HTMLElement;
+    expect(
+      within(list)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual([
+      until("<b>Example Service</b>", "2026-12-14T00:00:00Z"),
+      until("other-sync", "2027-01-01T00:00:05Z"),
+    ]);
+    expect(list.querySelector("b")).toBeNull();
+  });
+
+  it("no services: no line (an empty list and a missing field alike)", async () => {
+    const data = beforeTermEnd();
+    data.workspaces[0] = { ...data.workspaces[0], services: [] };
+    await renderLoaded(data);
+    expect(servicesOf("w1", "Personal")).toBeNull();
+    expect(servicesOf("w2", "Research")).toBeNull();
+    expect(screen.queryByText(/^services\.until/)).toBeNull();
+  });
+});

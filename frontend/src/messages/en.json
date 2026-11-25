@@ -5821,6 +5821,10 @@
     },
     "reason": "Suspended because you own more workspaces than your allowance. Nobody, members included, can use it until it is resumed. Its data is kept.",
     "contractNote": "Cannot be deleted while its paid subscription is active.",
+    "services": {
+      "label": "Integration services of {name}",
+      "until": "{name} until {date}"
+    },
     "changePlan": "Change plan",
     "planOpening": "Opening the plan page…",
     "planUnavailable": "Plan changes are not available on this deployment.",
