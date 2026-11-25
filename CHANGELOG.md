@@ -4,6 +4,42 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.182.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.182.0) — 2026-11-25
+
+An MCP connection's default context now decides the workspace it works in. A connection that is bound to no workspace lists the contexts of every workspace the user belongs to, and `create_context` names the workspace it creates in. `recall` can return its results in date order. There is no migration and no new setting.
+
+A connection is **bound** to a workspace when its URL names one (`/mcp/w/{id}`), when its credential is a workspace-scoped API key, or when it has a default context. Otherwise it is **unbound**.
+
+### Added
+- **`recall` can return its results in date order** ([#3004](https://github.com/kagura-ai/memory-cloud/issues/3004)): `recall` and `POST /api/v1/memory/recall` take `order="date"`. The default (`relevance`) response is unchanged.
+  - The search is the same; the results come back oldest first.
+  - Each result carries `date` (`YYYY-MM-DD`) and `date_source`: the event's own day as stored (`event`), else the UTC day the fact was stated (`observed`), else the UTC day the row was created (`created`). The response carries `order: "date"`.
+  - Superseded rows are included, with their `superseded_by` label, unless the caller sends `include_superseded=false`. Unless it does, the result selector does not run either.
+  - `confidence`, `full` and the `max_chars` cut still follow relevance.
+  - An unknown value is `invalid_argument` on MCP and 422 on REST. The share-key recall route honours the option too.
+
+### Changed
+- **The default context of an MCP connection decides its workspace** ([#3000](https://github.com/kagura-ai/memory-cloud/issues/3000)). This applies when the URL names no workspace and the credential is not a workspace-scoped key. The default context can come from `?context=`, from the API key or from the OAuth app's grant.
+  - It is checked on every request: the context is live, the user is a member of its workspace and can reach the context, and the workspace can be used (slot and seat).
+  - If the check fails, the connection works in the workspace selected in the web UI, as before, and the reason is logged. It never fails the request.
+  - The web UI's selection is not changed, and switching it no longer moves such a connection.
+  - A connection that keeps a session re-initializes when its workspace changes.
+  - The consent page and the API-key form say that the default context also chooses the workspace.
+- **`list_contexts` on an unbound connection lists every member workspace** ([#3001](https://github.com/kagura-ai/memory-cloud/issues/3001)).
+  - Each item carries `workspace: {id, name}`; contexts with the same name in two workspaces are both listed.
+  - The order is most recently used first across workspaces, and one cursor pages through it.
+  - `limit` and `can_create` are left out of this listing. A workspace that cannot be used is left out and named in `skipped_workspaces` with a reason.
+  - `workspace_id` still narrows the listing to one workspace, and a bound connection's listing is unchanged.
+- **`create_context` names its workspace** ([#3002](https://github.com/kagura-ai/memory-cloud/issues/3002)).
+  - The result carries `workspace: {id, name}`.
+  - `workspace_id` creates in that workspace, under the same role, slot and plan checks. A workspace-scoped key or a URL workspace can only name its own.
+  - An unbound caller who may create in two or more workspaces must now pass `workspace_id`: the call is refused with `workspace_required` and lists the candidates.
+- **A call counts against the workspace of the context it names** ([#3001](https://github.com/kagura-ai/memory-cloud/issues/3001)): the daily MCP call limit, the plan headroom figure and the usage row, when the user is a member there. `create_context(workspace_id=)` counts against that workspace. Under a workspace-scoped key a call always counts in the key's workspace.
+
+### Operators
+- No migration, no new setting. Deploy backend and web.
+- Usage rows of an unbound connection's calls on another workspace's context now land in that workspace.
+
 ## [v0.181.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.181.0) — 2026-11-24
 
 Rows that the resource indexer writes are persistent and left to their source. A public MCP endpoint describes its dataset in its instructions, and a managing application can set the endpoint's public text. A resource document's search point belongs to the context that holds the resource's slug. There is one migration (`f62`) and one one-shot repair command. A new switch, off by default, controls the managing application's route.
