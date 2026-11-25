@@ -8,7 +8,7 @@ Runs every 5 minutes to process queued indexer jobs.
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -59,34 +59,37 @@ HELD_BACK_RETRY_BY_REASON = {"plan_suspended": timedelta(hours=24)}
 # now, so a burst of re-queued rows cannot hold every slot of the
 # longest-waiting-first pick cycle after cycle.
 RATE_LIMITED_RETRY = timedelta(minutes=5)
-# #3009: a row skipped for the minimum interval is rescheduled this much before
-# the moment the interval check admits it, so the first tick at or after that
-# moment picks it even when the skip was written a few seconds into its tick.
-INTERVAL_RETRY_SLACK = timedelta(seconds=30)
+# #3009: a row the rate limit refuses is rescheduled this much before the
+# moment the limit admits it, so the first tick at or after that moment picks it
+# even when the skip was written a few seconds into its tick.
+RATE_LIMITED_RETRY_SLACK = timedelta(seconds=30)
 
 
 @dataclass(frozen=True)
 class IndexerRateLimit:
     """The rate-limit verdict for one resource (#3009).
 
-    ``interval_wait_seconds`` is set only when the minimum interval refused the
-    run: the seconds until the interval check admits it.
+    ``limit`` names the limit that refused the run (``hourly_cap`` or
+    ``min_interval``) and ``wait_seconds`` the seconds until it admits it;
+    both are ``None`` when the run is allowed.
     """
 
     allowed: bool
     reason: str
-    interval_wait_seconds: float | None = None
+    limit: Literal["hourly_cap", "min_interval"] | None = None
+    wait_seconds: float | None = None
 
 
-def interval_retry_at(now: datetime, wait_seconds: float) -> datetime:
-    """``next_run_at`` of a row the minimum interval refused (#3009).
+def rate_limited_retry_at(now: datetime, wait_seconds: float) -> datetime:
+    """``next_run_at`` of a row the rate limit refused (#3009).
 
     ``now`` is the process clock (``utcnow()``), the clock the pick query of
     the next tick compares ``next_run_at`` with. The row is due no later than
-    the moment the interval check admits it, and never before ``now``.
+    the moment the limit admits it, at most ``RATE_LIMITED_RETRY`` ahead, and
+    never before ``now``.
     """
     retry = min(timedelta(seconds=max(wait_seconds, 0.0)), RATE_LIMITED_RETRY)
-    return max(now, now + retry - INTERVAL_RETRY_SLACK)
+    return max(now, now + retry - RATE_LIMITED_RETRY_SLACK)
 
 
 async def check_indexer_rate_limit(resource_id: str, context_id: UUID) -> IndexerRateLimit:
@@ -109,8 +112,15 @@ async def check_indexer_rate_limit(resource_id: str, context_id: UUID) -> Indexe
         runs_this_hour = int(runs_this_hour_str) if runs_this_hour_str else 0
 
         if runs_this_hour >= MAX_RUNS_PER_HOUR:
+            # The cap admits again when the hour counter expires. A missing key
+            # (-2) or one without a TTL (-1) waits the plain retry.
+            ttl_ms = await redis_client.pttl(redis_key)
+            wait_seconds = ttl_ms / 1000 if ttl_ms > 0 else RATE_LIMITED_RETRY.total_seconds()
             return IndexerRateLimit(
-                False, f"hourly_quota_exceeded ({runs_this_hour}/{MAX_RUNS_PER_HOUR})"
+                False,
+                f"hourly_quota_exceeded ({runs_this_hour}/{MAX_RUNS_PER_HOUR})",
+                limit="hourly_cap",
+                wait_seconds=wait_seconds,
             )
 
         # 2. Check minimum interval since the last run finished
@@ -125,7 +135,8 @@ async def check_indexer_rate_limit(resource_id: str, context_id: UUID) -> Indexe
                 return IndexerRateLimit(
                     False,
                     f"min_interval_not_met (wait {wait_seconds:.0f}s)",
-                    interval_wait_seconds=wait_seconds,
+                    limit="min_interval",
+                    wait_seconds=wait_seconds,
                 )
 
         return IndexerRateLimit(True, "ok")
@@ -230,26 +241,23 @@ async def run_queued_indexers() -> JobResult:
                 verdict = await check_indexer_rate_limit(state.resource_id, state.context_id)
 
                 if not verdict.allowed:
-                    if verdict.interval_wait_seconds is not None:
-                        # #3009: due by the moment the interval check admits
-                        # it, so the first tick from then on runs it.
-                        logger.info(
-                            "indexer_waiting_for_interval",
-                            resource_id=state.resource_id,
-                            context_id=state.context_id,
-                            wait_seconds=round(verdict.interval_wait_seconds),
-                        )
-                        state.next_run_at = interval_retry_at(
-                            utcnow(), verdict.interval_wait_seconds
-                        )
-                    else:
-                        logger.info(
-                            "indexer_skipped",
-                            resource_id=state.resource_id,
-                            context_id=state.context_id,
-                            reason=verdict.reason,
-                        )
-                        state.next_run_at = utcnow() + RATE_LIMITED_RETRY
+                    wait_seconds = (
+                        verdict.wait_seconds
+                        if verdict.wait_seconds is not None
+                        else RATE_LIMITED_RETRY.total_seconds()
+                    )
+                    logger.info(
+                        "indexer_waiting_for_interval"
+                        if verdict.limit == "min_interval"
+                        else "indexer_skipped",
+                        resource_id=state.resource_id,
+                        context_id=state.context_id,
+                        reason=verdict.reason,
+                        wait_seconds=round(wait_seconds),
+                    )
+                    # #3009: due by the moment the limit admits it, so the
+                    # first tick from then on runs it.
+                    state.next_run_at = rate_limited_retry_at(utcnow(), wait_seconds)
                     await db.commit()
                     rate_limited += 1
                     continue

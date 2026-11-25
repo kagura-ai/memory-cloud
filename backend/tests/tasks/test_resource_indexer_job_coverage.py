@@ -51,15 +51,15 @@ from services.resource_indexer import (
     recorded_failed_events,
 )
 from tasks.resource_indexer_job import (
-    INTERVAL_RETRY_SLACK,
     MAX_RUNS_PER_HOUR,
     MIN_INTERVAL_SECONDS,
     MIN_INTERVAL_TOLERANCE_SECONDS,
     RATE_LIMITED_RETRY,
+    RATE_LIMITED_RETRY_SLACK,
     IndexerRateLimit,
     can_run_indexer,
     check_indexer_rate_limit,
-    interval_retry_at,
+    rate_limited_retry_at,
     record_indexer_run,
     run_queued_indexers,
     schedule_resource_indexer_jobs,
@@ -81,6 +81,7 @@ def _fake_redis():
     client = MagicMock()
     client.get = AsyncMock(return_value=None)
     client.setex = AsyncMock(return_value=True)
+    client.pttl = AsyncMock(return_value=-2)  # no hour counter
     return client
 
 
@@ -933,6 +934,13 @@ class _ClockRedis:
         self.store[key] = (str(count), expires)
         return count
 
+    async def pttl(self, key: str) -> int:
+        """Milliseconds left: -2 for a missing key, -1 for a key without TTL."""
+        if self._live(key) is None:
+            return -2
+        expires = self.store[key][1]
+        return -1 if expires is None else int((expires - self.clock.t) * 1000)
+
 
 @contextmanager
 def _clocked(clock: _Clock, redis: _ClockRedis):
@@ -1011,12 +1019,25 @@ class TestIntervalSkipNextTick:
         assert len(runs) == 2
         assert runs[1] - start == pytest.approx(600, abs=1)
 
-    async def test_hourly_cap_skip_keeps_the_five_minute_retry(self, db_session, seeded_state):
-        """A row refused by the hourly cap is not moved by the interval retry."""
+    @pytest.mark.parametrize(
+        ("counter_ttl", "wait", "logged"),
+        [(200, 200, 200), (3000, 300, 3000), (None, 300, 300)],
+        ids=["expires-before-next-tick", "expires-later", "no-ttl"],
+    )
+    async def test_hourly_cap_skip_waits_for_the_counter(
+        self, db_session, seeded_state, counter_ttl, wait, logged
+    ):
+        """A row refused by the hourly cap is due slack before the counter
+        expires, at most RATE_LIMITED_RETRY ahead (a counter without a TTL
+        waits the plain retry)."""
         clock = _Clock(time.time())
         redis = _ClockRedis(clock)
-        key = f"indexer:runs:{seeded_state.resource_id}:{seeded_state.context_id}:hour"
-        await redis.setex(key, 3600, str(MAX_RUNS_PER_HOUR))
+        rid = seeded_state.resource_id
+        key = f"indexer:runs:{rid}:{seeded_state.context_id}:hour"
+        if counter_ttl is None:
+            redis.store[key] = (str(MAX_RUNS_PER_HOUR), None)
+        else:
+            await redis.setex(key, counter_ttl, str(MAX_RUNS_PER_HOUR))
         with (
             _clocked(clock, redis),
             patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
@@ -1027,11 +1048,62 @@ class TestIntervalSkipNextTick:
             await run_queued_indexers()
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "queued"
-        assert seeded_state.next_run_at >= before + RATE_LIMITED_RETRY
-        assert seeded_state.next_run_at <= before + RATE_LIMITED_RETRY + timedelta(seconds=1)
+        due = before + timedelta(seconds=wait) - RATE_LIMITED_RETRY_SLACK
+        assert due <= seeded_state.next_run_at <= due + timedelta(seconds=1)
         # Rows other tests left queued may be picked too; only this one counts.
-        mine = [e["event"] for e in logs if e.get("resource_id") == seeded_state.resource_id]
-        assert mine == ["indexer_skipped"]
+        mine = [e for e in logs if e.get("resource_id") == rid]
+        assert [e["event"] for e in mine] == ["indexer_skipped"]
+        # The log says how long the cap holds the row, not the retry step.
+        assert mine[0]["wait_seconds"] == logged
+
+
+class TestHourlyCapNextTick:
+    """#3009: a row the hourly cap refuses runs at the first tick after the
+    hour counter has expired, not one tick later."""
+
+    @pytest.mark.parametrize("refused_at", [3400, 3590])
+    async def test_cap_refuses_then_the_next_tick_runs(self, db_session, seeded_state, refused_at):
+        clock = _Clock(time.time())
+        start = clock.t
+        redis = _ClockRedis(clock)
+        rid = seeded_state.resource_id
+        key = f"indexer:runs:{rid}:{seeded_state.context_id}:hour"
+        # The hour's sixth run finished long ago; the counter expires at T+3600.
+        await redis.setex(key, 3600, str(MAX_RUNS_PER_HOUR))
+        runs: list[float] = []
+
+        async def _run(resource_id, *_a, failed_events=(), **_k):
+            if resource_id == rid:
+                runs.append(clock.t)
+            clock.t += 5
+            return IndexerMetrics(failed_events=list(failed_events))
+
+        indexer = MagicMock()
+        indexer.process_incremental = AsyncMock(side_effect=_run)
+
+        async def tick(at: float):
+            clock.t = start + at
+            with (
+                _clocked(clock, redis),
+                patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
+                patch(
+                    "tasks.resource_indexer_job.ResourceIndexer",
+                    MagicMock(return_value=indexer),
+                ),
+                structlog.testing.capture_logs() as logs,
+            ):
+                await run_queued_indexers()
+            return [e for e in logs if e.get("resource_id") == rid]
+
+        logs = await tick(refused_at)
+        assert runs == []
+        assert [e["event"] for e in logs] == ["indexer_skipped"]
+        await db_session.refresh(seeded_state)
+        assert seeded_state.job_status == "queued"
+
+        await tick(refused_at + 300)
+        assert len(runs) == 1
+        assert runs[0] - start == pytest.approx(refused_at + 300, abs=1)
 
 
 class TestIntervalTolerance:
@@ -1056,12 +1128,15 @@ class TestIntervalTolerance:
         verdict = await self._verdict(MIN_INTERVAL_SECONDS - MIN_INTERVAL_TOLERANCE_SECONDS - 10)
         assert verdict.allowed is False
         assert verdict.reason == "min_interval_not_met (wait 10s)"
-        assert verdict.interval_wait_seconds == pytest.approx(10)
+        assert verdict.limit == "min_interval"
+        assert verdict.wait_seconds == pytest.approx(10)
 
     async def test_cap_refuses_whatever_the_interval(self):
         verdict = await self._verdict(MIN_INTERVAL_SECONDS * 2, runs_this_hour=MAX_RUNS_PER_HOUR)
         assert verdict.allowed is False
-        assert verdict.interval_wait_seconds is None
+        assert verdict.limit == "hourly_cap"
+        # The counter was set at 1_000_000 with an hour's TTL.
+        assert verdict.wait_seconds == pytest.approx(3600 - MIN_INTERVAL_SECONDS * 2, abs=1)
         assert verdict.reason.startswith("hourly_quota_exceeded")
 
     @pytest.mark.parametrize("step", [60, 300])
@@ -1090,18 +1165,24 @@ class TestIntervalTolerance:
         assert len([r for r in runs if r < runs[0] + 3600]) == MAX_RUNS_PER_HOUR
 
 
-class TestIntervalRetryAt:
-    """#3009: the reschedule of a row the minimum interval refused."""
+class TestRateLimitedRetryAt:
+    """#3009: the reschedule of a row the rate limit refused."""
 
     def test_due_slack_before_the_admitting_moment(self):
         now = datetime(2026, 1, 1, 0, 0, 0)
-        assert interval_retry_at(now, 245) == now + timedelta(seconds=245) - INTERVAL_RETRY_SLACK
+        assert (
+            rate_limited_retry_at(now, 245)
+            == now + timedelta(seconds=245) - RATE_LIMITED_RETRY_SLACK
+        )
 
     def test_capped_at_the_rate_limited_retry(self):
         now = datetime(2026, 1, 1, 0, 0, 0)
-        assert interval_retry_at(now, 10_000) == now + RATE_LIMITED_RETRY - INTERVAL_RETRY_SLACK
+        assert (
+            rate_limited_retry_at(now, 10_000)
+            == now + RATE_LIMITED_RETRY - RATE_LIMITED_RETRY_SLACK
+        )
 
     def test_never_before_now(self):
         now = datetime(2026, 1, 1, 0, 0, 0)
-        assert interval_retry_at(now, 5) == now
-        assert interval_retry_at(now, -3) == now
+        assert rate_limited_retry_at(now, 5) == now
+        assert rate_limited_retry_at(now, -3) == now
