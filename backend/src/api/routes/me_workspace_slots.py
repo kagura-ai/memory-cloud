@@ -100,6 +100,15 @@ class PaidPlansEndResponse(TZAwareBaseModel):
     suspended: list[UUID]
 
 
+class SlotServiceResponse(TZAwareBaseModel):
+    """An integration service in force for the workspace now (#3010)."""
+
+    name: str = Field(
+        description="Display name (INTEGRATION_SERVICE_DISPLAY_NAMES), else the service id"
+    )
+    valid_until: datetime = Field(description="When access ends (UTC)")
+
+
 class SlotWorkspaceResponse(TZAwareBaseModel):
     """One live workspace the owner owns."""
 
@@ -111,6 +120,13 @@ class SlotWorkspaceResponse(TZAwareBaseModel):
     under_billing_contract: bool
     is_current: bool
     created_at: datetime
+    services: list[SlotServiceResponse] = Field(
+        default_factory=list,
+        description=(
+            "Integration services in force now, one per display name, sorted by "
+            "name; empty when none"
+        ),
+    )
 
 
 class WorkspaceSlotsResponse(TZAwareBaseModel):
@@ -179,6 +195,10 @@ class WorkspaceSlotsResponse(TZAwareBaseModel):
                     under_billing_contract=w.under_billing_contract,
                     is_current=w.is_current,
                     created_at=w.created_at,
+                    services=[
+                        SlotServiceResponse(name=item.name, valid_until=item.valid_until)
+                        for item in w.services
+                    ],
                 )
                 for w in overview.workspaces
             ],

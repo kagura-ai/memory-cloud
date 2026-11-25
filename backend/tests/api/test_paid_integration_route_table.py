@@ -15,7 +15,7 @@ only. This test makes that boundary a table change, in three parts:
   REST discovery skips ``/mcp``).
 * ``PAID_INTEGRATION_SYMBOLS``: an AST scan of every module under
   ``backend/src`` lists each one that touches the service (by name, through a
-  module object, or by a relative import), its models, the three entry
+  module object, or by a relative import), its models, the entry
   functions or the ``workspace_integration_*`` tables; each such module has a
   role, and a role allows only its kinds of use. Outside the service only
   named imports are allowed, so every name a consumer takes from the service is
@@ -48,8 +48,10 @@ MODELS_MODULE = "models.integration_entitlement"
 WRITE = "paid_integration_write"
 REQUIRE = "require_paid_integration"
 INSPECT = "inspect_paid_integration"
+# #3010: the batch display read of the services in force (same rule, no lock).
+INSPECT_SERVICES = "inspect_workspace_services"
 GUARD_CALLS = frozenset({WRITE, REQUIRE})
-ENTRY_NAMES = frozenset({WRITE, REQUIRE, INSPECT})
+ENTRY_NAMES = frozenset({WRITE, REQUIRE, INSPECT, INSPECT_SERVICES})
 TABLE_PREFIX = "workspace_integration_"
 CLASS_PREFIX = "WorkspaceIntegration"
 
@@ -250,7 +252,7 @@ MODELS = "models"  # defines the mapped classes (and their table names)
 PUBLISHER = "publisher"  # imports only the apply_/read_ publisher functions
 REGISTRY = "registry"  # names the models module in a string
 DATA_BOUNDARY = "data_boundary"  # names the tables in strings
-DISPLAY_ONLY = "display_only"  # inspect_paid_integration, for display only
+DISPLAY_ONLY = "display_only"  # inspect_paid_integration / inspect_workspace_services
 GUARDED = "guarded"  # paid_integration_write / require_paid_integration + models
 # Outside the service no role allows a service module import: a module object
 # reaches every private helper (``_access``, ``_require_paid_integration_locked``
@@ -269,6 +271,8 @@ PAID_INTEGRATION_SYMBOLS: dict[str, str] = {
     "services.sync_credentials": GUARDED,
     "services.sync_resume": GUARDED,
     "services.sync_management": DISPLAY_ONLY,
+    # #3010: the workspaces page lists the services in force, display only.
+    "services.workspace_slots": DISPLAY_ONLY,
     # #2809: domain_write enters paid_integration_write for the reserved
     # service id public-mcp-domains, as the transaction's first row lock.
     "services.public_mcp_domains": GUARDED,
@@ -301,7 +305,7 @@ ROLE_KINDS: dict[str, frozenset[str]] = {
     PUBLISHER: frozenset({PUBLISH_API}),
     REGISTRY: frozenset({STRING}),
     DATA_BOUNDARY: frozenset({STRING}),
-    DISPLAY_ONLY: frozenset({INSPECT}),
+    DISPLAY_ONLY: frozenset({INSPECT, INSPECT_SERVICES}),
     GUARDED: frozenset({WRITE, REQUIRE, MODELS_MODULE_IMPORT, MODEL_CLASS}),
 }
 

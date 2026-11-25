@@ -1753,6 +1753,36 @@ class Settings(BaseSettings):
 
         return parse_llm_pricing_overrides(self.llm_pricing_overrides)
 
+    # Issue #3010: display names of integration services on the profile's
+    # workspaces page. JSON object; see ``config/integration_service_names.py``.
+    # Validated at start-up (a bad value refuses to start).
+    integration_service_display_names: str = Field(
+        default="",
+        description=(
+            "Issue #3010: JSON object of integration service id -> display name "
+            "shown on the profile's workspaces page next to the plan. Each name is "
+            "1-60 characters after strip, without control characters; ids that map "
+            "to the same name are shown as one line. Empty = every service is "
+            "shown by its id."
+        ),
+    )
+
+    @field_validator("integration_service_display_names")
+    @classmethod
+    def _validate_integration_service_display_names(cls, v: str) -> str:
+        """Refuse to start on a malformed ``INTEGRATION_SERVICE_DISPLAY_NAMES`` (#3010)."""
+        from config.integration_service_names import parse_integration_service_display_names
+
+        parse_integration_service_display_names(v)
+        return v
+
+    @property
+    def integration_service_display_name_map(self) -> dict[str, str]:
+        """``INTEGRATION_SERVICE_DISPLAY_NAMES`` parsed (``{}`` when unset)."""
+        from config.integration_service_names import parse_integration_service_display_names
+
+        return parse_integration_service_display_names(self.integration_service_display_names)
+
     # Local reranker serving override
     rerank_base_url: str = Field(
         default="",
