@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Literal
@@ -56,6 +56,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 import config.settings as _config_settings
+from config.integration_service_names import DisplayedService, display_services
 from config.plan_tiers import PLAN_ORDER, PlanName, get_plan_tier, plan_rank
 from db.base import isolated_session
 from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, User, Workspace
@@ -64,6 +65,7 @@ from models.workspace_slots import (
     WorkspaceSlotState,
     WorkspaceSlotSuspension,
 )
+from services.integration_entitlements import inspect_workspace_services
 from services.workspace_locks import (
     NOWAIT_LOCK_BACKOFF_SECONDS,
     NOWAIT_LOCK_TRIES,
@@ -508,6 +510,8 @@ class SlotWorkspace:
     under_billing_contract: bool
     is_current: bool
     created_at: datetime
+    # #3010: the integration services in force now, by display name.
+    services: tuple[DisplayedService, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1809,7 +1813,25 @@ def _paid_plans_end_plan(
     return plan, after
 
 
-def _overview(state: _OwnerState) -> SlotOverview:
+async def _owner_overview(db: AsyncSession, owner_user_id: str) -> SlotOverview:
+    """The overview, with the integration services in force (#3010).
+
+    The services come from two plain reads for all owned workspaces (no lock).
+    """
+    state = await _read_owner(db, owner_user_id)
+    in_force = await inspect_workspace_services(db, {w.id: w.plan_name for w in state.owned})
+    names = _config_settings.get_settings().integration_service_display_name_map
+    services = {
+        workspace_id: display_services(((s.service_id, s.valid_until) for s in items), names)
+        for workspace_id, items in in_force.items()
+    }
+    return _overview(state, services)
+
+
+def _overview(
+    state: _OwnerState, services: Mapping[UUID, tuple[DisplayedService, ...]] | None = None
+) -> SlotOverview:
+    services = services or {}
     allowance = slot_allowance(state.owned, state.slot_bonus)
     ordered = sorted(state.owned, key=lambda w: (w.created_at, w.id))
     workspaces = tuple(
@@ -1822,6 +1844,7 @@ def _overview(state: _OwnerState) -> SlotOverview:
             under_billing_contract=w.under_billing_contract,
             is_current=w.id == state.current_workspace_id,
             created_at=w.created_at,
+            services=services.get(w.id, ()),
         )
         for w in ordered
     )
@@ -1876,7 +1899,7 @@ async def get_slot_overview(db: AsyncSession, owner_user_id: str) -> SlotOvervie
     allowance. ``workspaces`` is ordered by ``created_at``, then id; statuses
     follow the read-time rule (a contracted workspace is always active).
     """
-    return _overview(await _read_owner(db, owner_user_id))
+    return await _owner_overview(db, owner_user_id)
 
 
 async def preview_selection(
@@ -2027,7 +2050,7 @@ async def save_selection(
         owner_user_id=owner_user_id,
         selected=len(workspace_ids),
     )
-    return _overview(await _read_owner(db, owner_user_id))
+    return await _owner_overview(db, owner_user_id)
 
 
 async def seed_default_suspension(

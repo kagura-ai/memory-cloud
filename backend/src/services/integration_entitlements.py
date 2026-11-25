@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -318,6 +318,50 @@ class PaidIntegrationAccess:
     valid_until: datetime | None = None
 
 
+@dataclass(frozen=True)
+class _TierWindow:
+    """The paid top-tier window of a workspace's integration state (naive UTC)."""
+
+    revision: int
+    valid_from: datetime | None
+    valid_until: datetime | None
+
+
+@dataclass(frozen=True)
+class _LicenseWindow:
+    """One service licence's window (naive UTC)."""
+
+    valid_from: datetime
+    valid_until: datetime
+
+
+def _decide_access(
+    plan_name: str | None,
+    tier: _TierWindow | None,
+    license: _LicenseWindow | None,
+    now: datetime,
+) -> PaidIntegrationAccess:
+    """The one rule that decides whether a service is in force (#3010).
+
+    The workspace is on the top tier with an open tier window, the licence's
+    window is open, and ``now`` is inside both; the earlier end wins. Used by
+    every admission (``_access``) and by the display read
+    ``inspect_workspace_services``.
+    """
+    if tier is None:
+        return PaidIntegrationAccess(False, "not_entitled")
+    if plan_name != "promax" or tier.valid_from is None or tier.valid_until is None:
+        return PaidIntegrationAccess(False, "max_required", tier.revision)
+    if license is None:
+        return PaidIntegrationAccess(False, "not_entitled", tier.revision)
+    if now < max(tier.valid_from, license.valid_from):
+        return PaidIntegrationAccess(False, "not_started", tier.revision)
+    end = min(tier.valid_until, license.valid_until)
+    if now >= end:
+        return PaidIntegrationAccess(False, "expired", tier.revision)
+    return PaidIntegrationAccess(True, "active", tier.revision, end)
+
+
 async def _access(
     db: AsyncSession, workspace_id: UUID, service_id: str, *, lock: bool
 ) -> PaidIntegrationAccess:
@@ -325,14 +369,6 @@ async def _access(
     if workspace is None or workspace.deleted_at is not None:
         return PaidIntegrationAccess(False, "unavailable")
     state = await _state(db, workspace_id)
-    if state is None:
-        return PaidIntegrationAccess(False, "not_entitled")
-    if (
-        workspace.plan_name != "promax"
-        or state.max_valid_from is None
-        or state.max_valid_until is None
-    ):
-        return PaidIntegrationAccess(False, "max_required", state.revision)
     license = (
         await db.execute(
             select(WorkspaceIntegrationLicense)
@@ -343,17 +379,81 @@ async def _access(
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
-    if license is None:
-        return PaidIntegrationAccess(False, "not_entitled", state.revision)
     # Deliberately after lock acquisition and all DB awaits, not transaction
     # start time (which would remain stale throughout a long-running write).
     now = utcnow()
-    if now < max(state.max_valid_from, license.valid_from):
-        return PaidIntegrationAccess(False, "not_started", state.revision)
-    end = min(state.max_valid_until, license.valid_until)
-    if now >= end:
-        return PaidIntegrationAccess(False, "expired", state.revision)
-    return PaidIntegrationAccess(True, "active", state.revision, end)
+    return _decide_access(
+        workspace.plan_name,
+        None
+        if state is None
+        else _TierWindow(state.revision, state.max_valid_from, state.max_valid_until),
+        None if license is None else _LicenseWindow(license.valid_from, license.valid_until),
+        now,
+    )
+
+
+@dataclass(frozen=True)
+class ServiceInForce:
+    """A service licence in force now, and when its access ends (aware UTC)."""
+
+    service_id: str
+    valid_until: datetime
+
+
+async def inspect_workspace_services(
+    db: AsyncSession, plans: Mapping[UUID, str]
+) -> dict[UUID, tuple[ServiceInForce, ...]]:
+    """The services in force now for each listed workspace, for display only.
+
+    ``plans`` maps each live workspace to its current plan name, as the caller
+    read it. Two plain reads for all workspaces together (state rows, licence
+    rows), no lock; the rule is ``_decide_access``. A workspace with nothing in
+    force is absent. Each tuple is ordered by service id. Like
+    ``inspect_paid_integration`` it never admits a write.
+    """
+    if not plans:
+        return {}
+    ids = list(plans)
+    tiers = {
+        row.workspace_id: _TierWindow(row.revision, row.max_valid_from, row.max_valid_until)
+        for row in await db.execute(
+            select(
+                WorkspaceIntegrationState.workspace_id,
+                WorkspaceIntegrationState.revision,
+                WorkspaceIntegrationState.max_valid_from,
+                WorkspaceIntegrationState.max_valid_until,
+            ).where(WorkspaceIntegrationState.workspace_id.in_(ids))
+        )
+    }
+    licenses = (
+        await db.execute(
+            select(
+                WorkspaceIntegrationLicense.workspace_id,
+                WorkspaceIntegrationLicense.service_id,
+                WorkspaceIntegrationLicense.valid_from,
+                WorkspaceIntegrationLicense.valid_until,
+            )
+            .where(WorkspaceIntegrationLicense.workspace_id.in_(ids))
+            .order_by(
+                WorkspaceIntegrationLicense.workspace_id,
+                WorkspaceIntegrationLicense.service_id,
+            )
+        )
+    ).all()
+    now = utcnow()
+    found: dict[UUID, list[ServiceInForce]] = {}
+    for row in licenses:
+        access = _decide_access(
+            plans[row.workspace_id],
+            tiers.get(row.workspace_id),
+            _LicenseWindow(row.valid_from, row.valid_until),
+            now,
+        )
+        if access.allowed and access.valid_until is not None:
+            found.setdefault(row.workspace_id, []).append(
+                ServiceInForce(row.service_id, access.valid_until.replace(tzinfo=UTC))
+            )
+    return {workspace_id: tuple(items) for workspace_id, items in found.items()}
 
 
 async def inspect_paid_integration(

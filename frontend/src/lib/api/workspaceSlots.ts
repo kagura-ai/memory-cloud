@@ -33,6 +33,14 @@ export interface WorkspaceSlotAllowance {
   cap_on_next_tier: number | null;
 }
 
+/** An integration service in force for the workspace now (#3010). */
+export interface SlotService {
+  /** Display name (the deployment's mapping), else the service id. */
+  name: string;
+  /** When access ends (UTC, ISO 8601). */
+  valid_until: string;
+}
+
 export interface SlotWorkspace {
   id: string;
   name: string;
@@ -44,6 +52,8 @@ export interface SlotWorkspace {
   /** The owner's own current workspace. */
   is_current: boolean;
   created_at: string;
+  /** Services in force now, sorted by name; empty when none (#3010). */
+  services?: SlotService[];
 }
 
 /** The outcome if every paid subscription ended now (id arrays). */

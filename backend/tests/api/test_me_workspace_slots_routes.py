@@ -14,8 +14,9 @@ routes on real rows are in ``tests/integration/test_me_workspace_slots_db.py``.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
@@ -25,6 +26,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from auth.dependencies import require_session_auth
+from config.integration_service_names import DisplayedService
 from config.settings import get_settings
 from db.base import get_db
 from services.workspace_slots import (
@@ -148,6 +150,7 @@ AFTER_TERM_JSON: dict[str, Any] = {
             "under_billing_contract": False,
             "is_current": True,
             "created_at": "2026-03-02T09:14:00Z",
+            "services": [],
         },
         {
             "id": str(RESEARCH),
@@ -158,6 +161,7 @@ AFTER_TERM_JSON: dict[str, Any] = {
             "under_billing_contract": False,
             "is_current": False,
             "created_at": "2026-05-11T02:40:31Z",
+            "services": [],
         },
         {
             "id": str(SIDE),
@@ -168,6 +172,7 @@ AFTER_TERM_JSON: dict[str, Any] = {
             "under_billing_contract": False,
             "is_current": False,
             "created_at": "2026-08-20T11:05:47Z",
+            "services": [],
         },
     ],
 }
@@ -296,6 +301,32 @@ class TestGetOverview:
         assert response.status_code == 200, response.text
         assert response.json() == AFTER_TERM_JSON
         assert service.await_args.args[1] == OWNER
+
+    def test_services_in_force_are_listed_with_z_timestamps(
+        self, signed_in, mode, monkeypatch
+    ) -> None:
+        """#3010: each workspace lists its services in force, name and end."""
+        mode("enforce")
+        base = _after_term_overview()
+        personal = dataclasses.replace(
+            base.workspaces[0],
+            services=(
+                DisplayedService("Example Service", datetime(2026, 12, 14, tzinfo=UTC)),
+                DisplayedService("other-sync", datetime(2027, 1, 1, 0, 0, 5, tzinfo=UTC)),
+            ),
+        )
+        overview = dataclasses.replace(base, workspaces=(personal, *base.workspaces[1:]))
+        monkeypatch.setattr(f"{ROUTE}.get_slot_overview", AsyncMock(return_value=overview))
+
+        response = signed_in.get(BASE)
+
+        assert response.status_code == 200, response.text
+        rows = response.json()["workspaces"]
+        assert rows[0]["services"] == [
+            {"name": "Example Service", "valid_until": "2026-12-14T00:00:00Z"},
+            {"name": "other-sync", "valid_until": "2027-01-01T00:00:05Z"},
+        ]
+        assert rows[1]["services"] == [] and rows[2]["services"] == []
 
     def test_if_paid_plans_end_populated_and_saved_selection(
         self, signed_in, mode, monkeypatch

@@ -13571,6 +13571,17 @@
         ],
         "type": "object"
       },
+      "SlotServiceResponse": {
+        "properties": {
+          "name": {},
+          "valid_until": {}
+        },
+        "required": [
+          "name",
+          "valid_until"
+        ],
+        "type": "object"
+      },
       "SlotWorkspaceResponse": {
         "properties": {
           "created_at": {},
@@ -13578,6 +13589,7 @@
           "is_current": {},
           "name": {},
           "plan_name": {},
+          "services": {},
           "status": {},
           "suspended_at": {},
           "under_billing_contract": {}

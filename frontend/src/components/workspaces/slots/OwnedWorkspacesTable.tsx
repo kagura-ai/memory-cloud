@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * The workspaces the signed-in user owns (#2919): name, its own plan, status,
- * and what can be done with each.
+ * The workspaces the signed-in user owns (#2919): name, its own plan with the
+ * integration services in force (#3010), status, and what can be done with each.
  */
 
 import { useTranslations } from "next-intl";
@@ -80,6 +80,21 @@ export function OwnedWorkspacesTable({
               <TableCell className="align-top">
                 <div className="flex flex-col items-start gap-1">
                   <PlanBadge planName={w.plan_name} size="sm" />
+                  {w.services && w.services.length > 0 && (
+                    <ul
+                      className="space-y-0.5 text-xs text-muted-foreground"
+                      aria-label={t("services.label", { name: w.name })}
+                    >
+                      {w.services.map((service) => (
+                        <li key={service.name}>
+                          {t("services.until", {
+                            name: service.name,
+                            date: formatDate(service.valid_until, timezone, locale),
+                          })}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   {planPage && (
                     <Button
                       type="button"
