@@ -530,15 +530,15 @@ class TestHebbianLearner:
         config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
-        mock_graph.add_edge = AsyncMock()
+        mock_graph.add_hebbian_edge = AsyncMock(return_value=True)
         tracker = _tracker_with_record(config)
         learner = HebbianLearner(mock_graph, config, tracker)
 
         result = await learner._apply_update_to_edge("u", "a", "b", 0.03)
 
         assert result == 0.0  # no edge yet (counting semantics unchanged)
-        mock_graph.add_edge.assert_not_called()
-        mock_graph.remove_edge.assert_not_called()
+        mock_graph.add_hebbian_edge.assert_not_called()
+        mock_graph.remove_hebbian_edge.assert_not_called()
         assert tracker.get_co_activation_record("u", "a", "b").pending_weight == pytest.approx(0.03)
 
     @pytest.mark.asyncio
@@ -548,7 +548,7 @@ class TestHebbianLearner:
         config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
-        mock_graph.add_edge = AsyncMock()
+        mock_graph.add_hebbian_edge = AsyncMock(return_value=True)
         tracker = _tracker_with_record(config)
         learner = HebbianLearner(mock_graph, config, tracker)
 
@@ -556,8 +556,8 @@ class TestHebbianLearner:
         result = await learner._apply_update_to_edge("u", "a", "b", 0.03)
 
         assert result == pytest.approx(0.06)
-        mock_graph.add_edge.assert_called_once()
-        assert mock_graph.add_edge.call_args.kwargs["weight"] == pytest.approx(0.06)
+        mock_graph.add_hebbian_edge.assert_called_once()
+        assert mock_graph.add_hebbian_edge.call_args.kwargs["weight"] == pytest.approx(0.06)
         assert tracker.get_co_activation_record("u", "a", "b").pending_weight == 0.0
 
     @pytest.mark.asyncio
@@ -569,14 +569,14 @@ class TestHebbianLearner:
         config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
-        mock_graph.add_edge = AsyncMock()
+        mock_graph.add_hebbian_edge = AsyncMock(return_value=True)
         learner = HebbianLearner(mock_graph, config)  # no tracker
 
         first = await learner._apply_update_to_edge("u", "a", "b", 0.03)
         second = await learner._apply_update_to_edge("u", "a", "b", 0.03)
 
         assert first == 0.0 and second == 0.0
-        mock_graph.add_edge.assert_not_called()  # never accumulates → never materializes
+        mock_graph.add_hebbian_edge.assert_not_called()  # never accumulates → never materializes
 
     @pytest.mark.asyncio
     async def test_cliff_bidirectional_pass_does_not_double_count(self, mock_graph):
@@ -586,7 +586,7 @@ class TestHebbianLearner:
         config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value=None)
         mock_graph.has_edge = AsyncMock(return_value=False)
-        mock_graph.add_edge = AsyncMock()
+        mock_graph.add_hebbian_edge = AsyncMock(return_value=True)
         tracker = _tracker_with_record(config)
         learner = HebbianLearner(mock_graph, config, tracker)
 
@@ -608,7 +608,7 @@ class TestHebbianLearner:
 
         # Both directions saw snapshot pending=0 → each stashes 0.001, not 0.002,
         # and neither materializes.
-        mock_graph.add_edge.assert_not_called()
+        mock_graph.add_hebbian_edge.assert_not_called()
         assert tracker.get_co_activation_record("u", "a", "b").pending_weight == pytest.approx(
             0.001
         )
@@ -621,14 +621,16 @@ class TestHebbianLearner:
         config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
         mock_graph.get_edge = AsyncMock(return_value={"weight": 0.04})
         mock_graph.has_edge = AsyncMock(return_value=True)
-        mock_graph.add_edge = AsyncMock()
+        mock_graph.add_hebbian_edge = AsyncMock(return_value=True)
         tracker = _tracker_with_record(config)
         learner = HebbianLearner(mock_graph, config, tracker)
 
         result = await learner._apply_update_to_edge("u", "a", "b", -0.02)
 
         assert result == 0.0
-        mock_graph.remove_edge.assert_called_once()
+        mock_graph.remove_hebbian_edge.assert_awaited_once_with(
+            "a", "b", weight=pytest.approx(0.02)
+        )
         assert tracker.get_co_activation_record("u", "a", "b").pending_weight == 0.0
 
     @pytest.mark.asyncio
@@ -659,7 +661,7 @@ class TestHebbianLearner:
             return [e for e in all_edges if e.origin == origin]
 
         mock_graph.edge_repo.get_outgoing_edges = AsyncMock(side_effect=fake_get_outgoing)
-        mock_graph.remove_edge = AsyncMock()
+        mock_graph.remove_hebbian_edge = AsyncMock(return_value=True)
 
         removed = await learner.prune_weak_edges("u", node_id)
 
@@ -670,7 +672,7 @@ class TestHebbianLearner:
         )
         # Exactly one (weakest) hebbian edge pruned; the semantic edge is untouched.
         assert removed == 1
-        removed_dsts = {call.args[1] for call in mock_graph.remove_edge.await_args_list}
+        removed_dsts = {call.args[1] for call in mock_graph.remove_hebbian_edge.await_args_list}
         assert str(semantic.dst_id) not in removed_dsts
         assert str(hebbian[0].dst_id) in removed_dsts  # weight 0.5 — weakest hebbian
 
@@ -720,9 +722,102 @@ async def test_prune_weak_edges_deletes_in_dst_order(mock_graph):
         for dst, w in zip(dsts, (0.1, 0.2, 0.3, 0.9), strict=True)
     ]
     mock_graph.edge_repo.get_outgoing_edges = AsyncMock(return_value=edges)
-    mock_graph.remove_edge = AsyncMock()
+    mock_graph.remove_hebbian_edge = AsyncMock(return_value=True)
 
     assert await learner.prune_weak_edges("u", str(uuid4())) == 3
 
-    removed = [call.args[1] for call in mock_graph.remove_edge.await_args_list]
+    removed = [call.args[1] for call in mock_graph.remove_hebbian_edge.await_args_list]
     assert removed == dsts[:3]  # the strongest (dsts[3]) is kept
+
+
+# ---------------------------------------------------------------------------
+# #3018: a Hebbian update leaves another producer's edge alone. The decision
+# is the repository's (SQL, on the existing row); the learner must route every
+# write and prune through the Hebbian methods and honour what they report.
+# tests/integration/test_3018_hebbian_producer_edges_db.py covers the SQL.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_goes_through_the_hebbian_writer_with_no_type_or_existence_check(
+    mock_graph,
+):
+    learner = HebbianLearner(mock_graph, NeuralMemoryConfig(prune_threshold=0.01))
+    mock_graph.get_edge = AsyncMock(return_value={"weight": 0.5})
+    mock_graph.add_edge = AsyncMock()
+
+    result = await learner._apply_update_to_edge("u", "a", "b", 0.1)
+
+    assert result == pytest.approx(0.6)
+    mock_graph.add_hebbian_edge.assert_awaited_once_with(
+        "a",
+        "b",
+        weight=pytest.approx(0.6),
+        confidence=1.0,
+        edge_metadata={"created_by": "hebbian_learning"},
+    )
+    # The shared upsert (other producers' path) is never used by the learner,
+    # and existence is not read before the write: the upsert decides.
+    mock_graph.add_edge.assert_not_called()
+    mock_graph.has_edge.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edge_of_another_producer_is_not_counted_and_clears_pending(mock_graph):
+    config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
+    tracker = _tracker_with_record(config)
+    tracker.get_co_activation_record("u", "a", "b").pending_weight = 0.02
+    learner = HebbianLearner(mock_graph, config, tracker)
+    mock_graph.get_edge = AsyncMock(return_value={"weight": 0.83})
+    mock_graph.add_hebbian_edge = AsyncMock(return_value=False)  # left to its producer
+
+    result = await learner._apply_update_to_edge("u", "a", "b", 0.1)
+
+    assert result is None
+    assert tracker.get_co_activation_record("u", "a", "b").pending_weight == 0.0
+
+
+@pytest.mark.asyncio
+async def test_apply_updates_does_not_count_edges_left_to_their_producer(mock_graph):
+    from neural.models import HebbianUpdate
+
+    learner = HebbianLearner(mock_graph, NeuralMemoryConfig(gradient_clipping=1.0))
+    learner._update_queue["u"] = [
+        HebbianUpdate(user_id="u", src_id="a", dst_id="b", delta_weight=0.1),
+        HebbianUpdate(user_id="u", src_id="b", dst_id="a", delta_weight=0.1),
+    ]
+    mock_graph.add_hebbian_edge = AsyncMock(side_effect=[False, True])
+
+    assert await learner.apply_updates("u") == 1
+
+
+@pytest.mark.asyncio
+async def test_prune_branch_reports_a_kept_producer_edge_as_not_materialized(mock_graph):
+    """Below the threshold the learner asks the guarded pruner, passing the new
+    weight (a declared edge takes it); a kept edge is never rewritten here."""
+    config = NeuralMemoryConfig(learning_rate=0.1, gradient_clipping=1.0, prune_threshold=0.05)
+    learner = HebbianLearner(mock_graph, config)
+    mock_graph.get_edge = AsyncMock(return_value={"weight": 0.04})
+    mock_graph.has_edge = AsyncMock(return_value=True)
+    mock_graph.remove_hebbian_edge = AsyncMock(return_value=False)
+
+    result = await learner._apply_update_to_edge("u", "a", "b", -0.02)
+
+    assert result == 0.0
+    mock_graph.remove_hebbian_edge.assert_awaited_once_with("a", "b", weight=pytest.approx(0.02))
+    mock_graph.add_hebbian_edge.assert_not_called()
+    mock_graph.remove_edge.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_top_m_prune_counts_only_edges_actually_removed(mock_graph):
+    learner = HebbianLearner(mock_graph, NeuralMemoryConfig(top_m_edges=1))
+    edges = [
+        SimpleNamespace(dst_id=str(uuid4()), weight=w, origin=EDGE_ORIGIN_HEBBIAN)
+        for w in (0.1, 0.2, 0.9)
+    ]
+    mock_graph.edge_repo.get_outgoing_edges = AsyncMock(return_value=edges)
+    mock_graph.remove_hebbian_edge = AsyncMock(side_effect=[True, False])
+
+    assert await learner.prune_weak_edges("u", str(uuid4())) == 1
+    mock_graph.remove_edge.assert_not_called()

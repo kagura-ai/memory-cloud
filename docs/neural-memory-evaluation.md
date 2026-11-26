@@ -1,6 +1,6 @@
 # Neural Memory Evaluation
 
-> **LLM Knowledge Base mapping**: Neural Memory is Kagura's implementation of the **Enhance** layer from the [LLM Knowledge Base 5-layer pattern](architecture.md#llm-knowledge-base--5-layer-mapping) — the compounding loop. Karpathy's pattern compounds knowledge by having the LLM rewrite wiki pages; Kagura compounds at zero LLM cost via Hebbian learning, where every `recall()` strengthens edges between co-retrieved memories. The benchmarks below evaluate how well this background graph evolution surfaces relevant memories that pure keyword/semantic search would miss.
+> **LLM Knowledge Base mapping**: Neural Memory is Kagura's implementation of the **Enhance** layer from the [LLM Knowledge Base 5-layer pattern](architecture.md#llm-knowledge-base--5-layer-mapping) — the compounding loop. Karpathy's pattern compounds knowledge by having the LLM rewrite wiki pages; Kagura compounds at zero LLM cost via Hebbian learning, where every `recall()` strengthens edges between co-retrieved memories (when recall-time learning is enabled, `RECALL_ASSOCIATION_LEARNING_ENABLED`). The benchmarks below evaluate how well this background graph evolution surfaces relevant memories that pure keyword/semantic search would miss.
 
 Evaluation of the Neural Memory (Hebbian learning + activation spreading) system, based on systematic benchmarking with the [Python SDK](https://github.com/kagura-ai/kagura-memory-python-sdk).
 

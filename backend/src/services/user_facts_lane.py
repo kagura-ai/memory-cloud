@@ -32,9 +32,9 @@ what the fitted reply carries itself. Compared with a normal recall it:
   within :data:`USER_FACTS_TIMEOUT_SECONDS`. Any error or timeout, the stamp's
   included, is logged once as ``user_facts_lane_failed`` and the recall returns
   without the key (so a row is shipped only when its stamp was written or
-  skipped as held). The MCP tool applies the same rule to its own stamp: when
-  it fails, the reply goes without ``user_facts`` if those rows carried
-  content.
+  skipped as held). The MCP tool stamps its fitted reply itself, after the
+  lane returned: there a failed or timed-out stamp is logged and the reply
+  is left as it is.
 """
 
 from __future__ import annotations

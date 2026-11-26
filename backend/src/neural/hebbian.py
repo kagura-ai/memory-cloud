@@ -370,7 +370,9 @@ class HebbianLearner:
                 snapshot so the two directions of a pair don't double-count.
 
         Returns:
-            New weight value, or None if update failed
+            New weight value (0.0 when pruned or not yet materialized), or
+            None if the update failed or the edge belongs to another producer
+            and was left as is (#3018)
         """
         # #983: the cliff pending_weight rides the co-activation record so it
         # survives the recall (the learner is rebuilt per recall). No record
@@ -391,57 +393,53 @@ class HebbianLearner:
         # Prune if below threshold
         if new_weight < self.config.prune_threshold:
             try:
-                if await self.graph.has_edge(src_id, dst_id):
-                    # Existing edge decayed below threshold — prune. The #983
-                    # cliff fix applies only to not-yet-materialized edges;
-                    # decay-side pruning is unchanged.
-                    await self.graph.remove_edge(src_id, dst_id)
-                    logger.debug(f"Pruned edge ({src_id}, {dst_id}) (weight={new_weight:.4f})")
-                    if record is not None:
-                        record.pending_weight = 0.0
-                elif new_weight > 0.0 and record is not None:
+                if not await self.graph.has_edge(src_id, dst_id):
                     # #983 prune-cliff fix: the edge does not exist yet, so a
                     # sub-threshold first update used to be dropped — making
                     # accumulation across repeated co-recalls impossible
                     # (~12% of observed pairs in the #969 audit). Stash it on
                     # the record so it persists to the next recall.
-                    record.pending_weight = new_weight
+                    if new_weight > 0.0 and record is not None:
+                        record.pending_weight = new_weight
+                    return 0.0
+                # Existing edge decayed below threshold — prune. The #983
+                # cliff fix applies only to not-yet-materialized edges;
+                # decay-side pruning is unchanged. #3018: an edge another
+                # producer owns is never removed (a declared one takes the
+                # new weight instead); the decision is made in the DELETE.
+                removed = await self.graph.remove_hebbian_edge(src_id, dst_id, weight=new_weight)
+                if record is not None:
+                    record.pending_weight = 0.0
+                if removed:
+                    logger.debug(f"Pruned edge ({src_id}, {dst_id}) (weight={new_weight:.4f})")
                 return 0.0
             except Exception as e:
                 logger.error(f"Failed to remove edge ({src_id}, {dst_id}): {e}")
                 return None
 
-        # Update or create edge
+        # Update or create edge. #3018: one upsert whose ON CONFLICT clause
+        # decides by the existing row — an edge another producer owns keeps
+        # its columns (a declared one only takes the weight), a seed or a
+        # hebbian row is strengthened and keeps its metadata. The
+        # ``created_by`` marker therefore lands only on a new row.
         try:
-            edge_exists = await self.graph.has_edge(src_id, dst_id)
-            if edge_exists:
-                # Update existing edge (Issue #84: SQL backend)
-                await self.graph.add_edge(
-                    src_id=src_id,
-                    dst_id=dst_id,
-                    rel_type="neural_association",
-                    weight=new_weight,
-                    confidence=1.0,
-                )
-            else:
-                # Hebbian-created edges use rel_type="neural_association" so that
-                # any edge-stats query filtering by that type counts them. Prior
-                # mismatches against "learned_from" caused silently-zero stats.
-                await self.graph.add_edge(
-                    src_id=src_id,
-                    dst_id=dst_id,
-                    rel_type="neural_association",
-                    weight=new_weight,
-                    edge_metadata={
-                        "created_by": "hebbian_learning",
-                    },
-                    confidence=1.0,
-                )
+            written = await self.graph.add_hebbian_edge(
+                src_id,
+                dst_id,
+                weight=new_weight,
+                confidence=1.0,
+                edge_metadata={"created_by": "hebbian_learning"},
+            )
 
             # #983: the edge materialized — any accumulated cliff pending is
-            # now folded into the edge weight, so clear it.
+            # now folded into the edge weight (or the pair already has another
+            # producer's edge), so clear it.
             if record is not None and record.pending_weight:
                 record.pending_weight = 0.0
+
+            if not written:
+                logger.debug(f"Edge ({src_id}, {dst_id}) belongs to another producer; left as is")
+                return None
 
             logger.debug(
                 f"Updated edge ({src_id}, {dst_id}): "
@@ -541,9 +539,10 @@ class HebbianLearner:
         removed_count = 0
         for dst_id, weight in to_remove:
             try:
-                await self.graph.remove_edge(node_id, dst_id)
-                removed_count += 1
-                logger.debug(f"Pruned weak edge ({node_id}, {dst_id}) (weight={weight:.4f})")
+                # #3018: the guarded delete, like the learner's prune branch.
+                if await self.graph.remove_hebbian_edge(node_id, dst_id):
+                    removed_count += 1
+                    logger.debug(f"Pruned weak edge ({node_id}, {dst_id}) (weight={weight:.4f})")
             except Exception as e:
                 logger.error(f"Failed to prune edge ({node_id}, {dst_id}): {e}")
 

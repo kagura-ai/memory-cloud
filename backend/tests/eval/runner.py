@@ -47,7 +47,8 @@ _NDCG_AT = (5, 10)
 
 # Comparison arms (#967): (arm_name, search_mode, neural_enabled).
 #
-# Order is load-bearing — with ENABLE_NEURAL_MEMORY=true, recall() itself
+# Order is load-bearing — with ENABLE_NEURAL_MEMORY=true (and recall-time
+# association learning, which this runner switches on, #3023), recall() itself
 # performs co-activation tracking + Hebbian updates (graph WRITES), so the
 # neural arm must run LAST or it would warm the graph for every arm after it.
 # The first three arms are read-only with respect to the neural graph.
@@ -535,14 +536,18 @@ async def _run_queries_and_score(
     ``ENABLE_NEURAL_MEMORY`` is toggled per arm (recall() reads it on every
     call) and restored afterwards so the surrounding process env is untouched.
     """
+    from tests.eval._provisioning import recall_association_learning_on
+
     arms: dict[str, dict[str, Any]] = {}
     prev_neural = os.environ.get("ENABLE_NEURAL_MEMORY")
     try:
-        for arm_name, search_mode, neural_enabled in _ARMS:
-            os.environ["ENABLE_NEURAL_MEMORY"] = "true" if neural_enabled else "false"
-            arms[arm_name] = await _score_arm(
-                svc, corpus, docs_by_id, id_map, owner, ctx_id, ws_id, search_mode
-            )
+        # #3023: a neural-on arm keeps learning at recall, as before the switch.
+        with recall_association_learning_on():
+            for arm_name, search_mode, neural_enabled in _ARMS:
+                os.environ["ENABLE_NEURAL_MEMORY"] = "true" if neural_enabled else "false"
+                arms[arm_name] = await _score_arm(
+                    svc, corpus, docs_by_id, id_map, owner, ctx_id, ws_id, search_mode
+                )
     finally:
         if prev_neural is None:
             os.environ.pop("ENABLE_NEURAL_MEMORY", None)

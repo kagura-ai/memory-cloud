@@ -397,7 +397,8 @@ remember(
 -> Save returned memory_id as memory_id_2
 -> Verify: list_edges(context_id=..., memory_id=<memory_id_2>) returns an outgoing edge whose
    target_id == <memory_id> (the linked memory) with origin="declared", confidence=1.0 and
-   weight >= 1.0 (exactly 1.0 until a recall co-activates both ends — see the note)
+   weight >= 1.0 (exactly 1.0 until a recall co-activates both ends on a deployment with
+   RECALL_ASSOCIATION_LEARNING_ENABLED=true — see the note)
 -> Note (#741/#925): the linked_memory_ids declared link is stored as origin="declared" with
    edge_type="neural_association" — NOT a "declared_link" edge_type (that discriminator was removed
    in #741, which pivoted to the relation/origin two-axis model). MCP list_edges exposes the origin
@@ -406,7 +407,8 @@ remember(
    hebbian/semantic auto-edges to similar memories (weight 0.25, confidence 0.5) appear within ~1 s
    of remember, so count is usually > 1. The declared edge also receives Hebbian weight bumps once a
    recall co-activates both endpoints (1.036 observed after a recall ran in the same batch), which is
-   why the Verify line is weight >= 1.0 rather than == 1.0. (reference() also carries the declared-link
+   why the Verify line is weight >= 1.0 rather than == 1.0. Only the weight moves: its edge_type,
+   origin, confidence and metadata stay as declared (#3018). (reference() also carries the declared-link
    surface as outgoing_links/incoming_links (#440); list_edges is used here because it is the
    origin-bearing view.)
 ```

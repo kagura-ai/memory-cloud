@@ -234,10 +234,11 @@ def test_recall_is_destructive_because_it_learns(name):
     returns (``MemoryService._recall_run_hebbian_learning`` /
     ``_recall_record_access``); both change later results, so it is not read-only.
     The learning pass also overwrites and removes existing edges
-    (``HebbianLearner.apply_updates``): it rewrites the weight of an edge it
-    touches, a declared one included, deletes one that decays below
-    ``prune_threshold``, and evicts the weakest automatic edges past
-    ``top_m_edges``. Under the same rule that makes ``create_edge`` destructive,
+    (``HebbianLearner.apply_updates``): it rewrites the weight of a hebbian
+    edge, a seed or a declared edge it touches (#3018: an edge Sleep or
+    another producer owns keeps its values), deletes a hebbian edge or seed
+    that decays below ``prune_threshold``, and evicts the weakest automatic
+    edges past ``top_m_edges``. Under the same rule that makes ``create_edge`` destructive,
     so is recall; a repeat changes the weights again, so it is not idempotent.
     get_agent_bootstrap runs the same recall when given a query. The legacy
     ``readOnly`` flag used to say true for both.

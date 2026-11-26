@@ -36,7 +36,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import search_memories_qdrant
 from models.memory import EDGE_ORIGIN_SEMANTIC, Memory, NeuralMemoryEdge
-from repositories.neural_edge import NeuralEdgeRepository
+from repositories.neural_edge import (
+    EDGE_DISCOVERY_SOURCE,
+    TAG_COOCCURRENCE_SEED_MAX_WEIGHT,
+    NeuralEdgeRepository,
+)
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
 from services.sleep.judge_lane import judge_platform_only
@@ -97,20 +101,20 @@ def _is_synthetic_seed_edge(edge: NeuralMemoryEdge) -> bool:
       those edges back into "real connection" semantics. Pre-#741 these
       were tagged ``edge_type='semantic_similarity'``.
     - **tag_cooccurrence (#223)**: identified by
-      ``edge_metadata['source']=='tag_cooccurrence'``; synthetic at *any*
-      weight — the source is purely seeding, weight 0.25–0.40 by spec, and
-      there is no operator knob to "promote" tag-cooccurrence to a real
-      connection. If a pair becomes truly related, Sleep Discovery should
-      overwrite the tag_cooccurrence edge with a confirmed ``related_to``
-      (or similar). Pre-#741 these were tagged
-      ``edge_type='tag_cooccurrence'``.
+      ``edge_metadata['source']=='tag_cooccurrence'`` while its weight is at
+      most ``TAG_COOCCURRENCE_SEED_MAX_WEIGHT`` (0.40, the highest weight
+      seeding writes), so a fresh seed is always synthetic. Co-recall
+      strengthens a tag seed and keeps its marker (#3018: the marker is the
+      seeding idempotency guard); a seed co-recall has raised past the
+      seeding weights counts as a real connection. Pre-#741 these were
+      tagged ``edge_type='tag_cooccurrence'``.
 
     All other edges are treated as real connections regardless of weight.
     """
     if edge.origin == EDGE_ORIGIN_SEMANTIC:
         return edge.weight < SEMANTIC_SIMILARITY_SYNTHETIC_WEIGHT_THRESHOLD
     if edge.edge_metadata is not None and edge.edge_metadata.get("source") == "tag_cooccurrence":
-        return True
+        return edge.weight <= TAG_COOCCURRENCE_SEED_MAX_WEIGHT
     return False
 
 
@@ -620,7 +624,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                     confidence=edge.confidence,
                     workspace_id=workspace_id,
                     context_id=context_id,
-                    edge_metadata={"source": "sleep_edge_discovery"},
+                    edge_metadata={"source": EDGE_DISCOVERY_SOURCE},
                     # Issue #457: automated writer; preserve declared_link.
                     protect_declared_link=True,
                     # Sleep edge_discovery discards the return; skip the
@@ -754,8 +758,9 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
         synthetic k-NN cold-start seeds from #224/#238 and do NOT block the
         pair from being re-judged by Sleep Edge Discovery. Tag-cooccurrence
         seeds (``edge_metadata['source']='tag_cooccurrence'``) are likewise
-        treated as synthetic at any weight. All other edges — and high-weight
-        semantic-origin edges — are treated as real connections and cause the
+        synthetic up to the highest seeding weight (#3018). All other edges —
+        and semantic or tag seeds above those weights — are treated as real
+        connections and cause the
         pair to be filtered out. See ``_is_synthetic_seed_edge`` for the full
         discriminator.
         """

@@ -20,7 +20,8 @@ throwaway contexts that differ ONLY in update machinery:
   so the CONTRAST isolates update machinery, not retrieval mode.
 - **mc_prod** (supporting, not gated): the SAME mc context scored again with
   ``search_mode="hybrid"`` + neural memory on (production posture) — scored
-  LAST because ``ENABLE_NEURAL_MEMORY=true`` performs Hebbian graph WRITES on
+  LAST because ``ENABLE_NEURAL_MEMORY=true`` (with recall-time association
+  learning, switched on for this arm, #3023) performs Hebbian graph WRITES on
   every ``recall()`` call, which must not contaminate the gated mc_update
   scoring pass.
 
@@ -363,9 +364,13 @@ async def _score_and_write(
             svc, update_queries, id_map_mc, owner, ctx_mc_id, ws_id, "semantic"
         )
         os.environ["ENABLE_NEURAL_MEMORY"] = "true"
-        arms[ARM_MC_PROD] = await _score_update_arm(
-            svc, update_queries, id_map_mc, owner, ctx_mc_id, ws_id, "hybrid"
-        )
+        # #3023: the production arm keeps learning at recall, as before the switch.
+        from tests.eval._provisioning import recall_association_learning_on
+
+        with recall_association_learning_on():
+            arms[ARM_MC_PROD] = await _score_update_arm(
+                svc, update_queries, id_map_mc, owner, ctx_mc_id, ws_id, "hybrid"
+            )
     finally:
         if prev_neural is None:
             os.environ.pop("ENABLE_NEURAL_MEMORY", None)

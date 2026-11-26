@@ -16,7 +16,7 @@ from collections.abc import Collection
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import Select, and_, case, delete, desc, func, or_, select, tuple_
+from sqlalchemy import Select, and_, case, delete, desc, func, or_, select, tuple_, update
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import CursorResult
@@ -27,6 +27,8 @@ from models.memory import (
     EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
+    EDGE_TYPE_NEURAL_ASSOCIATION,
+    EDGE_TYPE_SUPERSEDES,
     Memory,
     NeuralMemoryEdge,
 )
@@ -122,6 +124,46 @@ def _pair_rows(
     if context_id:
         conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
     return select(NeuralMemoryEdge).where(and_(*conditions))
+
+
+# #3018: which rows Hebbian learning may change. Evaluated on the EXISTING row
+# (inside ON CONFLICT and in the prune DELETE), so the decision and the write
+# are one statement.
+EDGE_DISCOVERY_SOURCE = "sleep_edge_discovery"
+
+# The highest weight tag co-occurrence seeding writes (4+ shared tags). A tag
+# seed that co-recall has strengthened past it counts as a real connection
+# for Sleep edge discovery (``services.sleep.edge_discovery``), while it keeps
+# its ``source`` marker for the seeding idempotency guard (#3018).
+TAG_COOCCURRENCE_SEED_MAX_WEIGHT = 0.4
+
+
+def _hebbian_leaves_alone() -> ColumnElement[bool]:
+    """An edge another producer owns whose columns a Hebbian update leaves
+    alone, weight included: a ``supersedes`` edge whatever its origin, and an
+    edge Sleep edge discovery confirmed (the discovery ``source`` marker
+    whatever the origin — rows written before the origin column existed carry
+    the default origin — or ``origin='semantic'`` with a type other than
+    ``neural_association``). A declared edge is excluded: its weight keeps
+    moving. A k-NN seed (``origin='semantic'``, ``neural_association``, no
+    discovery marker) is not frozen."""
+    source = func.coalesce(sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext, "")
+    return and_(
+        NeuralMemoryEdge.origin != EDGE_ORIGIN_DECLARED,
+        or_(
+            NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+            source == EDGE_DISCOVERY_SOURCE,
+            and_(
+                NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
+                NeuralMemoryEdge.edge_type != EDGE_TYPE_NEURAL_ASSOCIATION,
+            ),
+        ),
+    )
+
+
+def _producer_owned() -> ColumnElement[bool]:
+    """An edge Hebbian learning never removes: a frozen one or a declared one."""
+    return or_(NeuralMemoryEdge.origin == EDGE_ORIGIN_DECLARED, _hebbian_leaves_alone())
 
 
 class NeuralEdgeRepository:
@@ -250,9 +292,11 @@ class NeuralEdgeRepository:
             protect_declared_link: When True, ON CONFLICT preserves the
                 existing row's ``edge_type`` AND ``origin`` if it already
                 has ``origin='declared'`` (only weight/confidence/metadata/
-                last_updated update). Used by automated writers (Hebbian
-                co-activation, edge discovery) so user-declared links
-                survive co-activation retyping. User-driven update_edge
+                last_updated update). Used by automated writers (edge
+                discovery, ``GraphService.add_edge`` producers) so
+                user-declared links survive automated retyping. Hebbian
+                co-activation has its own, stricter rule in
+                ``upsert_hebbian_edge`` (#3018). User-driven update_edge
                 calls leave this False so an explicit type change still
                 works. (Issue #457; pivoted to origin discriminator
                 in #741 — the parameter name is retained for callsite
@@ -261,12 +305,12 @@ class NeuralEdgeRepository:
             return_fresh_edge: When True (default), the returned ORM is
                 refreshed from the DB so its Python attributes reflect what
                 RETURNING actually wrote (Issue #458). Hot-path callers that
-                discard the return value (Hebbian via GraphService.add_edge,
-                Sleep edge_discovery) pass False to skip the extra SELECT.
+                discard the return value (GraphService.add_edge, Sleep
+                edge_discovery) pass False to skip the extra SELECT.
             origin: Edge origin (``EDGE_ORIGIN_HEBBIAN`` default). On upsert,
                 an existing non-hebbian origin is preserved against a
                 non-``declared`` incoming origin — only ``hebbian`` rows can be
-                overwritten by hebbian/semantic writers. An incoming
+                given another origin by hebbian/semantic writers. An incoming
                 ``declared`` origin always wins, regardless of the existing
                 origin (#1406: user assertion outranks machine provenance).
                 Sleep/declared writers should pass the explicit enum value.
@@ -393,6 +437,149 @@ class NeuralEdgeRepository:
         )
 
         return edge
+
+    async def upsert_hebbian_edge(
+        self,
+        user_id: str,
+        src_id: UUID,
+        dst_id: UUID,
+        weight: float,
+        confidence: float = 1.0,
+        edge_metadata: dict[str, Any] | None = None,
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> bool:
+        """Write a Hebbian co-activation update for one directed pair (#3018).
+
+        A missing edge is created as ``origin='hebbian'``,
+        ``edge_type='neural_association'`` with the given values. On an
+        existing row the rule is decided by that row, inside the
+        ``ON CONFLICT`` clause (no read-then-write window):
+
+        - an edge another producer owns and that is not declared (see
+          ``_hebbian_leaves_alone``) is left exactly as it is, ``last_updated``
+          included;
+        - a declared edge gets the new weight; its type, origin, confidence,
+          metadata and creation time stay;
+        - a seed (k-NN ``origin='semantic'`` association, tag co-occurrence)
+          or a hebbian row gets the new weight and confidence and keeps its
+          metadata, so a tag seed keeps its ``source`` marker.
+
+        ``create_or_update_edge(protect_declared_link=...)`` is the shared
+        upsert of the other automated writers and keeps its own rule.
+
+        Returns:
+            True when a row was inserted or updated, False when the existing
+            row belongs to another producer and was left alone.
+        """
+        if not workspace_id or not context_id:
+            raise ValueError(
+                f"upsert_hebbian_edge() requires workspace_id and context_id for 3-level "
+                f"isolation. Got workspace_id={workspace_id}, context_id={context_id}"
+            )
+        ws_uuid = UUID(workspace_id)
+        ctx_uuid = UUID(context_id)
+        await self._validate_edge_context_invariant(src_id, dst_id, ws_uuid, ctx_uuid)
+
+        now = utcnow()
+        stmt = insert(NeuralMemoryEdge).values(
+            user_id=user_id,
+            src_id=src_id,
+            dst_id=dst_id,
+            edge_type=EDGE_TYPE_NEURAL_ASSOCIATION,
+            weight=weight,
+            confidence=confidence,
+            edge_metadata=edge_metadata,
+            workspace_id=ws_uuid,
+            context_id=ctx_uuid,
+            origin=EDGE_ORIGIN_HEBBIAN,
+            created_at=now,
+            last_updated=now,
+        )
+        declared = NeuralMemoryEdge.origin == EDGE_ORIGIN_DECLARED
+        # Only a hebbian row takes the Hebbian type; every other row keeps its own.
+        edge_type_set = case(
+            (NeuralMemoryEdge.origin == EDGE_ORIGIN_HEBBIAN, stmt.excluded.edge_type),
+            else_=NeuralMemoryEdge.edge_type,
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="unique_edge",  # (user_id, src_id, dst_id)
+            set_={
+                "edge_type": edge_type_set,
+                "weight": stmt.excluded.weight,
+                "confidence": case(
+                    (declared, NeuralMemoryEdge.confidence),
+                    else_=stmt.excluded.confidence,
+                ),
+                # origin and metadata are not in the SET list: an update keeps them.
+                "last_updated": now,
+                "created_at": case(
+                    (edge_type_set != NeuralMemoryEdge.edge_type, now),
+                    else_=NeuralMemoryEdge.created_at,
+                ),
+            },
+            # A row the WHERE refuses is locked but not updated and not returned.
+            where=~_hebbian_leaves_alone(),
+        ).returning(NeuralMemoryEdge.id)
+
+        written = (await self.db.execute(stmt)).scalar_one_or_none() is not None
+        logger.debug(
+            "hebbian_edge_upserted" if written else "hebbian_edge_left_to_its_producer",
+            user_id=user_id,
+            src_id=str(src_id),
+            dst_id=str(dst_id),
+            weight=weight,
+        )
+        return written
+
+    async def prune_hebbian_edge(
+        self,
+        user_id: str,
+        src_id: UUID,
+        dst_id: UUID,
+        *,
+        weight: float | None = None,
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> bool:
+        """Remove a weak edge on behalf of Hebbian learning (#3018).
+
+        Deletes the row only when it is a seed or a hebbian row: an edge
+        another producer owns (``_producer_owned``) is never removed
+        by Hebbian learning. When ``weight`` is given and the row is a
+        declared edge, its weight takes that value instead (a declared edge's
+        weight keeps moving with co-recall; it is just never pruned).
+
+        Returns:
+            True when the row was deleted.
+        """
+        self._validate_isolation_params(workspace_id, context_id)
+        pair = [
+            NeuralMemoryEdge.user_id == user_id,
+            NeuralMemoryEdge.src_id == src_id,
+            NeuralMemoryEdge.dst_id == dst_id,
+            NeuralMemoryEdge.workspace_id == UUID(cast(str, workspace_id)),
+            NeuralMemoryEdge.context_id == UUID(cast(str, context_id)),
+        ]
+        deleted = (
+            await self.db.execute(
+                delete(NeuralMemoryEdge)
+                .where(*pair, ~_producer_owned())
+                .returning(NeuralMemoryEdge.id)
+            )
+        ).scalar_one_or_none() is not None
+        if deleted:
+            logger.debug(
+                "hebbian_edge_pruned", user_id=user_id, src_id=str(src_id), dst_id=str(dst_id)
+            )
+            return True
+        if weight is not None:
+            await self.db.execute(
+                update(NeuralMemoryEdge)
+                .where(*pair, NeuralMemoryEdge.origin == EDGE_ORIGIN_DECLARED)
+                .values(weight=max(0.0, weight), last_updated=utcnow())
+            )
+        return False
 
     async def create_edge_if_absent(
         self,

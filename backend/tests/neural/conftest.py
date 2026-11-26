@@ -35,6 +35,9 @@ def mock_graph():
     graph.has_edge = AsyncMock(return_value=True)
     graph.remove_edge = AsyncMock()
     graph.update_edge = AsyncMock()
+    # #3018: the Hebbian writer and pruner (True = written / removed).
+    graph.add_hebbian_edge = AsyncMock(return_value=True)
+    graph.remove_hebbian_edge = AsyncMock(return_value=True)
     return graph
 
 

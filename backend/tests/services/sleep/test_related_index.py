@@ -364,10 +364,13 @@ async def test_rollback_restores_previous_index_revision():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("derived_newer", [True, False])
 async def test_cross_pool_fold_preserves_baseline_scores(monkeypatch, derived_newer):
+    from config.settings import get_settings
     from services.memory_service import MemoryService
     from tests.services.test_supersede_fold import _cand, _judged, _mem, _pool, _run_recall
 
     monkeypatch.setenv("RECALL_RELATED_INDEX_ENABLED", "true")
+    # #3023: with the pass enabled, only ``baseline_pool`` keeps it from running.
+    monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", True)
     newer, older = _mem(0), _mem(1)
     _judged(newer, older)
     baseline, derived = (older, newer) if derived_newer else (newer, older)
@@ -392,14 +395,17 @@ async def test_cross_pool_fold_preserves_baseline_scores(monkeypatch, derived_ne
         {"id": str(baseline.id), "score": 0.2, "hybrid_score": 0.2}
     ]
     service._recall_run_hebbian_learning.assert_not_awaited()
+    service._recall_ensure_graph_row.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_empty_expansion_keeps_normal_learning(monkeypatch):
+    from config.settings import get_settings
     from services.memory_service import MemoryService
     from tests.services.test_supersede_fold import _mem, _pool, _run_recall
 
     monkeypatch.setenv("RECALL_RELATED_INDEX_ENABLED", "true")
+    monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", True)  # #3023
     hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7))
     service = MemoryService(db=AsyncMock())
     with patch("services.recall_related_index.expand_recall", AsyncMock(return_value=([], {}))):

@@ -3865,7 +3865,7 @@ would to a re-index.
 - Memories forgotten before the deletion, and memories Sleep merged (or archived, before v0.185.0).
   They were already deleted when the context was; the dry run lists them as
   "stay deleted".
-- The context's neural edges (deleted outright; Sleep rebuilds them where it runs),
+- The context's neural edges (deleted outright and not restored; Sleep edge discovery and recall-time association learning add edges again where they are switched on),
   its entries in members' context restrictions (`allowed_context_ids` — grant
   them again), and the resource tokens revoked with it.
 - The vector of an ingested document the sweep cannot rebuild from its row: the
@@ -4382,6 +4382,14 @@ Two settings change what an MCP `recall` returns when the caller leaves an argum
 | `RECALL_LIST_HINT_ENABLED` | `false` | A single-context, non-degraded `recall` adds the optional key `hint` (after `related_tags`) when the candidates it already holds (those that passed the same filters and shadowing as the page, before the `k` cut) carry a returned row's tag more often than the page shows. The line names `list(filters={"tags": [tag]})`. |
 
 The count is "at least N matching this search": it is taken over the recall's candidate pool, which is wider than `k` only when the search over-fetches, so it is never the context's total and costs no query. The tag with the most candidates wins (ties: more rows on the page, then alphabetical). Off, the reply is unchanged. MCP recall tool only: the line names the MCP `list` tool, so the REST `POST /api/v1/memory/recall`, the share-key recall, the agent bootstrap's recall component and `forget(query=...)` never compute or return it.
+
+### Recall-time association learning — Issue #3023
+
+| Variable | Default | Effect |
+|---|---|---|
+| `RECALL_ASSOCIATION_LEARNING_ENABLED` | `false` | With `ENABLE_NEURAL_MEMORY=true`, a recall (not keyword-only, not degraded, not a read-only `learning=False` call) runs the association learning pass after its search: memories returned together get their `origin='hebbian'` edge created or strengthened. |
+
+Off (the default), recall writes no association edge. Nothing in the default recall ranking reads these edges; the readers are the opt-in graph boost (`KAGURA_GRAPH_BOOST_ENABLED`), `explore`, `list_edges`, explore hints and the graph metrics Sleep consolidation uses. Unchanged whatever the switch says: working → persistent promotion and the access counters at recall, seeding at write time (nearest-neighbour and tag co-occurrence seeds), the periodic decay and pruning of `origin='hebbian'` edges, `explore`, `create_edge`, Sleep edge discovery and the related index. Upgrading from a release before v0.185.0: recall stops writing these edges unless the key is set to `true`; existing edges are not deleted by the upgrade, and learned edges decay as they always did when nothing reinforces them.
 
 ## Public MCP endpoints — Issue #2675
 

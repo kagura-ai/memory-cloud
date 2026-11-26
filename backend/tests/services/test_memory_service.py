@@ -2196,10 +2196,12 @@ class TestRecallPoolPrunedAfterHydration:
         )
 
     async def _recall(self, s, monkeypatch):
+        from config.settings import get_settings
         from services import memory_service as ms
 
         log = MagicMock()
         monkeypatch.setattr(ms, "logger", log)
+        monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", True)  # #3023
         db = AsyncMock()
         selected = MagicMock()
         selected.scalars.return_value.all.return_value = s.rows

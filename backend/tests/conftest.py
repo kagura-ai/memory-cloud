@@ -190,8 +190,9 @@ def _managed_target_guards_need_a_session(monkeypatch):
 def _recall_post_commit_writes_need_a_session(monkeypatch):
     """Run recall's post-commit writes only against a real session (#1985).
 
-    ``MemoryService._recall_record_access`` (access stats + promotion) and
-    ``MemoryService._recall_run_hebbian_learning`` each open their own session
+    ``MemoryService._recall_record_access`` (access stats + promotion),
+    ``MemoryService._recall_run_hebbian_learning`` and
+    ``MemoryService._recall_ensure_graph_row`` (#3023) each open their own session
     on the request session's engine. Under a bare ``MagicMock`` session there
     is no engine, and the fallback would connect to whatever ``DATABASE_URL``
     names, so each write runs only when ``self.db`` is an ``AsyncSession``
@@ -216,6 +217,7 @@ def _recall_post_commit_writes_need_a_session(monkeypatch):
 
     _gate("_recall_record_access")
     _gate("_recall_run_hebbian_learning")
+    _gate("_recall_ensure_graph_row")
 
 
 # Modules that call the capacity lock directly, and the name each binds. The

@@ -6591,6 +6591,28 @@ class MemoryService:
         except Exception as exc:
             logger.warning("hebbian_update_failed", error=str(exc))
 
+    async def _recall_ensure_graph_row(self, user_id: str) -> None:
+        """Make the user's ``graph_memory`` row when the learning pass is off (#3023).
+
+        ``weight_decay_task`` and the legacy ``consolidation_task`` visit only
+        users with this row, and the learning pass used to be what made it on a
+        user's first learning recall. With ``RECALL_ASSOCIATION_LEARNING_ENABLED``
+        off the same recall makes it here instead, so the tasks reach the same
+        users whatever the switch says. Runs after the recall commit in its own
+        session and fails open like the pass.
+
+        Args:
+            user_id: Graph owner.
+        """
+        from repositories.graph import GraphRepository
+
+        try:
+            async with self._isolated_session() as graph_db:
+                await GraphRepository(graph_db).get_or_create(user_id)
+                await graph_db.commit()
+        except Exception as exc:
+            logger.warning("graph_row_ensure_failed", error=str(exc))
+
     async def _recall_learn_on_session(
         self,
         graph_db: AsyncSession,
@@ -7715,15 +7737,24 @@ class MemoryService:
             and not degradation.get("degraded")
             and baseline_pool is None
         ):
+            from config.settings import get_settings
+
             with timings.stage("post_commit"):
-                await self._recall_run_hebbian_learning(
-                    request,
-                    hebbian_pool,
-                    memories,
-                    user_id=user_id,
-                    current_context_id=current_context_id,
-                    effective_workspace_id=effective_workspace_id,
-                )
+                # #3023: the pass itself is opt-in per deployment. Off, the
+                # graph row the pass would have made is still made, so the
+                # switch does not change which users the periodic decay and
+                # consolidation visit (they enumerate graph_memory rows).
+                if get_settings().recall_association_learning_enabled:
+                    await self._recall_run_hebbian_learning(
+                        request,
+                        hebbian_pool,
+                        memories,
+                        user_id=user_id,
+                        current_context_id=current_context_id,
+                        effective_workspace_id=effective_workspace_id,
+                    )
+                else:
+                    await self._recall_ensure_graph_row(user_id)
 
         return await with_user_facts(
             await self._recall_finalize(
@@ -10645,7 +10676,7 @@ async def _create_tag_cooccurrence_seed_edges(
     from sqlalchemy import select, text
 
     from neural.config import NeuralMemoryConfig
-    from repositories.neural_edge import NeuralEdgeRepository
+    from repositories.neural_edge import TAG_COOCCURRENCE_SEED_MAX_WEIGHT, NeuralEdgeRepository
 
     try:
         config = await NeuralMemoryConfig.from_db(db)
@@ -10821,7 +10852,7 @@ async def _create_tag_cooccurrence_seed_edges(
                 continue
 
             # Weight: 2 shared → 0.25, 3 → 0.35, 4+ → 0.40 (capped).
-            weight = min(0.4, 0.15 + 0.10 * (shared_count - 1))
+            weight = min(TAG_COOCCURRENCE_SEED_MAX_WEIGHT, 0.15 + 0.10 * (shared_count - 1))
             # Confidence: 2 → 0.50, 3 → 0.75, 4+ → 1.00.
             confidence = min(1.0, shared_count / 4.0)
 

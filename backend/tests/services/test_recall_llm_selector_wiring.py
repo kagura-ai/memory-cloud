@@ -166,10 +166,12 @@ class TestGate:
 @pytest.mark.asyncio
 async def test_real_recall_ships_the_selected_page(monkeypatch: pytest.MonkeyPatch) -> None:
     """The selected page is what access stats, the audit row and the response see."""
+    from config.settings import get_settings
     from services import memory_service as ms
 
     log = MagicMock()
     monkeypatch.setattr(ms, "logger", log)
+    monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", True)  # #3023
     service = MemoryService(db=AsyncMock())
     ctx, ws = uuid4(), uuid4()
     request = RecallRequest(query="q", full=3)

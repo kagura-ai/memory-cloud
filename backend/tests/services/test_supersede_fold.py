@@ -555,6 +555,7 @@ async def _run_recall(
     service._recall_build_responses = build
     service._recall_record_access = AsyncMock()
     service._recall_run_hebbian_learning = AsyncMock()
+    service._recall_ensure_graph_row = AsyncMock()
     service._recall_finalize = AsyncMock(return_value="response")
     await service.recall(
         request,

@@ -238,8 +238,8 @@ class GraphService:
                 kwarg is NOT forwarded to ``NeuralEdgeRepository.create_or_update_edge``,
                 whose own ``origin: str = EDGE_ORIGIN_HEBBIAN`` keyword default
                 then takes effect (matching the ``server_default`` on the
-                column for raw-SQL paths). This path is the Hebbian-internal
-                writer, so the default fits the dominant caller. Producer-
+                column for raw-SQL paths). Hebbian learning itself writes
+                through ``add_hebbian_edge`` (#3018), not here. Producer-
                 asserted writes (e.g. the ai-worker emitting
                 ``continues_from`` / ``references_file``, #782) MUST pass
                 ``origin=EDGE_ORIGIN_DECLARED`` explicitly so the row is
@@ -292,10 +292,10 @@ class GraphService:
             edge_metadata=edge_metadata,
             workspace_id=self.workspace_id,  # Single Collection Migration
             context_id=self.context_id,  # Single Collection Migration
-            # Issue #457: Hebbian co-activation flows through here; never let
-            # automated retyping clobber a user-declared link.
+            # Issue #457: an automated writer; never let it retype a
+            # user-declared link.
             protect_declared_link=True,
-            # Hebbian / GraphService.add_edge callers discard the return value
+            # GraphService.add_edge callers discard the return value
             # — skip the post-upsert SELECT (Issue #458 doesn't apply here).
             return_fresh_edge=False,
             **extra_kwargs,
@@ -307,6 +307,62 @@ class GraphService:
             src_id=str(src_uuid),
             dst_id=str(dst_uuid),
             weight=weight,
+        )
+
+    async def add_hebbian_edge(
+        self,
+        src_id: str | UUID,
+        dst_id: str | UUID,
+        weight: float,
+        *,
+        confidence: float = 1.0,
+        edge_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Write a Hebbian co-activation update (#3018).
+
+        The writer of ``HebbianLearner``. Unlike ``add_edge`` (the shared
+        upsert other producers use), an existing edge another producer owns
+        keeps all its columns, and a declared one only takes the new weight;
+        see ``NeuralEdgeRepository.upsert_hebbian_edge``.
+
+        Returns:
+            True when the edge was created or updated, False when it belongs
+            to another producer and was left alone.
+        """
+        src_uuid = UUID(src_id) if isinstance(src_id, str) else src_id
+        dst_uuid = UUID(dst_id) if isinstance(dst_id, str) else dst_id
+        return await self.edge_repo.upsert_hebbian_edge(
+            user_id=self.user_id,
+            src_id=src_uuid,
+            dst_id=dst_uuid,
+            weight=weight,
+            confidence=confidence,
+            edge_metadata=edge_metadata,
+            workspace_id=self.workspace_id,
+            context_id=self.context_id,
+        )
+
+    async def remove_hebbian_edge(
+        self, src_id: str | UUID, dst_id: str | UUID, *, weight: float | None = None
+    ) -> bool:
+        """Remove an edge Hebbian learning pruned, unless another producer owns it (#3018).
+
+        A declared edge is kept and, when ``weight`` is given, takes that
+        weight; any other edge another producer owns is kept as it is. See
+        ``NeuralEdgeRepository.prune_hebbian_edge``.
+
+        Returns:
+            True when the edge was deleted.
+        """
+        src_uuid = UUID(src_id) if isinstance(src_id, str) else src_id
+        dst_uuid = UUID(dst_id) if isinstance(dst_id, str) else dst_id
+        return await self.edge_repo.prune_hebbian_edge(
+            self.user_id,
+            src_uuid,
+            dst_uuid,
+            weight=weight,
+            workspace_id=self.workspace_id,
+            context_id=self.context_id,
         )
 
     async def get_edge(self, src_id: str | UUID, dst_id: str | UUID) -> dict[str, Any] | None:

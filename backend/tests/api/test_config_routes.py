@@ -78,6 +78,7 @@ _ENV_KEYS = [
     "TRACK_CO_ACTIVATION",
     "ENABLE_DECAY",
     "ENABLE_TRUST_MODULATION",
+    "RECALL_ASSOCIATION_LEARNING_ENABLED",
 ]
 
 
@@ -308,6 +309,19 @@ class TestGetConfig:
 
         for key in ("TRACK_CO_ACTIVATION", "ENABLE_DECAY", "ENABLE_TRUST_MODULATION"):
             assert configs[key]["value"] is True, key
+
+    def test_recall_association_learning_renders_off_unless_set(self, client_as):
+        """#3023: the recall learning pass is opt-in; unset renders its
+        effective default (false) in the system category, set renders true."""
+        configs = _values(client_as().get("/api/v1/config"))
+        assert configs["RECALL_ASSOCIATION_LEARNING_ENABLED"]["value"] is False
+        assert "RECALL_ASSOCIATION_LEARNING_ENABLED" in get_config_categories()["system"]
+        schema = get_config_schema()["RECALL_ASSOCIATION_LEARNING_ENABLED"]
+        assert (schema.type, schema.default_value) == ("boolean", False)
+
+        enabled = client_as(recall_association_learning_enabled=True)
+        configs = _values(enabled.get("/api/v1/config"))
+        assert configs["RECALL_ASSOCIATION_LEARNING_ENABLED"]["value"] is True
 
     def test_neural_env_flags_follow_the_environment(self, client_as, monkeypatch):
         client = client_as()
