@@ -141,22 +141,21 @@ TAG_COOCCURRENCE_SEED_MAX_WEIGHT = 0.4
 def _hebbian_leaves_alone() -> ColumnElement[bool]:
     """An edge another producer owns whose columns a Hebbian update leaves
     alone, weight included: a ``supersedes`` edge whatever its origin, and an
-    edge Sleep edge discovery confirmed (``origin='semantic'`` with a type
-    other than ``neural_association``, or the discovery ``source`` marker).
-    A declared edge is excluded: its weight keeps moving. A k-NN seed
-    (``origin='semantic'``, ``neural_association``, no discovery marker) is
-    not frozen."""
+    edge Sleep edge discovery confirmed (the discovery ``source`` marker
+    whatever the origin — rows written before the origin column existed carry
+    the default origin — or ``origin='semantic'`` with a type other than
+    ``neural_association``). A declared edge is excluded: its weight keeps
+    moving. A k-NN seed (``origin='semantic'``, ``neural_association``, no
+    discovery marker) is not frozen."""
     source = func.coalesce(sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext, "")
     return and_(
         NeuralMemoryEdge.origin != EDGE_ORIGIN_DECLARED,
         or_(
             NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+            source == EDGE_DISCOVERY_SOURCE,
             and_(
                 NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
-                or_(
-                    NeuralMemoryEdge.edge_type != EDGE_TYPE_NEURAL_ASSOCIATION,
-                    source == EDGE_DISCOVERY_SOURCE,
-                ),
+                NeuralMemoryEdge.edge_type != EDGE_TYPE_NEURAL_ASSOCIATION,
             ),
         ),
     )

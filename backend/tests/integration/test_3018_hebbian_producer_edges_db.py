@@ -195,6 +195,13 @@ FROZEN_SPECS = {
         "confidence": 1.0,
         "metadata": None,
     },
+    "discovery_marker_on_a_row_with_the_default_origin": {
+        "edge_type": "related_to",
+        "origin": EDGE_ORIGIN_HEBBIAN,
+        "weight": 0.5,
+        "confidence": 0.8,
+        "metadata": {"source": "sleep_edge_discovery"},
+    },
     "hebbian_origin_supersedes": {
         "edge_type": "supersedes",
         "origin": EDGE_ORIGIN_HEBBIAN,

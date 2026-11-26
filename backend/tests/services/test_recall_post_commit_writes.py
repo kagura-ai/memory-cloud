@@ -464,7 +464,9 @@ class TestReadOnlyRecall:
 
         service._recall_run_hebbian_learning.assert_not_awaited()
         service._recall_record_access.assert_awaited_once()
-        assert service._recall_record_access.await_args.kwargs == {"client": "api"}
+        kwargs = service._recall_record_access.await_args.kwargs
+        assert kwargs["client"] == "api"
+        assert "promote" not in kwargs
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("learning", [True, False])
