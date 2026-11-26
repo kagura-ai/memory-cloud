@@ -79,7 +79,7 @@ _RETURNS_CONTEXT = "context_{id, name, display_name, is_private, is_locked}"
 GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     "remember": {
         _D: (
-            "f941569fd52ddba2",
+            "ec4f71b5641ac68a",
             "Store a new memory; to replace an outdated fact, pass supersedes=<old_memory_id>.\n"
             "People: start summaries with the subject's name; attribute each fact to the person "
             "who stated it.\n"

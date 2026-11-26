@@ -47,7 +47,10 @@ from mcp_server.tools._profiles import (
 # #2615 (plan_headroom? in four Returns lines, paid for by trimming bootstrap,
 # remember_batch and remember): 41,485 (15 chars spare).
 # #2762 (notices? in bootstrap's Returns line, nothing else): 41,472 (28 chars spare).
-CORE_CHAR_BUDGET = 41_500  # (#2470) 21 core tools
+# #3013 (remember: what a user states about themselves goes in as 'fact') and #3015
+# (recall: what order='date' returns) raised the budget by owner decision; with
+# #3014's user_facts? in recall's Returns line the core list is 41,868.
+CORE_CHAR_BUDGET = 42_000  # (#3013, #3015) 21 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 

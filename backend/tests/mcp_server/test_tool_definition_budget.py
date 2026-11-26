@@ -94,14 +94,19 @@ FULL_LIST_BUDGET = 111_000  # (#2043, #2044) list_revisions + rollback_session j
 # #2585 added update_memory's add_tags / remove_tags / details_patch and paid for
 # them by trimming update_memory's own text (the semantics live in the guide topic
 # update_memory.modes): core list 39,840 under an unchanged ceiling.
-CORE_LIST_BUDGET = 40_000  # (#2470) 21 core tools
+# #3013 (remember's user-conversation line), #3015 (what recall's order='date'
+# returns) and #3014 (user_facts? in recall's Returns line): core list 40,268.
+CORE_LIST_BUDGET = 40_300  # (#3013, #3015) 21 core tools
 # #2755 named the event fields in recall's Returns line (+49) and added the
 # within-row date rule (+141, already tightened); the rest of the text is pinned
 # or carries meaning, so recall is 4,174 and the core list stays under its
 # unchanged ceiling.
-RECALL_BUDGET = 4_200  # (#2755) was 4,000 (#1850), 6,900 before
-REMEMBER_BUDGET = 4_800  # (#1853) tags_normalize + dedupe
-PER_TOOL_BUDGET = 4_800  # (#1853) the largest definition
+# #3015 spelled out what order='date' returns (+191) and #3014 named user_facts?
+# in the Returns line: recall is 4,364.
+RECALL_BUDGET = 4_400  # (#3015, #3014) was 4,200 (#2755), 4,000 (#1850)
+# #3013 added the user-conversation line (+198): remember is 4,938.
+REMEMBER_BUDGET = 5_000  # (#3013) was 4,800 (#1853)
+PER_TOOL_BUDGET = 5_000  # (#3013) the largest definition (remember)
 
 # A ceiling more than this far above the measured size is a stale constant.
 MAX_SLACK = 0.15
