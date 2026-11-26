@@ -342,6 +342,16 @@ class Memory(Base):
 
     # 利用統計（Consolidation判定用）
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #3022: when the memory's content was first / last shipped to a reader —
+    # a recall row that carried content, a reference() read (or its first
+    # continuation), a user facts lane row with content. Summary-only rows,
+    # explore, share-key recall, anonymous public serving and export do not
+    # stamp. Written best-effort with the access statistics (``FOR UPDATE
+    # SKIP LOCKED``), so a delivery under contention can be missed: a lower
+    # bound, like ``access_count``. NULL = no delivery recorded (every row
+    # written before the column existed starts NULL). No index.
+    first_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     accessed_by_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     # ``access_count`` counts *surfacing*: every recall top-k return + explore
     # spreading-activation hit + reference(). It is the signal Sleep

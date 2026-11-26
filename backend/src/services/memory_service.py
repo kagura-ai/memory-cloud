@@ -3889,7 +3889,7 @@ class MemoryService:
             user_id: User ID (for access control)
             record_access: Record the read in the memory's access stats
                 (access_count, the #1046 adoption signal reference_count,
-                last_used_at). The MCP handler passes False for a
+                last_used_at, and the #3022 delivery stamp). The MCP handler passes False for a
                 continuation page (it records a continuation that is the
                 session's first read via ``record_adoption``, #2139) and for a
                 call that returns no Layer-3 field (#1685); REST passes the
@@ -6398,7 +6398,8 @@ class MemoryService:
         Issue #2139: the MCP reference handler calls this for a continuation
         page that is the session's first read of the memory, after the page
         was built. Same bump as an offset-less ``reference()`` (access_count,
-        reference_count, last_used_at), in an isolated session so its row lock
+        reference_count, last_used_at, and the #3022 delivery stamp), in an
+        isolated session so its row lock
         and any failure stay out of the request transaction. Best-effort: a
         failure is logged as ``access_stats_update_failed`` (``error_type``
         only — a driver error's text can carry the DSN) and never raised.
@@ -6435,6 +6436,10 @@ class MemoryService:
     ) -> None:
         """Bump access stats for the shipped page and promote what qualifies.
 
+        #3022: the same statement stamps the delivery (``last_delivered_at``,
+        ``first_delivered_at``) of the rows that carry content; a row returned
+        summary-only is bumped without it.
+
         Issue #1985: runs after the recall commit in an isolated session. The
         bump is one lock-ordered statement over the page and promotion is
         another, so two recalls over overlapping pages queue instead of
@@ -6454,10 +6459,13 @@ class MemoryService:
             return
         rows = {memory.id: memory for memory in memories.values()}
         page_ids = [response.memory_id for response in responses]
+        delivered = [r.memory_id for r in responses if r.content is not None]
         try:
             async with self._isolated_session() as stats_db:
                 repo = MemoryRepository(stats_db)
-                updated = await repo.bulk_update_access_stats(page_ids, client)
+                updated = await repo.bulk_update_access_stats(
+                    page_ids, client, delivered_ids=delivered
+                )
                 due = [
                     memory_id
                     for memory_id, stats in updated.items()

@@ -229,3 +229,87 @@ async def test_recall_access_write_commits_on_an_isolated_session(
         assert await _row(probe, high) == (1, ["api"])
         scope = await probe.scalar(select(Memory.scope).where(Memory.id == low))
         assert scope == "persistent"
+
+
+async def _delivered(probe: AsyncSession, memory_id: UUID) -> tuple[object, object]:
+    probe.expire_all()
+    row = (
+        await probe.execute(
+            select(Memory.first_delivered_at, Memory.last_delivered_at).where(
+                Memory.id == memory_id
+            )
+        )
+    ).one()
+    await probe.rollback()
+    return row[0], row[1]
+
+
+async def test_delivery_stamps_skip_a_held_row_instead_of_waiting(
+    async_engine: AsyncEngine, memory_pair: tuple[UUID, UUID]
+) -> None:
+    """#3022: the recall's stamp rides on the access statement and the lane's
+    stamp-only statement is lock-ordered too: under a held row both return at
+    once, the held row unstamped, the read not delayed."""
+    low, high = memory_pair
+    factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as holder, factory() as writer, factory() as probe:
+        await holder.execute(text("SELECT id FROM memories WHERE id = :id FOR UPDATE"), {"id": low})
+        try:
+            counts = await asyncio.wait_for(
+                MemoryRepository(writer).bulk_update_access_stats(
+                    [high, low], client="api", delivered_ids=[high, low]
+                ),
+                _NO_WAIT_SECONDS,
+            )
+            stamped = await asyncio.wait_for(
+                MemoryRepository(writer).stamp_delivery([low]), _NO_WAIT_SECONDS
+            )
+            await writer.commit()
+        finally:
+            await holder.commit()
+
+        assert set(counts) == {high} and stamped == set()
+        assert await _delivered(probe, low) == (None, None)
+        first, last = await _delivered(probe, high)
+        assert first is not None and first == last
+
+
+async def test_recall_stamps_the_rows_that_carry_content(
+    db_session: AsyncSession, memory_pair: tuple[UUID, UUID]
+) -> None:
+    """#3022 through the recall's post-commit write: the row returned with
+    content is stamped, the summary-only row is bumped but not stamped."""
+    low, high = memory_pair
+    rows = {
+        row.id: row
+        for row in (await db_session.execute(select(Memory).where(Memory.id.in_([low, high]))))
+        .scalars()
+        .all()
+    }
+    responses = [
+        MemoryResponse(
+            memory_id=row.id,
+            summary=row.summary,
+            context_summary=None,
+            type=row.type,
+            importance=row.importance,
+            scope=row.scope,
+            created_at=row.created_at,
+            client=row.client,
+            tags=[],
+            context=None,
+            content=row.content if row.id == low else None,
+        )
+        for row in rows.values()
+    ]
+
+    await MemoryService(db_session)._recall_record_access(
+        responses, {str(k): v for k, v in rows.items()}, client="api", promote=False
+    )
+
+    async with async_sessionmaker(db_session.bind, class_=AsyncSession)() as probe:
+        assert (await _row(probe, low))[0] == 1
+        assert (await _row(probe, high))[0] == 1
+        first, last = await _delivered(probe, low)
+        assert first is not None and first == last
+        assert await _delivered(probe, high) == (None, None)

@@ -169,6 +169,8 @@ class TestRecordAccess:
         fresh = _memory()
         already = _memory(scope="persistent", importance=0.9)
         responses = [_response(m) for m in (old, fresh, already)]
+        # #3022: the middle row carries content, the others are summary-only.
+        responses[1].content = "the body"
         session = _isolated(service)
         repo = MagicMock()
         repo.bulk_update_access_stats = AsyncMock(
@@ -188,11 +190,11 @@ class TestRecordAccess:
             )
 
         cls.assert_called_once_with(session)
+        # #1046: recall is surfacing, never adoption. #3022: only the row that
+        # carries content is stamped as delivered.
         repo.bulk_update_access_stats.assert_awaited_once_with(
-            [old.id, fresh.id, already.id], "claude"
+            [old.id, fresh.id, already.id], "claude", delivered_ids=[fresh.id]
         )
-        # #1046: recall is surfacing, never adoption.
-        assert repo.bulk_update_access_stats.await_args.kwargs == {}
         repo.bulk_promote_to_persistent.assert_awaited_once_with([old.id], skip_locked=True)
         session.commit.assert_awaited_once()
         assert [r.scope for r in responses] == ["persistent", "working", "persistent"]
@@ -423,7 +425,7 @@ class TestReadOnlyRecall:
                 responses, {"a": old}, client="claude", promote=False
             )
 
-        repo.bulk_update_access_stats.assert_awaited_once_with([old.id], "claude")
+        repo.bulk_update_access_stats.assert_awaited_once_with([old.id], "claude", delivered_ids=[])
         repo.bulk_promote_to_persistent.assert_not_awaited()
         session.commit.assert_awaited_once()
         assert responses[0].scope == "working"

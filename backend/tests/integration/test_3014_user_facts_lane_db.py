@@ -322,9 +322,10 @@ async def test_topic_filters_do_not_narrow_the_lane(db_session, quiet_write):
 
 
 @pytest.mark.asyncio
-async def test_the_lane_has_no_side_effects(db_session, quiet_write):
+async def test_the_lane_records_no_access(db_session, quiet_write):
     """Access stats, promotion, supersede suggestions, audit row, Hebbian pass:
-    only the main page's rows are touched."""
+    only the main page's rows are touched. (#3022: a lane row shipped with
+    content gets its delivery stamp; this one carries none.)"""
     owner, ws, ctx = await _scope(db_session)
     bags = await _remember(db_session, owner, ws, ctx, "Shopping list", "Rice.", "note")
     knee = await _remember(db_session, owner, ws, ctx, "The user injured a knee", "Stairs.")
@@ -354,10 +355,42 @@ async def test_the_lane_has_no_side_effects(db_session, quiet_write):
     assert emit.await_args.kwargs["result_count"] == 1
     writer.assert_not_called()
     stored = (
-        await db_session.execute(select(Memory.access_count).where(Memory.id == knee))
-    ).scalar_one()
-    assert stored == 0
+        await db_session.execute(
+            select(Memory.access_count, Memory.last_delivered_at).where(Memory.id == knee)
+        )
+    ).one()
+    assert tuple(stored) == (0, None)
     assert response.user_facts[0].supersede_candidate is None
+
+
+@pytest.mark.asyncio
+async def test_a_lane_row_with_content_is_stamped_as_delivered(db_session, quiet_write):
+    """#3022: the lane stamps the delivery of the rows it ships with content,
+    in a statement of its own that moves no access counter."""
+    owner, ws, ctx = await _scope(db_session)
+    bags = await _remember(db_session, owner, ws, ctx, "Shopping list", "Rice.", "note")
+    knee = await _remember(db_session, owner, ws, ctx, "The user injured a knee", "Stairs.")
+    search = _Search(main=[bags], lane=[knee])
+
+    with patch.object(MemoryService, "_recall_record_access", new=AsyncMock()):
+        response = await _run(db_session, owner, ws, ctx, search, k=5, full=1)
+
+    assert response.user_facts[0].content == "Stairs."
+    db_session.expire_all()
+    stored = (
+        await db_session.execute(
+            select(
+                Memory.access_count,
+                Memory.reference_count,
+                Memory.last_used_at,
+                Memory.first_delivered_at,
+                Memory.last_delivered_at,
+            ).where(Memory.id == knee)
+        )
+    ).one()
+    assert tuple(stored)[:3] == (0, 0, None)
+    assert stored.first_delivered_at is not None
+    assert stored.first_delivered_at == stored.last_delivered_at
 
 
 @pytest.mark.asyncio

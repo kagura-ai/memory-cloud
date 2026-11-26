@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any, NamedTuple, cast
 from uuid import UUID
@@ -50,9 +50,23 @@ _IDS_PARAM = bindparam("ids", type_=PG_ARRAY(PG_UUID(as_uuid=True)))
 # The client append is a CASE, not a WHERE filter (#457): a row the client
 # already touched still has its access_count bumped. The statements are built
 # once from literal fragments; every value is a bound parameter (``ids``,
-# ``client``, ``now``).
+# ``client``, ``now``, ``delivered``).
+_DELIVERED_PARAM = bindparam("delivered", type_=PG_ARRAY(PG_UUID(as_uuid=True)))
 _ACCESS_STATS_HEAD = "UPDATE memories AS m SET access_count = m.access_count + 1, "
 _ADOPTION_SET = "reference_count = m.reference_count + 1, "
+# #3022: the delivery stamp rides on the same statement (no extra round trip).
+# A surfacing write stamps only the rows in ``:delivered`` (the recall rows that
+# carried content); an adoption write (reference(), its first continuation)
+# ships content, so it stamps every row it bumps.
+_DELIVERY_SURFACING_SET = (
+    "last_delivered_at = CASE WHEN m.id = ANY(:delivered) THEN :now "
+    "ELSE m.last_delivered_at END, "
+    "first_delivered_at = CASE WHEN m.id = ANY(:delivered) "
+    "THEN COALESCE(m.first_delivered_at, :now) ELSE m.first_delivered_at END, "
+)
+_DELIVERY_ADOPTION_SET = (
+    "last_delivered_at = :now, first_delivered_at = COALESCE(m.first_delivered_at, :now), "
+)
 _ACCESS_STATS_TAIL = (
     "last_used_at = :now, "
     "accessed_by_clients = CASE "
@@ -64,16 +78,28 @@ _ACCESS_STATS_TAIL = (
     "ORDER BY id FOR UPDATE SKIP LOCKED) AS locked "
     "WHERE m.id = locked.id "
     "RETURNING m.id, m.access_count, m.reference_count, m.last_used_at, "
-    "m.accessed_by_clients, m.scope"
+    "m.accessed_by_clients, m.scope, m.first_delivered_at, m.last_delivered_at"
 )
 
-# Surfacing access (recall, explore): access_count only.
-ACCESS_STATS_STATEMENT: TextClause = text(_ACCESS_STATS_HEAD + _ACCESS_STATS_TAIL).bindparams(
-    _IDS_PARAM
-)
-# Adoption access (reference(), #1046): access_count and reference_count.
+# Surfacing access (recall, explore): access_count only; the delivery stamp
+# only for ``:delivered``.
+ACCESS_STATS_STATEMENT: TextClause = text(
+    _ACCESS_STATS_HEAD + _DELIVERY_SURFACING_SET + _ACCESS_STATS_TAIL
+).bindparams(_IDS_PARAM, _DELIVERED_PARAM)
+# Adoption access (reference(), #1046): access_count and reference_count, and
+# the delivery stamp for every row.
 ADOPTION_ACCESS_STATS_STATEMENT: TextClause = text(
-    _ACCESS_STATS_HEAD + _ADOPTION_SET + _ACCESS_STATS_TAIL
+    _ACCESS_STATS_HEAD + _ADOPTION_SET + _DELIVERY_ADOPTION_SET + _ACCESS_STATS_TAIL
+).bindparams(_IDS_PARAM)
+
+# #3022: the delivery stamp alone, for the user facts lane (its rows bump no
+# access counter). Lock-ordered and never waiting, like the statements above.
+DELIVERY_STAMP_STATEMENT: TextClause = text(
+    "UPDATE memories AS m SET last_delivered_at = :now, "
+    "first_delivered_at = COALESCE(m.first_delivered_at, :now) "
+    "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
+    "ORDER BY id FOR UPDATE SKIP LOCKED) AS locked "
+    "WHERE m.id = locked.id RETURNING m.id"
 ).bindparams(_IDS_PARAM)
 
 # Working → persistent promotion (bound ``ids``, ``now``). Sleep and the
@@ -104,6 +130,9 @@ class AccessStats(NamedTuple):
     last_used_at: datetime | None
     accessed_by_clients: list[str] | None
     scope: str
+    # #3022: the delivery stamps as the statement left them.
+    first_delivered_at: datetime | None = None
+    last_delivered_at: datetime | None = None
 
 
 def _loaded_memory(db: AsyncSession, memory_id: UUID) -> Memory | None:
@@ -434,6 +463,7 @@ class MemoryRepository(BaseRepository[Memory]):
         client: str,
         *,
         count_as_adoption: bool = False,
+        delivered_ids: Collection[UUID] = (),
     ) -> dict[UUID, AccessStats]:
         """Bump access statistics for several memories in one lock-ordered UPDATE.
 
@@ -450,6 +480,10 @@ class MemoryRepository(BaseRepository[Memory]):
             - reference_count += 1 (only when count_as_adoption=True)
             - last_used_at = now
             - client appended to accessed_by_clients (once)
+            - last_delivered_at = now and first_delivered_at kept or set to
+              now (#3022): for every row with count_as_adoption=True (a
+              reference() read ships content), otherwise only for the rows in
+              ``delivered_ids``
 
         A ``Memory`` already loaded in this session gets the new values as
         committed state (no second UPDATE on the next flush).
@@ -458,6 +492,9 @@ class MemoryRepository(BaseRepository[Memory]):
             memory_ids: Memories to bump (order and duplicates do not matter).
             client: Client name to record.
             count_as_adoption: Also bump ``reference_count`` (#1046).
+            delivered_ids: #3022, surfacing writes only: the rows whose
+                content this read shipped (a recall row with content). The
+                others are bumped without the delivery stamp.
 
         Returns:
             Each updated memory's statistics after the bump, keyed by id (rows
@@ -466,8 +503,13 @@ class MemoryRepository(BaseRepository[Memory]):
         ids = sorted(set(memory_ids))
         if not ids:
             return {}
-        statement = ADOPTION_ACCESS_STATS_STATEMENT if count_as_adoption else ACCESS_STATS_STATEMENT
-        result = await self.db.execute(statement, {"ids": ids, "client": client, "now": utcnow()})
+        params: dict[str, Any] = {"ids": ids, "client": client, "now": utcnow()}
+        if count_as_adoption:
+            statement = ADOPTION_ACCESS_STATS_STATEMENT
+        else:
+            statement = ACCESS_STATS_STATEMENT
+            params["delivered"] = sorted(set(delivered_ids))
+        result = await self.db.execute(statement, params)
         updated: dict[UUID, AccessStats] = {}
         for memory_id, *values in result.all():
             stats = AccessStats(*values)
@@ -478,12 +520,37 @@ class MemoryRepository(BaseRepository[Memory]):
                 set_committed_value(loaded, "reference_count", stats.reference_count)
                 set_committed_value(loaded, "last_used_at", stats.last_used_at)
                 set_committed_value(loaded, "accessed_by_clients", stats.accessed_by_clients)
+                set_committed_value(loaded, "first_delivered_at", stats.first_delivered_at)
+                set_committed_value(loaded, "last_delivered_at", stats.last_delivered_at)
         logger.debug(
             "access_stats_updated",
             memory_count=len(updated),
             count_as_adoption=count_as_adoption,
         )
         return updated
+
+    async def stamp_delivery(self, memory_ids: Sequence[UUID]) -> set[UUID]:
+        """Record that these memories' content was shipped to a reader (#3022).
+
+        The stamp alone — ``last_delivered_at`` = now, ``first_delivered_at``
+        kept or set to now — with no access counter moved, for a read that
+        does not count as an access (the user facts lane). One lock-ordered
+        ``FOR UPDATE SKIP LOCKED`` statement like the access statistics: it
+        never waits, so a row another transaction holds is not stamped this
+        time. Soft-deleted and unknown ids are skipped. Runs in the caller's
+        transaction; the caller commits.
+
+        Args:
+            memory_ids: Memories whose content was shipped.
+
+        Returns:
+            The ids stamped.
+        """
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return set()
+        result = await self.db.execute(DELIVERY_STAMP_STATEMENT, {"ids": ids, "now": utcnow()})
+        return {row[0] for row in result.all()}
 
     async def bulk_promote_to_persistent(
         self, memory_ids: Sequence[UUID], *, skip_locked: bool = False
