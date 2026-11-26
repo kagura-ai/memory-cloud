@@ -207,6 +207,9 @@ export interface ContextSearchConfig {
   fusion?: ContextFusion;
   /** The fusion a hybrid search of this context uses now (auto resolved). */
   fusion_effective?: EffectiveFusion;
+  // #3014: the user facts lane switch. Optional — a backend predating it
+  // omits it, and the switch is then hidden (nothing is sent).
+  user_facts_lane?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -237,6 +240,8 @@ export interface ContextSearchConfigUpdate {
   llm_selector_enabled?: boolean;
   /** #2980: sent only when the server reports it (optional on the server). */
   fusion?: ContextFusion;
+  /** #3014: sent only when the user changed it (optional on the server). */
+  user_facts_lane?: boolean;
 }
 
 /**

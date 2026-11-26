@@ -2603,6 +2603,11 @@
     "unsavedFieldFetchFactor": "fetch factor",
     "unsavedFieldReranker": "reranker",
     "unsavedFieldFusion": "fusion",
+    "unsavedFieldUserFacts": "user facts lane",
+    "userFactsLane": {
+      "label": "User facts lane",
+      "description": "Each recall also returns up to two facts about the user (memories of type fact) that the search left out."
+    },
     "fusion": {
       "label": "Fusion",
       "description": "How a hybrid search combines its semantic and keyword results.",
