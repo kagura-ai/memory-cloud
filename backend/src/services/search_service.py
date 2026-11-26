@@ -195,7 +195,7 @@ class SearchService:
         timings: RecallTimings | None = None,
         *,
         search_mode_explicit: bool = True,
-        query_vectors: MutableMapping[tuple[str, str], list[float]] | None = None,
+        query_vectors: MutableMapping[tuple[str, str, int], list[float]] | None = None,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
@@ -250,7 +250,7 @@ class SearchService:
                 does; an explicit ``semantic`` raises. Only
                 ``MemoryService.recall`` passes it.
             query_vectors: #3014 a cache of the query's vector by (embedding
-                provider, model), for a query that never changes (the user
+                provider, model, dimensions), for a query that never changes (the user
                 facts lane's). A hit skips the embedding call; a miss embeds
                 once and stores the vector. With a cache the search writes no
                 llm_call_log row of its own.
@@ -459,7 +459,11 @@ class SearchService:
                 # probe in ``MemoryService.recall`` and this resolution could
                 # silently route to the uncapped platform key.
                 embed_outcome: dict[str, Any] = {}
-                vector_key = (str(embed_svc.provider), str(embed_svc.model))
+                vector_key = (
+                    str(embed_svc.provider),
+                    str(embed_svc.model),
+                    int(embed_svc.dimensions),
+                )
                 try:
                     with timings.stage("embed"):
                         cached_vector = (

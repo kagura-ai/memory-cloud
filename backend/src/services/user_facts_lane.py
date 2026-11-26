@@ -11,7 +11,7 @@ up to :data:`USER_FACTS_ROWS` of them, those not already in ``results``, under
 
 The lane reads and never writes. Compared with a normal recall it:
 
-* embeds its fixed query once per embedding provider and model (a process-level
+* embeds its fixed query once per embedding provider, model and dimensions (a process-level
   cache, :data:`_QUERY_VECTORS`, over the embedding service's shared cache) and
   writes no llm_call_log row of its own;
 * never reranks, so it calls no reranker and checks no plan feature for one;
@@ -39,7 +39,7 @@ from models.schemas import MemoryResponse, RecallRequest, RecallResponse
 from utils.event_dates import event_row_kwargs
 from utils.logger import get_logger
 from utils.observed_at import observed_at_from_details
-from utils.recall_projection import content_slice
+from utils.recall_projection import content_slice, effective_full
 
 if TYPE_CHECKING:
     from services.memory_service import MemoryService
@@ -52,6 +52,10 @@ USER_FACTS_QUERY = (
 )
 # The most rows the lane returns.
 USER_FACTS_ROWS = 2
+# Hits fetched past the rows wanted: superseded or folded versions, rows a
+# binding denies and rows already on the page take places in the ranked list
+# without becoming rows, so the lane looks further down than it returns.
+USER_FACTS_POOL_MARGIN = 10
 # The memory type the lane searches.
 USER_FACTS_TYPE = "fact"
 # The lane's time limit. Past it the recall returns without ``user_facts``.
@@ -61,10 +65,10 @@ USER_FACTS_TIMEOUT_SECONDS = 5.0
 # threshold) narrow the question's topic and do not apply to the lane's query.
 _ACCESS_FILTER_KEYS = ("trust_tier", "source_type", "source_uri_prefix")
 
-# (embedding provider, model) → the vector of USER_FACTS_QUERY. Per process;
+# (embedding provider, model, dimensions) → the vector of USER_FACTS_QUERY. Per process;
 # a new worker embeds the query once (a hit in the embedding service's shared
 # cache when another worker already did).
-_QUERY_VECTORS: dict[tuple[str, str], list[float]] = {}
+_QUERY_VECTORS: dict[tuple[str, str, int], list[float]] = {}
 
 
 def lane_applies(
@@ -81,8 +85,8 @@ def lane_applies(
     loaded at the start (no statement of its own) and the request. Skipped
     when the switch is off, the recall spans several contexts, filters by
     ``type`` (it already chose the kind of memory), orders by date (a change
-    history, not a ranked page), carries a selection plan (an evaluation
-    seam), or was served without the semantic arm (a keyword search for the
+    history, not a ranked page), carries a selection plan (the page is
+    chosen by the caller, not ranked), or was served without the semantic arm (a keyword search for the
     fixed query has no meaning).
     """
     if search_config is None or getattr(search_config, "user_facts_lane", False) is not True:
@@ -128,7 +132,7 @@ async def attach_user_facts(
         rows = await asyncio.wait_for(
             _search(
                 service,
-                exclude={item.memory_id for item in response.results},
+                exclude=_page_ids(response),
                 main_facts=sum(1 for item in response.results if item.type == USER_FACTS_TYPE),
                 request=request,
                 user_id=user_id,
@@ -150,6 +154,17 @@ async def attach_user_facts(
     return response
 
 
+def _page_ids(response: RecallResponse) -> set[UUID]:
+    """The memories the page already shows: its rows and the older versions
+    folded under them (a folded version is not a row of its own anywhere)."""
+    ids: set[UUID] = set()
+    for item in response.results:
+        ids.add(item.memory_id)
+        if item.folded is not None:
+            ids.update(item.folded.memory_ids)
+    return ids
+
+
 async def _search(
     service: MemoryService,
     *,
@@ -164,8 +179,9 @@ async def _search(
 ) -> list[MemoryResponse]:
     """The lane's search, hydration and rows, in a session of its own."""
     filters = lane_filters(request)
-    # Rows of the page that are facts may come back here too; fetch past them.
-    k = USER_FACTS_ROWS + main_facts
+    # Rows of the page that are facts may come back here too; fetch past them
+    # and past the hits that never become rows.
+    k = USER_FACTS_ROWS + main_facts + USER_FACTS_POOL_MARGIN
     lane_request = request.model_copy(
         update={"filters": filters, "k": k, "include_superseded": False}
     )
@@ -219,11 +235,26 @@ async def _search(
             picked.append((hit, memory))
             if len(picked) == USER_FACTS_ROWS:
                 break
+        # Content follows the recall's own rule (#2124): none unless the call
+        # carries content at all (``full`` of 0 or unset ships none); with a
+        # defaulted ``full`` only trusted rows are eligible.
+        with_content = effective_full(request.full, request.k) >= 1
         trusted: set[UUID] | None = None
-        if picked and content_trusted_only and (filters.get("trust_tier") != "trusted"):
+        if (
+            picked
+            and with_content
+            and content_trusted_only
+            and (filters.get("trust_tier") != "trusted")
+        ):
             trusted = await lane._recall_trusted_context_ids({m.context_id for _, m in picked})
         rows = [
-            _row(hit, memory, contradiction_map, trusted_context_ids=trusted)
+            _row(
+                hit,
+                memory,
+                contradiction_map,
+                with_content=with_content,
+                trusted_context_ids=trusted,
+            )
             for hit, memory in picked
         ]
         await lane_db.rollback()
@@ -256,16 +287,22 @@ def _row(
     memory: Memory,
     contradiction_map: Mapping[UUID, list[UUID]],
     *,
+    with_content: bool,
     trusted_context_ids: set[UUID] | None,
 ) -> MemoryResponse:
-    """One lane row: the recall row shape, with its content and its dates.
+    """One lane row: the recall row shape, with its dates and, where the
+    recall carries content, its content.
 
-    Content follows recall's rule for a defaulted ``full`` (#2124): with
-    ``trusted_context_ids`` set, only a row of a trusted context that no
-    connector wrote carries it.
+    Content follows recall's rule (#2124): none when the call ships none
+    (``with_content`` False); with ``trusted_context_ids`` set (a defaulted
+    ``full``), only a row of a trusted context that no connector wrote
+    carries it.
     """
-    eligible = trusted_context_ids is None or (
-        memory.source_type != SOURCE_TYPE_CONNECTOR and memory.context_id in trusted_context_ids
+    eligible = with_content and (
+        trusted_context_ids is None
+        or (
+            memory.source_type != SOURCE_TYPE_CONNECTOR and memory.context_id in trusted_context_ids
+        )
     )
     content: str | None = None
     content_next_offset: int | None = None

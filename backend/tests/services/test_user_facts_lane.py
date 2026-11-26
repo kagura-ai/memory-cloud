@@ -215,6 +215,22 @@ async def test_the_binding_filter_writes_no_audit_row():
     assert kept == {} and hits == []
 
 
+# ------------------------------------------------ what the page already shows
+
+
+def test_a_version_folded_under_a_page_row_counts_as_shown():
+    from models.schemas import FoldedVersions
+    from services.user_facts_lane import _page_ids
+
+    newest, older, plain = uuid4(), uuid4(), uuid4()
+    head = SimpleNamespace(memory_id=newest, folded=FoldedVersions(count=1, memory_ids=[older]))
+    other = SimpleNamespace(memory_id=plain, folded=None)
+
+    # The older version is not a row of the page, but the page already stands
+    # for it: the lane must not bring it back next to its newer version.
+    assert _page_ids(SimpleNamespace(results=[head, other])) == {newest, older, plain}
+
+
 # ------------------------------------------------------- the cached vector
 
 
@@ -222,6 +238,7 @@ def _embed_svc():
     svc = MagicMock()
     svc.provider = "openai"
     svc.model = "text-embedding-3-small"
+    svc.dimensions = 1536
     svc.embed_with_usage = AsyncMock(return_value=([0.1] * 8, 12))
     svc.resolve_paid_by = AsyncMock(return_value="platform")
     return svc
@@ -272,7 +289,7 @@ async def test_the_fixed_query_is_embedded_once_per_model():
     await _search_with(cache, embed_svc, writer_cls)
     await _search_with(cache, embed_svc, writer_cls)
     assert embed_svc.embed_with_usage.await_count == 1
-    assert cache == {("openai", "text-embedding-3-small"): [0.1] * 8}
+    assert cache == {("openai", "text-embedding-3-small", 1536): [0.1] * 8}
     # The lane writes no llm_call_log row of its own.
     writer_cls.assert_not_called()
     other = _embed_svc()
@@ -280,6 +297,13 @@ async def test_the_fixed_query_is_embedded_once_per_model():
     await _search_with(cache, other, writer_cls)
     assert other.embed_with_usage.await_count == 1
     assert len(cache) == 2
+    # The same model at another size is another vector: a context that stores
+    # 512-wide vectors never gets the 1536-wide one.
+    narrow = _embed_svc()
+    narrow.dimensions = 512
+    await _search_with(cache, narrow, writer_cls)
+    assert narrow.embed_with_usage.await_count == 1
+    assert ("openai", "text-embedding-3-small", 512) in cache
 
 
 # ------------------------------------------------------------- the callers

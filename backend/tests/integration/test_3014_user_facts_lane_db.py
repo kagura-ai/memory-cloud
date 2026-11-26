@@ -33,7 +33,7 @@ from repositories.config_repository import ContextSearchConfigRepository
 from services.memory_service import MemoryService
 from services.quota_service import DailyReservation
 from services.search_service import SearchService
-from services.user_facts_lane import USER_FACTS_QUERY
+from services.user_facts_lane import USER_FACTS_POOL_MARGIN, USER_FACTS_QUERY
 
 
 @pytest.fixture
@@ -151,7 +151,7 @@ async def test_an_unrelated_fact_comes_back_under_user_facts(db_session, quiet_w
     third = await _remember(db_session, owner, ws, ctx, "The user is vegetarian", "No meat.")
     search = _Search(main=[bags], lane=[knee, back, third])
 
-    response = await _run(db_session, owner, ws, ctx, search, k=5)
+    response = await _run(db_session, owner, ws, ctx, search, k=5, full=1)
 
     assert [r.memory_id for r in response.results] == [bags]
     assert [r.memory_id for r in response.user_facts] == [knee, back]  # at most 2
@@ -163,7 +163,7 @@ async def test_an_unrelated_fact_comes_back_under_user_facts(db_session, quiet_w
     assert lane["filters"] == {"type": "fact"}
     assert lane["context_id"] == str(ctx.id)
     assert lane["use_rerank"] is False
-    assert lane["k"] == 2
+    assert lane["k"] == 2 + USER_FACTS_POOL_MARGIN
     # Who may read what: the same workspace, the same shared-read routing (the
     # vector store's author filter for a private context follows from it).
     main = search.calls[0]
@@ -184,7 +184,24 @@ async def test_a_fact_in_results_is_not_repeated(db_session, quiet_write):
     assert [r.memory_id for r in response.results] == [knee]
     assert [r.memory_id for r in response.user_facts] == [back, third]
     # The page's one fact is fetched past.
-    assert search.lane_calls[0]["k"] == 3
+    assert search.lane_calls[0]["k"] == 3 + USER_FACTS_POOL_MARGIN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_kw", [{}, {"full": 0}])
+async def test_a_recall_that_ships_no_content_gets_lane_rows_without_it(
+    db_session, quiet_write, request_kw
+):
+    owner, ws, ctx = await _scope(db_session)
+    bags = await _remember(db_session, owner, ws, ctx, "Shopping list", "Bags of rice", "note")
+    knee = await _remember(db_session, owner, ws, ctx, "The user injured a knee", "Stairs.")
+    search = _Search(main=[bags], lane=[knee])
+
+    response = await _run(db_session, owner, ws, ctx, search, k=5, **request_kw)
+
+    assert [r.memory_id for r in response.user_facts] == [knee]
+    assert response.user_facts[0].content is None
+    assert response.user_facts[0].summary == "The user injured a knee"
 
 
 @pytest.mark.asyncio

@@ -981,7 +981,7 @@ class RecallResponse(BaseModel):
         default=None,
         description=(
             "Up to two 'fact' memories about the user that are not in results, "
-            "with content and dates, from the context's user facts lane. Present "
+            "with dates (and content when full is 1 or more), from the context's user facts lane. Present "
             "(possibly empty) when the lane ran; absent when it is off or skipped."
         ),
     )
