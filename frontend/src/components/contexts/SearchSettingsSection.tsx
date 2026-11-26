@@ -113,8 +113,9 @@ const SELF_HOSTED_MODELS = [
 /**
  * The fields the save bar stages (#2159). The content chunk and LLM selector
  * switches are not among them: they save as soon as they are confirmed. The
- * first six are also the fields the PUT body requires; `fusion` (#2980) is
- * optional on the server and sent only when it changed.
+ * first six are also the fields the PUT body requires; `fusion` (#2980) and
+ * `user_facts_lane` (#3014) are optional on the server and sent only when they
+ * changed.
  */
 const STAGED_FIELDS = [
   "semantic_weight",
@@ -124,6 +125,7 @@ const STAGED_FIELDS = [
   "reranker_provider",
   "reranker_model",
   "fusion",
+  "user_facts_lane",
 ] as const;
 type StagedField = (typeof STAGED_FIELDS)[number];
 type StagedEdits = Partial<Pick<ContextSearchConfigUpdate, StagedField>>;
@@ -211,6 +213,7 @@ export function SearchSettingsSection({
   );
   const isDirty = dirtyFields.length > 0;
   const fusionDirty = dirtyFields.includes("fusion");
+  const userFactsDirty = dirtyFields.includes("user_facts_lane");
 
   const providerLabel = (provider: string) =>
     provider === "voyage"
@@ -311,6 +314,12 @@ export function SearchSettingsSection({
         editedConfig.fusion !== undefined &&
         editedConfig.fusion !== config.fusion
           ? { fusion: editedConfig.fusion }
+          : {}),
+        // #3014: the user facts lane only when it changed, likewise.
+        ...(config.user_facts_lane !== undefined &&
+        editedConfig.user_facts_lane !== undefined &&
+        editedConfig.user_facts_lane !== config.user_facts_lane
+          ? { user_facts_lane: editedConfig.user_facts_lane }
           : {}),
       };
 
@@ -671,6 +680,7 @@ export function SearchSettingsSection({
     ...(fetchFactorDirty ? [t("unsavedFieldFetchFactor")] : []),
     ...(rerankerDirty ? [t("unsavedFieldReranker")] : []),
     ...(fusionDirty ? [t("unsavedFieldFusion")] : []),
+    ...(userFactsDirty ? [t("unsavedFieldUserFacts")] : []),
   ];
   // #2980: what `auto` resolves to now (server-computed for the stored
   // config), named only while the stored choice is auto and neither the
@@ -856,6 +866,31 @@ export function SearchSettingsSection({
                 <p className="text-xs text-muted-foreground">
                   {t("fusion.autoDesc")}
                 </p>
+              </div>
+            )}
+
+            {/* #3014: shown only by a backend that reports the setting. */}
+            {config?.user_facts_lane !== undefined && (
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <Label htmlFor="user_facts_lane">
+                    {t("userFactsLane.label")}
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    {t("userFactsLane.description")}
+                  </p>
+                </div>
+                <Switch
+                  id="user_facts_lane"
+                  checked={getCurrentValue("user_facts_lane") === true}
+                  onCheckedChange={(checked) =>
+                    setEditedConfig({
+                      ...editedConfig,
+                      user_facts_lane: checked,
+                    })
+                  }
+                  disabled={saving}
+                />
               </div>
             )}
 

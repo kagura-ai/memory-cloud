@@ -28,7 +28,7 @@ from mcp_server.tools.guide import (
 )
 
 DOCS = Path(__file__).resolve().parents[3] / "docs" / "mcp-tools.md"
-MAX_DESCRIPTION_LINES = 5
+MAX_DESCRIPTION_LINES = 6  # (#3013) remember: its own line for what a user states about themselves
 MAX_PARAM_DESCRIPTION_CHARS = 400
 
 

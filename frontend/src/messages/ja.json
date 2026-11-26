@@ -2603,6 +2603,11 @@
     "unsavedFieldFetchFactor": "取得係数",
     "unsavedFieldReranker": "リランカー",
     "unsavedFieldFusion": "融合方式",
+    "unsavedFieldUserFacts": "ユーザー事実レーン",
+    "userFactsLane": {
+      "label": "ユーザー事実レーン",
+      "description": "各 recall で、検索結果に入らなかったユーザーについての事実(type が fact のメモリ)を最大 2 件あわせて返します。"
+    },
     "fusion": {
       "label": "融合方式",
       "description": "ハイブリッド検索でセマンティック検索とキーワード検索の結果をどう組み合わせるか。",

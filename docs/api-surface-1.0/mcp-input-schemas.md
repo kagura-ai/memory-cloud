@@ -277,6 +277,7 @@ Tune per-context hybrid-search weights and reranker settings.
   - `use_rerank` — boolean
   - `reranker_provider` — string, enum [`voyage`, `cohere`, `self_hosted`] ✅ **DECIDED (#1054): now a hard enum** (was a free string; matches the DB CHECK constraint and aligns with connector_type's enum policy). Widening the enum later (adding a provider) is non-breaking; removing a value is a MAJOR bump. ⚠ **RENAMED (#1160): the `ollama` enum value → `self_hosted`.** Renaming (not widening) an enum value is a **breaking (MAJOR) change** under the frozen-1.0 policy; it ships as a **pre-1.0 exemption** to make the provider slot backend-neutral (self-hosted OpenAI-compatible: Ollama, vLLM). The distinct `ollama_cloud` provider is unaffected.
   - `reranker_model` — string (provider-specific model names in description)
+  - `user_facts_lane` — boolean (default false, [#3014](https://github.com/kagura-ai/memory-cloud/issues/3014)): recall of the context also returns up to two `fact` memories about the user that are not in `results`, under `user_facts`. Changed only when sent.
   - `content_chunks_enabled` — boolean (default false, [#2015](https://github.com/kagura-ai/memory-cloud/issues/2015)): also embed long content as chunk vectors for dense retrieval; changing it takes the context owner or a workspace owner/admin; turning it on is refused (`invalid_search_config`) on the LanceDB vector store ([#2072](https://github.com/kagura-ai/memory-cloud/issues/2072))
 
 ### get_usage

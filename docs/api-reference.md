@@ -403,6 +403,8 @@ Errors: `422` for a missing or malformed `filters.context_id`; a context the cal
 
 When the semantic half of the search is unavailable, a `hybrid` search, and a `semantic` lane the query router chose because `search_mode` was omitted ([#2960](https://github.com/kagura-ai/memory-cloud/issues/2960)), answer from keyword search alone: the response then carries `degraded: true` and `degraded_reason` — `embedding_unavailable` (the embedding provider failed or the self-hosted inference server could not be reached) or `vector_search_unavailable` (the vector store failed). A healthy search carries neither key. An explicit `search_mode: "semantic"` has no keyword arm to fall back to and answers the error: `500` `CFG-001` when a self-hosted inference server cannot be reached, `502` for a provider or vector-store failure.
 
+When the context's search config has `user_facts_lane: true` (`PUT /api/v1/contexts/{id}/search-config`, off by default, [#3014](https://github.com/kagura-ai/memory-cloud/issues/3014)), the response also carries `user_facts`: up to two of the context's `fact` memories about the user that are not in `results`, in the `results` row shape with their dates, and with `content` when the request's `full` is 1 or more (a row carries it as a `results` row would). Present (possibly empty) when the lane ran; absent when the switch is off or the request filters by `type`, uses `order: "date"` or was served degraded. See [mcp-tools](mcp-tools.md#recall).
+
 **Response:**
 
 ```json

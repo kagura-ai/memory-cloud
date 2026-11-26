@@ -79,7 +79,7 @@ _RETURNS_CONTEXT = "context_{id, name, display_name, is_private, is_locked}"
 GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     "remember": {
         _D: (
-            "f941569fd52ddba2",
+            "ec4f71b5641ac68a",
             "Store a new memory; to replace an outdated fact, pass supersedes=<old_memory_id>.\n"
             "People: start summaries with the subject's name; attribute each fact to the person "
             "who stated it.\n"
@@ -202,7 +202,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     },
     "recall": {
         _D: (
-            "2047086b1bb2f52a",
+            "6b673424398e9704",
             "Search by meaning and keywords. Read-only here: a search changes no memory and no "
             "association. confidence.level (high|moderate|low|none): none/low suggests an "
             "external source; degraded=true: no semantic search. The store is the authority, "
@@ -216,7 +216,9 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "date a fact was stated); nothing matches: recall again without the filter. In one "
             "row: `event_start`..`event_end` = when it happened, `observed_at` = when it was "
             "said; a date in the summary loses to the event fields. How something changed over "
-            "time: order='date'.\n"
+            "time (a preference, a habit, a plan): one recall with order='date' returns the "
+            "matching memories oldest first, superseded ones included; read the sequence from "
+            "that one result instead of searching step by step.\n"
             "Likely/would/might: recall again on concrete entities and category words (brand, "
             'sponsor, shop, friend), `search_mode="keyword"` for surfaced names; answer with the '
             "best-supported inference, name the memory, mark it as an inference; decline only at "
@@ -227,7 +229,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "Returns: {confidence: {level, ...}, status, results: [{memory_id, date?, "
             "date_source?, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, "
             "observed_weekday?, event_start?, event_end?, event_weekday?, superseded_by?, "
-            "contradicts?, supersede_candidate?, ...}], count, order?, full_applied?, related_tags?: "
+            "contradicts?, supersede_candidate?, ...}], count, order?, user_facts?, full_applied?, related_tags?: "
             "[{tag, count}], ...}. Optional keys omitted: absent, never null. "
             "content_next_offset marks where cut content continues. verbosity='full' adds "
             "context_summary?, scope, tags, version. supersede_candidate: an older "

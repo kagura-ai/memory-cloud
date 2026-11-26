@@ -7102,6 +7102,7 @@ class MemoryService:
         related_index: bool = False,
         list_hint: bool = False,
         learning: bool = True,
+        user_facts_lane: bool = False,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -7162,6 +7163,11 @@ class MemoryService:
                 pruning or eviction, no co-activation) and no working →
                 persistent promotion. The access bookkeeping still runs. Only
                 the MCP recall tool on the google view passes False.
+            user_facts_lane: #3014 the caller lets recall add the context's
+                user facts lane (``user_facts``) when the context's switch is
+                on (:mod:`services.user_facts_lane`). Only the MCP recall tool
+                and the REST recall route pass True; bootstrap, share-key reads
+                and forget(query=) never run it.
 
         Returns:
             RecallResponse with search results
@@ -7223,6 +7229,29 @@ class MemoryService:
         neural_enabled = plan.neural_enabled
         search_config = plan.search_config
 
+        async def with_user_facts(response: RecallResponse) -> RecallResponse:
+            """#3014: ``response`` with the user facts lane, where it applies."""
+            from services.user_facts_lane import attach_user_facts, lane_applies
+
+            if not user_facts_lane or not lane_applies(
+                request,
+                search_config=search_config,
+                context_ids=context_ids,
+                selection=selection_config is not None,
+                response=response,
+            ):
+                return response
+            return await attach_user_facts(
+                self,
+                response,
+                request=request,
+                user_id=user_id,
+                context_id=current_context_id,  # type: ignore[arg-type]
+                workspace_id=effective_workspace_id,
+                is_shared_context_read=is_shared_context_read,
+                content_trusted_only=content_trusted_only,
+            )
+
         # Issue #496: pre-resolve the ``analysis_cluster`` filter. A non-None
         # return means cluster scoping is active; an empty list means the
         # cluster is empty or unknown, so short-circuit before paying for the
@@ -7231,14 +7260,16 @@ class MemoryService:
             request, effective_workspace_id=effective_workspace_id
         )
         if cluster_memory_ids is not None and not cluster_memory_ids:
-            return await self._empty_recall_response(
-                request=request,
-                selection_config=selection_config,
-                search_config=search_config,
-                context_id=current_context_id,
-                timings=timings,
-                user_id=user_id,
-                context_count=context_count,
+            return await with_user_facts(
+                await self._empty_recall_response(
+                    request=request,
+                    selection_config=selection_config,
+                    search_config=search_config,
+                    context_id=current_context_id,
+                    timings=timings,
+                    user_id=user_id,
+                    context_count=context_count,
+                )
             )
 
         # #708 Option A H1 gate (deferred): we now know hybrid_search will
@@ -7355,15 +7386,17 @@ class MemoryService:
         )
 
         if not search_results:
-            return await self._empty_recall_response(
-                request=request,
-                selection_config=selection_config,
-                search_config=search_config,
-                context_id=current_context_id,
-                degradation=degradation,
-                timings=timings,
-                user_id=user_id,
-                context_count=context_count,
+            return await with_user_facts(
+                await self._empty_recall_response(
+                    request=request,
+                    selection_config=selection_config,
+                    search_config=search_config,
+                    context_id=current_context_id,
+                    degradation=degradation,
+                    timings=timings,
+                    user_id=user_id,
+                    context_count=context_count,
+                )
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted) of the contexts
@@ -7622,24 +7655,26 @@ class MemoryService:
                     effective_workspace_id=effective_workspace_id,
                 )
 
-        return await self._recall_finalize(
-            request,
-            search_results,
-            responses,
-            user_id=user_id,
-            memories=memories,
-            current_context_id=current_context_id,
-            effective_workspace_id=effective_workspace_id,
-            neural_enabled=neural_enabled,
-            binding_row_filtered=binding_row_filtered,
-            selection_evidence=selection_evidence,
-            cross_context=bool(context_ids),
-            degradation=degradation,
-            timings=timings,
-            context_count=context_count,
-            selector=selector_report,
-            baseline_pool=baseline_pool,
-            list_hint_pool=list_hint_pool,
+        return await with_user_facts(
+            await self._recall_finalize(
+                request,
+                search_results,
+                responses,
+                user_id=user_id,
+                memories=memories,
+                current_context_id=current_context_id,
+                effective_workspace_id=effective_workspace_id,
+                neural_enabled=neural_enabled,
+                binding_row_filtered=binding_row_filtered,
+                selection_evidence=selection_evidence,
+                cross_context=bool(context_ids),
+                degradation=degradation,
+                timings=timings,
+                context_count=context_count,
+                selector=selector_report,
+                baseline_pool=baseline_pool,
+                list_hint_pool=list_hint_pool,
+            )
         )
 
     async def load_pinned(

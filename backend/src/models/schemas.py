@@ -975,6 +975,16 @@ class RecallResponse(BaseModel):
         default=None,
         description="'date' when the results are oldest first (order='date'); absent otherwise.",
     )
+    # #3014: the user facts lane's rows. Present (possibly empty) when the
+    # lane ran, absent otherwise (both recall routes use exclude_none).
+    user_facts: list[MemoryResponse] | None = Field(
+        default=None,
+        description=(
+            "Up to two 'fact' memories about the user that are not in results, "
+            "with dates (and content when full is 1 or more), from the context's user facts lane. Present "
+            "(possibly empty) when the lane ran; absent when it is off or skipped."
+        ),
+    )
 
     # No return annotation on purpose: see MemoryResponse._omit_unset_date.
     @model_serializer(mode="wrap")
@@ -1144,6 +1154,8 @@ class ExportedSearchConfig(BaseModel):
     content_chunks_enabled: bool = False
     # #2144: the recall LLM selector opt-in, like the chunk one.
     llm_selector_enabled: bool = False
+    # #3014: default keeps older exports parseable.
+    user_facts_lane: bool = False
 
 
 class ExportedMemory(TZAwareBaseModel):
@@ -1967,6 +1979,14 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
             "against the weights and the deployment's HYBRID_FUSION"
         ),
     )
+    # Issue #3014: the user facts lane switch.
+    user_facts_lane: bool = Field(
+        default=False,
+        description=(
+            "When true, a recall of this context also returns up to two of its "
+            "'fact' memories about the user under user_facts"
+        ),
+    )
     # Issue #2015: content chunk vectors opt-in.
     content_chunks_enabled: bool = Field(
         default=False, description="Embed long content as chunk vectors for dense retrieval"
@@ -2158,6 +2178,15 @@ class ContextSearchConfigUpdate(BaseModel):
         "deployment's HYBRID_FUSION. rrf (reciprocal rank fusion, the weights "
         "unused) or weighted pins the context to that fusion whatever the "
         "deployment uses",
+    )
+    # Issue #3014: optional (default-preserving via exclude_unset in the repo).
+    user_facts_lane: bool = Field(
+        default=False,
+        description="User facts lane: when true, a recall of this context (MCP recall, "
+        "POST /api/v1/memory/recall) also runs one fixed search over the context's "
+        "'fact' memories about the user and returns up to two that are not already "
+        "in results under user_facts. Skipped when the recall filters by type, uses "
+        "order='date', spans several contexts or degraded. Off by default",
     )
     # Issue #2015: optional (default-preserving via exclude_unset in the repo).
     content_chunks_enabled: bool = Field(

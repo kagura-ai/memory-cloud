@@ -415,6 +415,8 @@ class ContextSearchConfigRepository:
             reinforce_require_host_arbitration=False,
             # #2980: explicit for the same reason.
             fusion="auto",
+            # #3014: the user facts lane off, for the same reason.
+            user_facts_lane=False,
             **chunk_reset,
             **selector_reset,
         )

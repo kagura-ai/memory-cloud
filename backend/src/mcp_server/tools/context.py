@@ -191,6 +191,8 @@ async def handle_get_context_info(
                         "fusion_effective": resolve_fusion(search_config, _settings.hybrid_fusion),
                         "llm_selector_enabled": selector_stored,
                         "llm_selector_effective": selector_effective,
+                        # #3014: the user facts lane switch.
+                        "user_facts_lane": getattr(search_config, "user_facts_lane", False) is True,
                     },
                 }
 
