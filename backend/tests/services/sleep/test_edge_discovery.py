@@ -408,7 +408,7 @@ class TestIsSyntheticSeedEdge:
         edge = _make_edge("learned_from", 0.1)
         assert _is_synthetic_seed_edge(edge) is False
 
-    # ---- Issue #223: tag_cooccurrence is synthetic at any weight ----
+    # ---- Issue #223 / #3018: tag_cooccurrence is synthetic up to its seeding weights ----
 
     def test_tag_cooccurrence_low_weight_is_synthetic(self):
         """Default tag_cooccurrence weight (2 shared = 0.25) is synthetic.
@@ -425,16 +425,20 @@ class TestIsSyntheticSeedEdge:
         edge = _make_edge("tag_cooccurrence", 0.40, edge_metadata={"source": "tag_cooccurrence"})
         assert _is_synthetic_seed_edge(edge) is True
 
-    def test_tag_cooccurrence_above_threshold_is_still_synthetic(self):
-        """Unlike semantic_similarity, tag_cooccurrence has NO weight
-        threshold — even an artificially high-weight tag_cooccurrence edge
-        (which the seeding code never produces, but a backfill bug or a
-        future operator override could) is treated as synthetic. This is the
-        documented design: tag_cooccurrence is purely seeding by definition,
-        and Sleep Discovery should be free to overwrite it with a confirmed
-        ``related_to``."""
-        edge = _make_edge("tag_cooccurrence", 0.9, edge_metadata={"source": "tag_cooccurrence"})
-        assert _is_synthetic_seed_edge(edge) is True
+    def test_tag_seed_strengthened_by_co_recall_is_a_real_connection(self):
+        """#3018: co-recall strengthens a tag seed and keeps its ``source``
+        marker (the seeding idempotency guard). A seed raised past the
+        highest seeding weight is a real connection, so Sleep Discovery does
+        not re-judge (and overwrite) it; a fresh seed stays synthetic."""
+        from repositories.neural_edge import TAG_COOCCURRENCE_SEED_MAX_WEIGHT
+
+        marker = {"source": "tag_cooccurrence"}
+        assert _is_synthetic_seed_edge(
+            _make_edge("neural_association", TAG_COOCCURRENCE_SEED_MAX_WEIGHT, edge_metadata=marker)
+        )
+        for weight in (TAG_COOCCURRENCE_SEED_MAX_WEIGHT + 0.01, 0.9):
+            edge = _make_edge("neural_association", weight, edge_metadata=marker)
+            assert _is_synthetic_seed_edge(edge) is False, weight
 
 
 class TestFilterExistingEdges:

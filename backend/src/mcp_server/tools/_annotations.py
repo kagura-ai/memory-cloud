@@ -91,8 +91,9 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "remember": _additive("Store Memory"),  # supersedes adds an edge; the old memory is untouched
     # external_id mode replaces the memory with a new one on every call.
     "update_memory": _destructive("Update Memory", idempotent=False),
-    # Hebbian learning reweights existing edges (a declared edge's weight too),
-    # prunes those that decay below the threshold and evicts the weakest
+    # Hebbian learning reweights its own edges, seeds and a declared edge's
+    # weight (#3018: other producers' edges are left alone), prunes its own
+    # edges and seeds that decay below the threshold and evicts the weakest
     # automatic edges past the per-node cap; it also promotes working memories.
     "recall": _destructive("Search Memories", idempotent=False),
     "reference": _read("Read Memory"),  # bumps reference_count: bookkeeping

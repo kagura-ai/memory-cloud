@@ -406,7 +406,8 @@ remember(
    hebbian/semantic auto-edges to similar memories (weight 0.25, confidence 0.5) appear within ~1 s
    of remember, so count is usually > 1. The declared edge also receives Hebbian weight bumps once a
    recall co-activates both endpoints (1.036 observed after a recall ran in the same batch), which is
-   why the Verify line is weight >= 1.0 rather than == 1.0. (reference() also carries the declared-link
+   why the Verify line is weight >= 1.0 rather than == 1.0. Only the weight moves: its edge_type,
+   origin, confidence and metadata stay as declared (#3018). (reference() also carries the declared-link
    surface as outgoing_links/incoming_links (#440); list_edges is used here because it is the
    origin-bearing view.)
 ```

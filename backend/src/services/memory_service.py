@@ -10641,7 +10641,7 @@ async def _create_tag_cooccurrence_seed_edges(
     from sqlalchemy import select, text
 
     from neural.config import NeuralMemoryConfig
-    from repositories.neural_edge import NeuralEdgeRepository
+    from repositories.neural_edge import TAG_COOCCURRENCE_SEED_MAX_WEIGHT, NeuralEdgeRepository
 
     try:
         config = await NeuralMemoryConfig.from_db(db)
@@ -10817,7 +10817,7 @@ async def _create_tag_cooccurrence_seed_edges(
                 continue
 
             # Weight: 2 shared → 0.25, 3 → 0.35, 4+ → 0.40 (capped).
-            weight = min(0.4, 0.15 + 0.10 * (shared_count - 1))
+            weight = min(TAG_COOCCURRENCE_SEED_MAX_WEIGHT, 0.15 + 0.10 * (shared_count - 1))
             # Confidence: 2 → 0.50, 3 → 0.75, 4+ → 1.00.
             confidence = min(1.0, shared_count / 4.0)
 
