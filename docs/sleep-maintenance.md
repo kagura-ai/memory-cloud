@@ -27,7 +27,7 @@ Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Ove
 │    1. Load NeuralMemoryConfig                                │
 │    2. Resolve context.sleep_mode → full / edges_only / skip │
 │    3. Create SleepReport (status=running)                    │
-│    4. Execute phases with shared SleepBudget                 │
+│    4. Execute phases, each with its own SleepBudget         │
 │    5. Finalize report (completed | failed | rolled_back)    │
 └─────────────────────────────────────────────────────────────┘
                               ↓
@@ -44,7 +44,7 @@ Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Ove
                       └───────────────┘
 ```
 
-Phases are independently recoverable. If phase N fails, phases N+1..6 still execute, the error is recorded in the report, and the run is marked `completed` with the failing phase's error captured — fatal exceptions mark the run `failed`. Budget (`SleepBudget`) is shared across all phases and enforces upper bounds on LLM calls and memories processed per run.
+Phases are independently recoverable. If phase N fails, phases N+1..6 still execute, the error is recorded in the report, and the run is marked `completed` with the failing phase's error captured — fatal exceptions mark the run `failed`. Each phase has its own budget (`SleepBudget`, #3019): the full memory allowance and a share of the run's LLM calls, so one phase cannot starve another (see "Budget enforcement" below).
 
 ## The Six Phases
 
@@ -143,7 +143,7 @@ Navigate to a context's **Settings** tab → **Sleep Maintenance** card. Select 
 
 If a context's `sleep_mode` is changed while a Sleep run is in progress for that context, the in-flight run is **not** interrupted; the new mode takes effect on the next scheduled run.
 
-Mode resolution happens in `SleepOrchestrator._get_sleep_mode()`. Unknown or missing contexts fall back to `"full"`. The Reindex and Report phases themselves are not gated by `sleep_mode`; they run whenever at least one preceding phase executed and produced changes.
+Mode resolution happens in `SleepOrchestrator._get_sleep_mode()`. Unknown or missing contexts fall back to `"skip"`. The Reindex and Report phases themselves are not gated by `sleep_mode`; they run whenever at least one preceding phase executed and produced changes.
 
 ## LLM Service Layer
 
@@ -153,7 +153,7 @@ Phases 1–4 call the LLM through `LLMService`, which supports:
 - **Provider / model precedence** (#1569): a `neural_config` row (`sleep_llm_provider` / `sleep_llm_model`) > explicit `SLEEP_LLM_PROVIDER` / `SLEEP_LLM_MODEL` env > the deployment's `MANAGED_LLM_PROVIDER` / `MANAGED_LLM_MODEL` (logged once as `sleep_llm_from_managed_lane`) > the code default `openai` / `gpt-5-nano`. `SLEEP_LLM_FORCE_ENV=1` pins env over the DB row.
 - **API key priority** (most specific wins): context-scoped key → workspace-scoped key → the provider's platform env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`; `SELF_HOSTED_BASE_URL` for `self_hosted`). With `RESOLVE_STORED_BYOK_KEYS=false` the two stored-key tiers are skipped, and a judge on the managed lane resolves the platform credential only (`platform_only`). See "LLM Credentials" in [deployment.md](deployment.md).
 - **Interface**: `complete_json()` returns `(parsed_json, tokens_used)`; each phase aggregates tokens into its `PhaseResult`, and the reporter rolls them up into the `SleepReport`.
-- **Budget enforcement**: every phase checks `SleepBudget.can_afford()` before issuing an LLM batch. When the budget is exhausted, later phases are skipped with `skip_reason="budget_exhausted"`. Defaults: `max_llm_calls=50`, `max_memories=200` per run (override via Neural Config).
+- **Budget enforcement** (#3019): each phase gets its own budget. Its memory allowance is the full `sleep_max_memories_per_run` (so a run's `memories_processed` can exceed it, one allowance per phase). The run's `sleep_max_llm_calls_per_run` is shared in equal parts among the enabled phases of the run that call a model — edge discovery and dedup with a Sleep LLM configured, importance re-evaluation, and the consolidation judge when it is on — in run order, the remainder of the division to the earliest; the calls a phase leaves unused roll forward to the next such phase, so the run never spends more than the setting. Every phase checks `SleepBudget.can_afford()` before an LLM batch. A model phase whose share is used up at entry is skipped with `skip_reason="budget_exhausted"` (the run stays `completed`); a phase that calls no model — the retention phases, the related index, and consolidation's rule pass — is never skipped for budget, and consolidation records `llm_pass_cut_for_budget` / `llm_unjudged` when its judge ran out of calls. `sleep_edge_discovery_sample_size` above the memory allowance is clamped at run time (log `sleep_edge_discovery_sample_clamped`); the configuration API accepts the pair. Defaults: `sleep_max_llm_calls_per_run=50`, `sleep_max_memories_per_run=200` (override via Neural Config).
 
 ### Trust boundary for memory content (prompt-injection hardening)
 
@@ -252,8 +252,8 @@ All Sleep-specific settings live under the Sleep category of Neural Config (`bac
 |-------------------------------|----------------------------------------------------------------|
 | `sleep_llm_provider`          | `openai`, `anthropic`, `gemini` or `self_hosted`.               |
 | `sleep_llm_model`             | Model identifier passed to the provider.                       |
-| `sleep_max_memories_per_run`  | Upper bound on memories touched per context per run.           |
-| `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run (budget cap).     |
+| `sleep_max_memories_per_run`  | Upper bound on memories each phase touches per context per run (each phase has its own allowance, #3019). |
+| `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run, shared among the phases that call a model (#3019). |
 | `sleep_dedup_enabled`         | Master toggle for Phase 2.                                     |
 | `sleep_merge_retention_days`  | Sleep-tombstone purge window (#1209, #1520). `0` = no additional Sleep purge; the cleanup sweep still applies (#1521). |
 | `sleep_edge_discovery_enabled`| Master toggle for Phase 1. Default `false` (#3021).            |

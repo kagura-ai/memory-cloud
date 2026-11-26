@@ -224,6 +224,30 @@ class TestLLMBorderlinePath:
 
         assert result.details["llm_promoted"] == 0
         llm.complete_json.assert_not_called()
+        # #3019: the cut is visible in the details; the rule pass ran in full.
+        assert result.details["llm_pass_cut_for_budget"] is True
+        assert result.details["llm_unjudged"] == 1
+        assert result.details["borderline"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_budget_cut_after_the_first_batch_counts_the_rest(self):
+        mems = [_make_memory() for _ in range(BATCH_SIZE + 2)]
+        phase, llm = _build_phase(mems)
+        llm.complete_json = AsyncMock(return_value=_make_llm_response([]))
+        result, budget, _ = await _run_with_graph(phase, config=_make_config())
+        assert result.details["llm_pass_cut_for_budget"] is False
+        assert result.details["llm_unjudged"] == 0
+
+        phase, llm = _build_phase(mems)
+        llm.complete_json = AsyncMock(return_value=_make_llm_response([]))
+        graph = MagicMock()
+        graph.stats = AsyncMock(return_value={"total_edges": 0})
+        with patch("services.sleep.consolidation.GraphService", return_value=graph):
+            result = await phase.execute(
+                _make_config(), "u", "ws", "ctx", SleepBudget(max_llm_calls=1)
+            )
+        assert result.details["llm_pass_cut_for_budget"] is True
+        assert result.details["llm_unjudged"] == 2
 
     @pytest.mark.asyncio
     async def test_unknown_memory_id_in_decisions_is_skipped(self):

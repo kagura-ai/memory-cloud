@@ -3451,7 +3451,7 @@
           "skippedNoReason": "スキップされました",
           "skippedUnknown": "スキップ: {reason}",
           "skipReasons": {
-            "budgetExhausted": "スキップ: LLM バジェット上限に到達",
+            "budgetExhausted": "スキップ: 実行バジェットの上限に到達",
             "phaseDisabled": "スキップ: 設定でフェーズが無効",
             "sleepMode": "スキップ: sleep モードが {mode}"
           },

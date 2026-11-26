@@ -3451,7 +3451,7 @@
           "skippedNoReason": "Skipped",
           "skippedUnknown": "Skipped: {reason}",
           "skipReasons": {
-            "budgetExhausted": "Skipped: LLM budget exhausted",
+            "budgetExhausted": "Skipped: run budget used up",
             "phaseDisabled": "Skipped: phase disabled in configuration",
             "sleepMode": "Skipped: sleep mode is {mode}"
           },

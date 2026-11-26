@@ -100,6 +100,9 @@ class _ConsolidationTally:
 
     promoted: int = 0
     llm_promoted: int = 0
+    # #3019: borderline memories the judge never saw because the phase's LLM
+    # calls ran out (0 when the pass finished or did not run).
+    llm_unjudged: int = 0
 
 
 class ConsolidationPhase(LLMSpendTracker):
@@ -254,10 +257,18 @@ class ConsolidationPhase(LLMSpendTracker):
     ) -> None:
         """Adjudicate the deferred memories in LLM batches (#1456 extract).
 
-        The judge answers promote or keep; a kept memory stays working.
+        The judge answers promote or keep; a kept memory stays working. When
+        the phase's LLM calls run out, the rest is left unjudged and counted
+        in ``tally.llm_unjudged`` (#3019).
         """
         for batch_start in range(0, len(borderline), BATCH_SIZE):
             if not budget.can_afford(llm_calls=1):
+                tally.llm_unjudged = len(borderline) - batch_start
+                logger.info(
+                    "consolidation_llm_pass_cut_for_budget",
+                    unjudged=tally.llm_unjudged,
+                    borderline=len(borderline),
+                )
                 break
 
             batch = borderline[batch_start : batch_start + BATCH_SIZE]
@@ -364,6 +375,10 @@ class ConsolidationPhase(LLMSpendTracker):
             "rule_deleted": 0,
             "borderline": len(borderline),
             "llm_promoted": tally.llm_promoted,
+            # #3019: the judge's pass stopped because the phase's LLM calls ran
+            # out; the rule pass ran in full either way.
+            "llm_pass_cut_for_budget": tally.llm_unjudged > 0,
+            "llm_unjudged": tally.llm_unjudged,
             "llm_archived": 0,
             "llm_archive_guarded": 0,
             "llm_call_failures": self._llm_failures,  # #1183
