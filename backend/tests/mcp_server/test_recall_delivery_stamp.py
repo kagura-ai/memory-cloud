@@ -5,9 +5,8 @@ the lowest-ranked rows, then off the user facts rows, then cuts rows
 (``_recall_reply``). So the tool asks the service not to stamp
 (``stamp_delivery=False``) and stamps, after its own commit, exactly the rows
 whose content the final reply carries. A row the reply ships summary-only, or
-not at all, is never stamped. A failed stamp follows the user facts lane's
-failure rule: the reply goes without ``user_facts`` when its rows carried
-content; ``results`` are returned as they are.
+not at all, is never stamped. A stamp that fails or runs out of time leaves
+the reply as it is.
 """
 
 from __future__ import annotations
@@ -111,18 +110,28 @@ async def test_a_summary_only_reply_runs_no_stamp():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_stamp_drops_lane_rows_with_content_and_keeps_results():
+async def test_a_failed_stamp_leaves_the_reply_as_it_is():
     fact = _memory(type="fact", content="Stairs hurt.")
     main = _memory(content="body")
     payload, _ = await _run(
         {"full": 1}, RecallResponse(results=[main], user_facts=[fact]), stamped=False
     )
-    assert "user_facts" not in payload
+    assert payload["user_facts"][0]["content"] == "Stairs hurt."
     assert payload["results"][0]["content"] == "body"
 
-    # Lane rows without content are not the stamp's: the key stays.
-    bare_fact = _memory(type="fact")
-    payload, _ = await _run(
-        {"full": 1}, RecallResponse(results=[main], user_facts=[bare_fact]), stamped=False
-    )
-    assert payload["user_facts"][0]["memory_id"] == str(bare_fact.memory_id)
+
+@pytest.mark.asyncio
+async def test_a_stamp_that_runs_out_of_time_leaves_the_reply_as_it_is(monkeypatch):
+    import asyncio
+
+    from mcp_server.tools import memory as memory_tools
+
+    async def _never(_ids):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(memory_tools, "DELIVERY_STAMP_TIMEOUT_SECONDS", 0.01)
+    reply = {"results": [{"memory_id": str(uuid4()), "content": "body"}]}
+    service = MagicMock()
+    service.record_delivery = _never
+    await memory_tools._record_reply_delivery(service, reply)
+    assert reply["results"][0]["content"] == "body"

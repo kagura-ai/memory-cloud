@@ -3,6 +3,7 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
+import asyncio
 import contextlib
 import logging
 import time
@@ -1370,22 +1371,30 @@ def _recall_reply(
     return reply
 
 
+# #3022: the most a recall reply waits for its delivery stamp (a connection
+# from the pool plus one SKIP LOCKED statement).
+DELIVERY_STAMP_TIMEOUT_SECONDS = 2.0
+
+
 async def _record_reply_delivery(service: Any, reply: dict[str, Any]) -> None:
     """Stamp the delivery (#3022) of the rows whose content ``reply`` carries.
 
     The reply is final here (fitted, cut and sorted by :func:`_recall_reply`),
-    so a row the fit left summary-only, or cut, is not stamped. A failed stamp
-    follows the user facts lane's failure rule: the reply goes without
-    ``user_facts`` when its rows carried content (dropping a key keeps it
-    within ``max_chars``); ``results`` are returned as they are, as with the
-    access statistics.
+    so a row the fit left summary-only, or cut, is not stamped. The stamp is
+    bookkeeping: it runs within :data:`DELIVERY_STAMP_TIMEOUT_SECONDS`, and a
+    stamp that fails or runs out of time is logged and leaves the reply as it
+    is, as with the access statistics.
     """
     lane = reply.get("user_facts") or []
     shipped = [UUID(item["memory_id"]) for item in (*reply["results"], *lane) if "content" in item]
-    if not shipped or await service.record_delivery(shipped):
+    if not shipped:
         return
-    if any("content" in item for item in lane):
-        del reply["user_facts"]
+    try:
+        await asyncio.wait_for(
+            service.record_delivery(shipped), timeout=DELIVERY_STAMP_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        logger.warning("delivery_stamp_timeout rows=%d", len(shipped))
 
 
 async def handle_recall(
