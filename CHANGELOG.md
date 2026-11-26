@@ -4,6 +4,32 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.185.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.185.0) — 2026-11-26
+
+A memory is kept until its owner or writer deletes it, and the background work nothing reads is off by default. There are two migrations (`f64`, `f65`), one new environment key and three behaviour changes operators should read before upgrading.
+
+### Changed
+- **Memories are kept until deleted** ([#3021](https://github.com/kagura-ai/memory-cloud/issues/3021)): nothing removes a memory for age or disuse any more. A row goes away only through `forget`, a duplicate merge, and the documented retention of rows already deleted.
+  - The legacy consolidation task (deployments with `SLEEP_ENABLED` off) still promotes by rule but no longer deletes working memories that are 30 days old and were never returned by a recall. `MemoryService.cleanup_old_working_memories` is removed.
+  - Sleep consolidation no longer archives. `CONSOLIDATION_ADOPTION_DELETE_CUTOFF` is gone (remove it from your environment). The report keys `rule_deleted`, `llm_archived` and `llm_archive_guarded` stay and read 0; `rollback_sleep_run` still restores archives made by earlier versions.
+  - In the persistence block of `remember` / `update_memory`, `consolidation_archive_min_age_days` is always null and the detail text says a memory is kept until deleted.
+- **Sleep defaults**: edge discovery and importance re-evaluation default to off. A new switch, `sleep_consolidation_judge_enabled`, controls the consolidation model judge and is off on every deployment (migration `f64`). Rule promotion always runs.
+- **Recall-time association learning is opt-in** ([#3023](https://github.com/kagura-ai/memory-cloud/issues/3023)): new environment key `RECALL_ASSOCIATION_LEARNING_ENABLED`, default `false`. With it off a recall writes no association edge. Promotion at recall, the access counters, seeding at write time, decay and pruning of learned edges, `explore`, `create_edge` and Sleep are unchanged; a recall still creates the user's graph record, so the periodic tasks reach the same users as before.
+
+### Fixed
+- **Each Sleep phase gets its own budget** ([#3019](https://github.com/kagura-ai/memory-cloud/issues/3019), points 1 and 2): one phase can no longer starve the others. Every phase gets the full `sleep_max_memories_per_run`; `sleep_max_llm_calls_per_run` is split equally among the enabled phases that call a model, and unused calls roll forward, so a run never spends more than the setting. The retention phases, the related index and consolidation's rule pass are never skipped for budget. Consolidation's details say when its judge ran out of calls (`llm_pass_cut_for_budget`, `llm_unjudged`). A `sleep_edge_discovery_sample_size` above the memory allowance is clamped at run time with a warning. A run's `memories_processed` can now exceed `sleep_max_memories_per_run`.
+- **A Hebbian update leaves another producer's edge alone** ([#3018](https://github.com/kagura-ai/memory-cloud/issues/3018)): an edge Sleep edge discovery confirmed and a `supersedes` edge keep their type, weight, confidence, metadata and creation time when the two memories are recalled together, and learning never prunes them. A declared edge keeps its type and origin as before; its weight still moves with co-recall, and learning no longer deletes it. Seeds (nearest-neighbour and tag co-occurrence) are still strengthened and keep their metadata; edge discovery treats a tag seed that co-recall has raised above the highest seeding weight as a real connection. Rows changed by co-recall before this release are not repaired.
+
+### Added
+- **Delivery timestamps are recorded** ([#3022](https://github.com/kagura-ai/memory-cloud/issues/3022), record only): `first_delivered_at` and `last_delivered_at` on memories (migration `f65`, no backfill), written when a memory's content is shipped to a reader: a recall row whose content the reply carries, `reference`, and a user facts lane row with content. Summary-only rows, share-key recall, anonymous public serving and export are not stamped. Nothing exposes these columns yet.
+
+### Operators
+- Run `alembic upgrade head` before starting the new code. `f65` adds two nullable columns to the memories table (catalog-only, a brief lock; behind a long transaction the migration fails fast: retry it). `f64` inserts one configuration row.
+- **Sleep switches of an existing deployment**: a database migrated before this release keeps the `true` it stored for `sleep_edge_discovery_enabled` and `sleep_importance_reeval_enabled`. To adopt the new defaults, change them with `PUT /api/v1/admin/neural-config/{key}` or the admin Neural Config page. The three Sleep switches are configuration rows on every database built by alembic; the `SLEEP_*` environment variables apply only where no row exists.
+- **Sleep on large contexts**: where edge discovery used up the old shared budget, duplicate merge, importance re-evaluation (where on) and consolidation now run. Look at the first night's report.
+- **Association learning**: a deployment with `ENABLE_NEURAL_MEMORY=true` stops writing recall-time association edges after the upgrade unless it sets `RECALL_ASSOCIATION_LEARNING_ENABLED=true` (restart to change). The upgrade deletes no edge; learned edges decay as before when nothing reinforces them.
+- **Self-hosted without Sleep**: unreturned working memories are no longer deleted after 30 days. Rows deleted before the upgrade are not restored.
+
 ## [v0.184.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.184.0) — 2026-11-26
 
 What a user says about themselves is written as its own `fact` memory, and a context can return such facts with every recall. There is one migration (`f63`) and one new per-context switch, off by default.
