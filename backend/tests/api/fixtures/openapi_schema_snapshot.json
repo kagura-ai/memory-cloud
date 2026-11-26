@@ -3121,7 +3121,8 @@
           "routing_mode": {},
           "semantic_weight": {},
           "updated_at": {},
-          "use_rerank": {}
+          "use_rerank": {},
+          "user_facts_lane": {}
         },
         "required": [
           "bm25_weight",
@@ -3198,6 +3199,10 @@
             "type": "number"
           },
           "use_rerank": {
+            "type": "boolean"
+          },
+          "user_facts_lane": {
+            "default": false,
             "type": "boolean"
           }
         },
@@ -5116,6 +5121,10 @@
             "type": "number"
           },
           "use_rerank": {
+            "type": "boolean"
+          },
+          "user_facts_lane": {
+            "default": false,
             "type": "boolean"
           }
         },
@@ -11293,6 +11302,19 @@
                   "type": "array"
                 },
                 "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "user_facts": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MemoryResponse"
+                },
+                "type": "array"
               },
               {
                 "type": "null"

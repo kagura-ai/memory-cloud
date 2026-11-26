@@ -146,6 +146,10 @@ async def handle_update_search_config(
             # (an omitted one keeps the stored value).
             if "fusion" in args:
                 update_fields["fusion"] = args["fusion"]
+            # Issue #3014: the user facts lane switch, sent only when the caller
+            # sends it (an omitted one keeps the stored value).
+            if "user_facts_lane" in args:
+                update_fields["user_facts_lane"] = args["user_facts_lane"]
 
             # Validate via Pydantic (same as REST API)
             try:
@@ -272,6 +276,9 @@ async def handle_update_search_config(
                                     ctx_uuid,
                                     stored=config.llm_selector_enabled is True,
                                 ),
+                                # #3014: the user facts lane switch.
+                                "user_facts_lane": getattr(config, "user_facts_lane", False)
+                                is True,
                             },
                         }
                     ),

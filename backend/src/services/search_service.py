@@ -8,6 +8,7 @@ Issue #1 specification:
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
@@ -194,6 +195,7 @@ class SearchService:
         timings: RecallTimings | None = None,
         *,
         search_mode_explicit: bool = True,
+        query_vectors: MutableMapping[tuple[str, str], list[float]] | None = None,
     ) -> list[dict]:
         """Search with configurable mode: hybrid, semantic, or keyword.
 
@@ -247,6 +249,11 @@ class SearchService:
                 lane then degrades to keyword when its arm fails, as hybrid
                 does; an explicit ``semantic`` raises. Only
                 ``MemoryService.recall`` passes it.
+            query_vectors: #3014 a cache of the query's vector by (embedding
+                provider, model), for a query that never changes (the user
+                facts lane's). A hit skips the embedding call; a miss embeds
+                once and stores the vector. With a cache the search writes no
+                llm_call_log row of its own.
 
         Returns:
             List of search results with scores
@@ -452,16 +459,26 @@ class SearchService:
                 # probe in ``MemoryService.recall`` and this resolution could
                 # silently route to the uncapped platform key.
                 embed_outcome: dict[str, Any] = {}
+                vector_key = (str(embed_svc.provider), str(embed_svc.model))
                 try:
                     with timings.stage("embed"):
-                        query_vector, embedding_tokens = await embed_svc.embed_with_usage(
-                            normalized_query,
-                            user_id,
-                            context_id=primary_context_id,
-                            workspace_id=workspace_id,
-                            disallow_env_fallback=is_shared_context_read,
-                            outcome=embed_outcome,
+                        cached_vector = (
+                            query_vectors.get(vector_key) if query_vectors is not None else None
                         )
+                        if cached_vector is not None:
+                            query_vector, embedding_tokens = cached_vector, 0
+                            embed_outcome["cache_hit"] = True
+                        else:
+                            query_vector, embedding_tokens = await embed_svc.embed_with_usage(
+                                normalized_query,
+                                user_id,
+                                context_id=primary_context_id,
+                                workspace_id=workspace_id,
+                                disallow_env_fallback=is_shared_context_read,
+                                outcome=embed_outcome,
+                            )
+                            if query_vectors is not None:
+                                query_vectors[vector_key] = query_vector
                 finally:
                     # The service says whether the vector came from the cache;
                     # the token count cannot (providers without usage
@@ -469,7 +486,7 @@ class SearchService:
                     # Read it on failure as well: a provider call that raised
                     # was a miss, and the slowest embeds are those.
                     timings.embed_cache_hit = embed_outcome.get("cache_hit")
-                if embedding_tokens > 0:
+                if embedding_tokens > 0 and query_vectors is None:
                     # Cache hits return 0 tokens and intentionally produce no
                     # llm_call_log row (B1 pin) — the table is "API was
                     # called" event log, not cache analytics. fail_on_error

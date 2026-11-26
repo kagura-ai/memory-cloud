@@ -1026,6 +1026,9 @@
         },
         "llm_selector_enabled": {
           "type": "boolean"
+        },
+        "user_facts_lane": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

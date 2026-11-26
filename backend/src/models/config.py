@@ -85,6 +85,7 @@ class ContextSearchConfig(Base):
         reranker_model: Provider-specific model name
         fusion: How a hybrid search fuses its two legs: 'auto' (default),
             'rrf' or 'weighted' (Issue #2980)
+        user_facts_lane: Whether recall adds the user facts lane (Issue #3014)
         created_at: Creation timestamp
         updated_at: Last update timestamp
     """
@@ -214,6 +215,14 @@ class ContextSearchConfig(Base):
     # is off) — the earliest-enabled rank under the plan's cap, as #2103.
     llm_selector_enabled_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True), nullable=True
+    )
+
+    # Issue #3014: the user facts lane. When true, a recall of this context
+    # also runs one fixed search over its 'fact' memories and returns up to
+    # two of them under ``user_facts`` (services.user_facts_lane). Off by
+    # default.
+    user_facts_lane: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
     )
 
     # Issue #2098: when the embedding route last changed through the migration

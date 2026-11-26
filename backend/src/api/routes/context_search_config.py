@@ -366,6 +366,7 @@ async def reset_context_search_config(
       the context owner or a workspace owner/admin (#2015)
     - llm_selector_enabled: false — on the same rule (#2144)
     - fusion: 'auto' (#2980)
+    - user_facts_lane: false (#3014)
 
     Args:
         context_id: Context UUID

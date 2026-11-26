@@ -759,6 +759,7 @@ class ContextService:
                 fusion=stored_fusion(cfg),
                 content_chunks_enabled=cfg.content_chunks_enabled,
                 llm_selector_enabled=cfg.llm_selector_enabled,
+                user_facts_lane=getattr(cfg, "user_facts_lane", False) is True,
             )
             if cfg is not None
             else None

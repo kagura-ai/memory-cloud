@@ -1217,6 +1217,12 @@ def _recall_envelope(
     }
     if order == "date":
         response_data["order"] = "date"
+    # #3014: the user facts lane's rows, after count (which counts results
+    # only); present, possibly empty, when the lane ran. The type check keeps a
+    # loose stand-in result (a bare mock) from inventing one.
+    user_facts = getattr(result, "user_facts", None)
+    if isinstance(user_facts, list):
+        response_data["user_facts"] = [recall_result_item(r, verbosity) for r in user_facts]
     # #2144: what the LLM selector did — absent (never null) unless the stage
     # ran or was refused on a context with the flag on. Right after count:
     # count is the selected page's and the dropped ids are listed here. The
@@ -1347,13 +1353,18 @@ def _recall_reply(
     ranks lowest, never because of its day); only then are the rows sorted by
     day. Sorting moves no character, so the reply still fits ``max_chars``.
     """
-    reply = _bound_recall_envelope(
-        _fit_recall_content(
-            _recall_envelope(result, context, verbosity, explore_hints_omitted, order),
-            max_chars,
-        ),
+    fitted = _fit_recall_content(
+        _recall_envelope(result, context, verbosity, explore_hints_omitted, order),
         max_chars,
     )
+    # #3014: the user facts rows keep their content while results can give
+    # theirs up; when that is not enough they lose it too, then results are cut.
+    if "user_facts" in fitted and json_chars(fitted) > max_chars - _RECALL_BOUND_RESERVE:
+        fitted["user_facts"] = [
+            {key: value for key, value in item.items() if key not in RECALL_CONTENT_KEYS}
+            for item in fitted["user_facts"]
+        ]
+    reply = _bound_recall_envelope(fitted, max_chars)
     if order == "date":
         reply["results"] = sorted(reply["results"], key=lambda item: item["date"])
     return reply
@@ -1574,6 +1585,8 @@ async def handle_recall(
                     # #2773: False on the google view: no Hebbian pass, no
                     # promotion (access bookkeeping still runs).
                     learning=learning,
+                    # #3014: the context's user facts lane, where it is on.
+                    user_facts_lane=True,
                 ),
                 operation_name="recall",
             )

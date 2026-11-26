@@ -302,7 +302,7 @@ Manual: guide(["update_memory"]).""",
 Every item of a kind: read every result, not only the top ones; recall once more per kind found, or `list` with a tag or type filter naming the set; answer with all of them.
 When did / in a period: `filters={"event_after": ..., "event_before": ...}` (the event's own days, event_start/event_end); rows without one: `observed_after`/`observed_before` around it with a margin (`observed_at` = the date a fact was stated); nothing matches: recall again without the filter. In one row: `event_start`..`event_end` = when it happened, `observed_at` = when it was said; a date in the summary loses to the event fields. How something changed over time (a preference, a habit, a plan): one recall with order='date' returns the matching memories oldest first, superseded ones included; read the sequence from that one result instead of searching step by step.
 Likely/would/might: recall again on concrete entities and category words (brand, sponsor, shop, friend), `search_mode="keyword"` for surfaced names; answer with the best-supported inference, name the memory, mark it as an inference; decline only at `confidence.level` `none`/`low`. Not recorded: first recall again with the subject's name and the fact's key noun (`search_mode="keyword"`), or `list` with a tag naming the subject; a row that states it answers — name it. A general statement beats single instances for "how often".
-Returns: {confidence: {level, ...}, status, results: [{memory_id, date?, date_source?, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, event_start?, event_end?, event_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, order?, full_applied?, related_tags?: [{tag, count}], hint?, ...}. Optional keys omitted: absent, never null. reference() pages content. verbosity='full' adds context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic. Manual: guide(["recall"]).""",
+Returns: {confidence: {level, ...}, status, results: [{memory_id, date?, date_source?, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, observed_weekday?, event_start?, event_end?, event_weekday?, superseded_by?, contradicts?, supersede_candidate?, ...}], count, order?, user_facts?, full_applied?, related_tags?: [{tag, count}], hint?, ...}. Optional keys omitted: absent, never null. reference() pages content. verbosity='full' adds context_summary?, scope, tags, version. supersede_candidate (suggestion): update_memory(accept_supersede_candidate=true) or dismiss_supersede_candidate=true. load_pinned()/recall_upcoming(): deterministic. Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -1162,7 +1162,7 @@ Returns: {status, message, merged, source_id, target_id, delete_source}. source_
 
 Example (keyless local reranking): use_rerank=true, reranker_provider='self_hosted' — reranker_model may be omitted.
 
-Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode, fusion, fusion_effective, content_chunks_enabled, content_chunks_effective, llm_selector_enabled, llm_selector_effective}}.""",
+Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode, fusion, fusion_effective, content_chunks_enabled, content_chunks_effective, llm_selector_enabled, llm_selector_effective, user_facts_lane}}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1226,6 +1226,10 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     "llm_selector_enabled": {
                         "type": "boolean",
                         "description": "A small model (the deployment's judge model) keeps only the results that answer the query and cuts their content to the verbatim passages that do; off by default. Memory text of this context is then sent to that model at recall time. Context owner or workspace owner/admin; where gated by plan, needs the llm_selector feature and a free slot (llm_selector_effective says whether it is acted on).",
+                    },
+                    "user_facts_lane": {
+                        "type": "boolean",
+                        "description": "User facts lane (default false): recall also runs one fixed search over this context's 'fact' memories about the user and returns up to two not already in results under user_facts. Skipped when the recall filters by type or uses order='date'.",
                     },
                 },
             },

@@ -202,7 +202,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     },
     "recall": {
         _D: (
-            "3d590d619487310a",
+            "6b673424398e9704",
             "Search by meaning and keywords. Read-only here: a search changes no memory and no "
             "association. confidence.level (high|moderate|low|none): none/low suggests an "
             "external source; degraded=true: no semantic search. The store is the authority, "
@@ -229,7 +229,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "Returns: {confidence: {level, ...}, status, results: [{memory_id, date?, "
             "date_source?, summary, summary_cut?, content?, content_truncated?, content_next_offset?, observed_at?, "
             "observed_weekday?, event_start?, event_end?, event_weekday?, superseded_by?, "
-            "contradicts?, supersede_candidate?, ...}], count, order?, full_applied?, related_tags?: "
+            "contradicts?, supersede_candidate?, ...}], count, order?, user_facts?, full_applied?, related_tags?: "
             "[{tag, count}], ...}. Optional keys omitted: absent, never null. "
             "content_next_offset marks where cut content continues. verbosity='full' adds "
             "context_summary?, scope, tags, version. supersede_candidate: an older "
