@@ -1746,7 +1746,7 @@
     "graphTopConnections": "Top Connected Memories",
     "graphConnections": "connections",
     "graphEdgeList": "Edges",
-    "graphEmpty": "Memories build connections automatically as you use this context — through recall co-activation and during Sleep Maintenance. Newer contexts may take a day to populate.",
+    "graphEmpty": "No connections yet. Links are seeded when memories are written and can be added with create_edge; edge discovery and association learning add more where they are switched on.",
     "graphEmptyTitle": "No connections yet",
     "graphVizLoading": "Loading graph data…",
     "graphVizLoadError": "Failed to load graph data",

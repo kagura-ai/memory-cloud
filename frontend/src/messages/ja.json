@@ -1746,7 +1746,7 @@
     "graphTopConnections": "接続数の多いメモリ",
     "graphConnections": "接続",
     "graphEdgeList": "エッジ一覧",
-    "graphEmpty": "コンテキストを使ううちにメモリ同士の接続が自動的に形成されます — recall の共起と Sleep Maintenance によるものです。新しいコンテキストでは反映までに 1 日ほどかかる場合があります。",
+    "graphEmpty": "まだ接続がありません。つながりはメモリの書き込み時に作られ、create_edge でも追加できます。エッジ探索と連想学習を有効にしている場合は、それらもつながりを追加します。",
     "graphEmptyTitle": "まだ接続はありません",
     "graphVizLoading": "グラフデータを読み込み中…",
     "graphVizLoadError": "グラフデータの読み込みに失敗しました",

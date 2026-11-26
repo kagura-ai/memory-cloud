@@ -3865,7 +3865,7 @@ would to a re-index.
 - Memories forgotten before the deletion, and memories Sleep merged (or archived, before v0.185.0).
   They were already deleted when the context was; the dry run lists them as
   "stay deleted".
-- The context's neural edges (deleted outright; Sleep rebuilds them where it runs),
+- The context's neural edges (deleted outright and not restored; Sleep edge discovery and recall-time association learning add edges again where they are switched on),
   its entries in members' context restrictions (`allowed_context_ids` — grant
   them again), and the resource tokens revoked with it.
 - The vector of an ingested document the sweep cannot rebuild from its row: the
