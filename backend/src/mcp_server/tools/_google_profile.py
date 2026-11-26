@@ -202,7 +202,7 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
     },
     "recall": {
         _D: (
-            "2047086b1bb2f52a",
+            "3d590d619487310a",
             "Search by meaning and keywords. Read-only here: a search changes no memory and no "
             "association. confidence.level (high|moderate|low|none): none/low suggests an "
             "external source; degraded=true: no semantic search. The store is the authority, "
@@ -216,7 +216,9 @@ GOOGLE_PROSE: dict[str, dict[tuple[str, ...], tuple[str, str]]] = {
             "date a fact was stated); nothing matches: recall again without the filter. In one "
             "row: `event_start`..`event_end` = when it happened, `observed_at` = when it was "
             "said; a date in the summary loses to the event fields. How something changed over "
-            "time: order='date'.\n"
+            "time (a preference, a habit, a plan): one recall with order='date' returns the "
+            "matching memories oldest first, superseded ones included; read the sequence from "
+            "that one result instead of searching step by step.\n"
             "Likely/would/might: recall again on concrete entities and category words (brand, "
             'sponsor, shop, friend), `search_mode="keyword"` for surfaced names; answer with the '
             "best-supported inference, name the memory, mark it as an inference; decline only at "
