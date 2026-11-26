@@ -17,6 +17,7 @@ from models.memory import Memory
 from repositories.memory import (
     ACCESS_STATS_STATEMENT,
     ADOPTION_ACCESS_STATS_STATEMENT,
+    DELIVERY_STAMP_STATEMENT,
     PROMOTE_SKIP_LOCKED_STATEMENT,
     PROMOTE_STATEMENT,
     MemoryRepository,
@@ -64,6 +65,22 @@ class TestStatementShape:
         # #457: the client append is a CASE, never a WHERE filter, so a row the
         # client already touched still gets its access_count bump.
         assert "CASE WHEN" in sql and "array_append" in sql
+
+    def test_delivery_stamp_rides_on_the_access_statement(self):
+        """#3022: no extra statement for the main page; the surfacing write
+        stamps only ``:delivered``, the adoption write every row, and the
+        stamp-only statement (the user facts lane) moves no counter."""
+        surfacing = " ".join(str(ACCESS_STATS_STATEMENT).split())
+        adoption = " ".join(str(ADOPTION_ACCESS_STATS_STATEMENT).split())
+        stamp = " ".join(str(DELIVERY_STAMP_STATEMENT).split())
+
+        assert "last_delivered_at = CASE WHEN m.id = ANY(:delivered) THEN :now" in surfacing
+        assert "COALESCE(m.first_delivered_at, :now)" in surfacing
+        assert "last_delivered_at = :now" in adoption and ":delivered" not in adoption
+        assert "first_delivered_at = COALESCE(m.first_delivered_at, :now)" in adoption
+        assert "ORDER BY id FOR UPDATE SKIP LOCKED" in stamp
+        assert "access_count" not in stamp and "last_used_at" not in stamp
+        assert "first_delivered_at = COALESCE(m.first_delivered_at, :now)" in stamp
 
     def test_promotion_locks_rows_in_id_order(self):
         sql = " ".join(str(PROMOTE_STATEMENT).split())
@@ -148,6 +165,86 @@ class TestBulkAccessStats:
         await db_session.refresh(memory)
 
         assert memory.updated_at == before  # #1317
+
+
+@_async
+class TestDeliveryStamp:
+    """#3022: when a memory's content was first and last shipped to a reader."""
+
+    async def test_a_surfacing_bump_stamps_only_the_delivered_rows(self, db_session):
+        shipped, summary_only = _memory(), _memory()
+        db_session.add_all([shipped, summary_only])
+        await db_session.commit()
+        repo = MemoryRepository(db_session)
+
+        stats = await repo.bulk_update_access_stats(
+            [shipped.id, summary_only.id], client="api", delivered_ids=[shipped.id]
+        )
+        await db_session.commit()
+        await db_session.refresh(shipped)
+        await db_session.refresh(summary_only)
+
+        assert shipped.last_delivered_at is not None
+        assert shipped.first_delivered_at == shipped.last_delivered_at
+        assert stats[shipped.id].last_delivered_at == shipped.last_delivered_at
+        assert (summary_only.first_delivered_at, summary_only.last_delivered_at) == (None, None)
+        assert summary_only.access_count == 1  # bumped, not stamped
+
+    async def test_without_delivered_ids_nothing_is_stamped(self, db_session):
+        """Explore and other surfacing reads ship no content."""
+        memory = _memory()
+        db_session.add(memory)
+        await db_session.commit()
+
+        await MemoryRepository(db_session).bulk_update_access_stats([memory.id], client="api")
+        await db_session.commit()
+        await db_session.refresh(memory)
+
+        assert (memory.access_count, memory.last_delivered_at) == (1, None)
+
+    async def test_first_delivery_is_kept_and_last_moves(self, db_session):
+        first = datetime.utcnow() - timedelta(days=3)
+        memory = _memory(first_delivered_at=first, last_delivered_at=first)
+        db_session.add(memory)
+        await db_session.commit()
+
+        await MemoryRepository(db_session).bulk_update_access_stats(
+            [memory.id], client="api", count_as_adoption=True
+        )
+        await db_session.commit()
+        await db_session.refresh(memory)
+
+        assert memory.first_delivered_at == first
+        assert memory.last_delivered_at is not None and memory.last_delivered_at > first
+
+    async def test_the_stamp_alone_moves_no_counter(self, db_session):
+        memory, gone = _memory(), _memory(deleted_at=datetime.utcnow())
+        db_session.add_all([memory, gone])
+        await db_session.commit()
+
+        stamped = await MemoryRepository(db_session).stamp_delivery([memory.id, gone.id, uuid4()])
+        await db_session.commit()
+        await db_session.refresh(memory)
+        await db_session.refresh(gone)
+
+        assert stamped == {memory.id}
+        assert memory.last_delivered_at is not None
+        assert memory.first_delivered_at == memory.last_delivered_at
+        assert (memory.access_count, memory.reference_count, memory.last_used_at) == (0, 0, None)
+        assert gone.last_delivered_at is None
+
+    async def test_the_stamp_does_not_touch_updated_at(self, db_session):
+        memory = _memory()
+        db_session.add(memory)
+        await db_session.commit()
+        await db_session.refresh(memory)
+        before = memory.updated_at
+
+        await MemoryRepository(db_session).stamp_delivery([memory.id])
+        await db_session.commit()
+        await db_session.refresh(memory)
+
+        assert memory.updated_at == before
 
 
 @_async

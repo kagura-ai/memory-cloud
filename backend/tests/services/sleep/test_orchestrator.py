@@ -778,3 +778,168 @@ class TestRaisedPhaseKeepsItsSpend:
         # No LLM call happened: no fabricated breakdown row.
         assert result.llm_breakdown == []
         assert result.tokens_used == 0
+
+
+class TestPerPhaseBudgets:
+    """#3019: every phase gets its own budget. The memory allowance is the full
+    ``sleep_max_memories_per_run`` for each phase; the LLM calls are shared in
+    equal parts among the phases of the run that call a model, and what one
+    leaves unused rolls forward. A phase that calls no model is never skipped
+    for budget."""
+
+    _CLASSES = {
+        "edge_discovery": "EdgeDiscoveryPhase",
+        "related_index": "RelatedIndexPhase",
+        "dedup_merge": "DedupMergePhase",
+        "merge_retention": "MergeRetentionPhase",
+        "forget_retention": "ForgetRetentionPhase",
+        "measurement_retention": "MeasurementRetentionPhase",
+        "importance_reeval": "ImportanceReevalPhase",
+        "consolidation": "ConsolidationPhase",
+    }
+
+    async def _run(self, mock_db, monkeypatch, config, spend):
+        """Run a full-mode pass with phases that spend per ``spend[name](budget)``.
+
+        Returns {phase name: (max_llm_calls, max_memories, memories_used at
+        entry)} for every phase that executed, and the report's phase results.
+        """
+        monkeypatch.setenv("SLEEP_RELATED_INDEX_ENABLED", "true")
+        seen: dict[str, tuple[int, int, int]] = {}
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
+            patch("services.sleep.orchestrator.ReindexPhase") as MockRI,
+        ):
+            reporter = AsyncMock()
+            report = MagicMock()
+            report.id = uuid4()
+            reporter.create_report = AsyncMock(return_value=report)
+            MockReporter.return_value = reporter
+            started = []
+            for name, cls in self._CLASSES.items():
+                inst = MagicMock()
+
+                async def _execute(cfg, uid, ws, ctx, budget, n=name, **kwargs):
+                    seen[n] = (budget.max_llm_calls, budget.max_memories, budget.memories_used)
+                    processed = spend.get(n, lambda _b: 0)(budget)
+                    return PhaseResult(phase_name=n, memories_processed=processed)
+
+                inst.execute = _execute
+                inst.pending_point_deletes = []
+                p = patch(f"services.sleep.orchestrator.{cls}", return_value=inst)
+                p.start()
+                started.append(p)
+            MockRI.return_value.execute = AsyncMock(return_value=PhaseResult(phase_name="reindex"))
+            try:
+                orchestrator = SleepOrchestrator(mock_db)
+                orchestrator._get_sleep_mode = AsyncMock(return_value="full")
+                orchestrator._get_context_embedding_info = AsyncMock(
+                    return_value=(None, "kagura_memories")
+                )
+                await orchestrator.run("user-1", "ws-1", str(uuid4()), config=config)
+            finally:
+                for p in started:
+                    p.stop()
+        return seen, reporter.complete_report.call_args[0][1]
+
+    @staticmethod
+    def _all(budget: SleepBudget) -> int:
+        """Use the whole budget: every LLM call and every memory."""
+        budget.consume(llm_calls=budget.max_llm_calls, memories=budget.max_memories)
+        return budget.max_memories
+
+    @pytest.mark.asyncio
+    async def test_edge_discovery_using_its_whole_allowance_starves_no_other_phase(
+        self, mock_db, monkeypatch
+    ):
+        """Acceptance 1: edge discovery's sample at the memory budget (it
+        charges all 200 memories and all of its LLM calls); dedup, the
+        importance re-evaluation, consolidation and the related index still
+        run, each with the full memory allowance."""
+        config = _make_config()
+        config.sleep_edge_discovery_sample_size = 200
+        config.sleep_consolidation_judge_enabled = True
+
+        spend_all = dict.fromkeys(("edge_discovery", "dedup_merge", "importance_reeval"), self._all)
+        seen, results = await self._run(mock_db, monkeypatch, config, spend_all)
+
+        assert set(seen) == set(self._CLASSES)
+        assert not [r.phase_name for r in results if r.skipped]
+        for name in ("related_index", "dedup_merge", "importance_reeval", "consolidation"):
+            assert seen[name][1:] == (200, 0), name
+        # Four phases call a model: 50 calls in shares of 13, 13, 12, 12.
+        assert [
+            seen[n][0]
+            for n in ("edge_discovery", "dedup_merge", "importance_reeval", "consolidation")
+        ] == [13, 13, 12, 12]
+        # Each phase charged its own allowance (a run total above the setting).
+        assert sum(r.memories_processed for r in results) == 600
+
+    @pytest.mark.asyncio
+    async def test_a_phase_without_model_calls_runs_with_zero_model_budget(
+        self, mock_db, monkeypatch
+    ):
+        """Acceptance 2: one LLM call for the run, used up by edge discovery.
+        Dedup and importance (model phases with nothing left) are skipped for
+        budget; consolidation's rule pass, the three retention phases and the
+        related index run with no LLM calls."""
+        config = _make_config()
+        config.sleep_max_llm_calls_per_run = 1
+        config.sleep_consolidation_judge_enabled = True
+
+        seen, results = await self._run(mock_db, monkeypatch, config, {"edge_discovery": self._all})
+
+        skipped = {r.phase_name: r.skip_reason for r in results if r.skipped}
+        assert skipped == {
+            "dedup_merge": "budget_exhausted",
+            "importance_reeval": "budget_exhausted",
+        }
+        for name in (
+            "related_index",
+            "merge_retention",
+            "forget_retention",
+            "measurement_retention",
+            "consolidation",
+        ):
+            assert seen[name] == (0, 200, 0), name
+
+    @pytest.mark.asyncio
+    async def test_unused_calls_roll_forward_to_the_next_model_phase(self, mock_db, monkeypatch):
+        """Edge discovery spends 3 of its 13; dedup gets 13 + 10. The run as a
+        whole never exceeds sleep_max_llm_calls_per_run."""
+        config = _make_config()
+        config.sleep_consolidation_judge_enabled = True
+
+        def three(budget: SleepBudget) -> int:
+            budget.consume(llm_calls=3)
+            return 0
+
+        seen, _ = await self._run(
+            mock_db,
+            monkeypatch,
+            config,
+            {"edge_discovery": three, "dedup_merge": self._all, "importance_reeval": self._all},
+        )
+
+        assert seen["dedup_merge"][0] == 23
+        assert seen["importance_reeval"][0] == 12
+        assert seen["consolidation"][0] == 12
+        assert 3 + 23 + 12 + 12 == 50
+
+    @pytest.mark.asyncio
+    async def test_only_the_phases_that_call_a_model_share_the_calls(self, mock_db, monkeypatch):
+        """Edge discovery and importance off, judge off: dedup is the only
+        model phase and gets all 50 calls; consolidation runs its rule pass
+        with none."""
+        config = _make_config()
+        config.sleep_edge_discovery_enabled = False
+        config.sleep_importance_reeval_enabled = False
+        config.sleep_consolidation_judge_enabled = False
+
+        seen, results = await self._run(mock_db, monkeypatch, config, {})
+
+        assert seen["dedup_merge"][0] == 50
+        assert seen["consolidation"][0] == 0
+        assert seen["edge_discovery"][0] == 0
+        assert not [r for r in results if r.skip_reason == "budget_exhausted"]

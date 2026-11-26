@@ -655,6 +655,7 @@ async def _handler_payload(args: dict, recall_result: RecallResponse) -> dict:
 
     service = MagicMock()
     service.recall = AsyncMock(return_value=recall_result)
+    service.record_delivery = AsyncMock(return_value=True)  # #3022
     with ExitStack() as stack:
         stack.enter_context(patch("db.base.get_db", new=_get_db_yielding(AsyncMock())))
         stack.enter_context(
@@ -746,6 +747,7 @@ async def _recall_request(args: dict, default_full: int = 3) -> tuple[Any, bool 
 
     service = MagicMock()
     service.recall = AsyncMock(return_value=_handler_result())
+    service.record_delivery = AsyncMock(return_value=True)  # #3022
     with ExitStack() as stack:
         settings = SimpleNamespace(
             mcp_recall_default_verbosity="compact", mcp_recall_default_full=default_full

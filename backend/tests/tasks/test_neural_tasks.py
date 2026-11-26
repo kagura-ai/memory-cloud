@@ -239,7 +239,7 @@ class TestConsolidationTask:
         the methods are not called."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
+        mock_db.execute = AsyncMock()
 
         mock_graph_repo = MagicMock()
         mock_graph_repo.list = AsyncMock(return_value=[_make_graph()])
@@ -261,7 +261,7 @@ class TestConsolidationTask:
         """Promotion criteria still fire on memory-only signals (Issue #1 patterns)."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
+        mock_db.execute = AsyncMock()
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -286,186 +286,88 @@ class TestConsolidationTask:
         mock_memory_repo.bulk_promote_to_persistent.assert_awaited_once_with([frequent_memory.id])
         mock_memory_repo.delete.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_deletes_old_unused_memory(self):
-        """Deletion criteria still fire on memory-only signals (age>=30 + access_count==0)."""
-        mock_db = MagicMock()
-        mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
-
-        graph = _make_graph()
-        mock_graph_repo = MagicMock()
-        mock_graph_repo.list = AsyncMock(return_value=[graph])
-
-        old_memory = _make_memory(access_count=0, importance=0.0, age_days=45)
-        mock_memory_repo = MagicMock()
-        mock_memory_repo.list_working_with_resource_owned = AsyncMock(
-            return_value=_rows(old_memory)
-        )
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
-        mock_memory_repo.delete = AsyncMock()
-        # #2565: forget's steps — queued before the page's commit, deleted after it.
-        entry = (old_memory.id, old_memory.id, "kagura_memories_x")
-        steps = MagicMock()
-        steps.attach_mock(AsyncMock(return_value=[entry]), "queue")
-        steps.attach_mock(mock_db.commit, "commit")
-        steps.attach_mock(AsyncMock(), "delete_points")
-
-        with (
-            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
-            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
-            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
-            patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
-            patch.object(MemoryService, "_queue_forgotten_points", steps.queue),
-            patch.object(MemoryService, "delete_forgotten_points", steps.delete_points),
-        ):
-            await consolidation_task()
-
-        mock_memory_repo.delete.assert_called_once_with(old_memory.id)
-        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
-        # No vector delete before the commit; the point, under its row's
-        # context, is queued in the page's transaction and deleted after it.
-        mock_qdrant_delete.assert_not_called()
-        steps.queue.assert_awaited_once_with(
-            [(old_memory.id, old_memory.id, old_memory.context_id)]
-        )
-        steps.delete_points.assert_awaited_once_with([entry])
-        assert [c[0] for c in steps.mock_calls] == ["queue", "commit", "delete_points"]
-
-    @pytest.mark.asyncio
-    async def test_never_deletes_a_pinned_memory(self):
-        """#1523: the legacy path is a physical delete with no tombstone, so a
-        pinned (delivery_mode='always') working row that otherwise qualifies for
-        deletion is skipped — same exemption as the Sleep phases."""
-        mock_db = MagicMock()
-        mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
-
-        graph = _make_graph()
-        mock_graph_repo = MagicMock()
-        mock_graph_repo.list = AsyncMock(return_value=[graph])
-
-        pinned = _make_memory(access_count=0, importance=0.0, age_days=45)
-        pinned.is_pinned = True
-        mock_memory_repo = MagicMock()
-        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=_rows(pinned))
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
-        mock_memory_repo.delete = AsyncMock()
-
-        with (
-            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
-            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
-            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
-            patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
-        ):
-            await consolidation_task()
-
-        mock_qdrant_delete.assert_not_called()
-        mock_memory_repo.delete.assert_not_called()
-        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_never_deletes_a_tool_triggered_memory(self):
-        """Tool guardrails share the pinned exemption on the legacy physical
-        delete: a working row carrying details.tool_trigger that otherwise
-        qualifies for deletion is skipped."""
-        mock_db = MagicMock()
-        mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
-
-        graph = _make_graph()
-        mock_graph_repo = MagicMock()
-        mock_graph_repo.list = AsyncMock(return_value=[graph])
-
-        guardrail = _make_memory(access_count=0, importance=0.0, age_days=45)
-        guardrail.is_tool_triggered = True
-        mock_memory_repo = MagicMock()
-        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=_rows(guardrail))
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
-        mock_memory_repo.delete = AsyncMock()
-
-        with (
-            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
-            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
-            patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
-            patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
-        ):
-            await consolidation_task()
-
-        mock_qdrant_delete.assert_not_called()
-        mock_memory_repo.delete.assert_not_called()
-        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
-
     @staticmethod
-    async def _run_with_open_memo(monkeypatch, exempt_env: str | None):
-        """One old, never-accessed working memory tagged ``status:open``."""
-        if exempt_env is None:
-            monkeypatch.delenv("SLEEP_ARCHIVE_EXEMPT_TAGS", raising=False)
-        else:
-            monkeypatch.setenv("SLEEP_ARCHIVE_EXEMPT_TAGS", exempt_env)
+    async def _run(*memories, monkeypatch=None):
+        """Run the task over ``memories`` (one user); return the repo mock and result."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
+        mock_db.execute = AsyncMock()
 
         mock_graph_repo = MagicMock()
         mock_graph_repo.list = AsyncMock(return_value=[_make_graph()])
-
-        memo = _make_memory(access_count=0, importance=0.0, age_days=45)
-        memo.tags = ["tech-debt", "status:open"]
         mock_memory_repo = MagicMock()
-        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=_rows(memo))
+        mock_memory_repo.list_working_with_resource_owned = AsyncMock(return_value=_rows(*memories))
         mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
-        # #2565: forget's steps — queued before the page's commit, deleted after it.
-        steps = MagicMock()
-        steps.attach_mock(
-            AsyncMock(side_effect=lambda rows: [(m, p, "kagura_memories_x") for m, p, _ in rows]),
-            "queue",
-        )
-        steps.attach_mock(mock_db.commit, "commit")
-        steps.attach_mock(AsyncMock(), "delete_points")
+        mock_memory_repo.soft_delete = AsyncMock()
 
         with (
             patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
             patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
             patch("tasks.neural_tasks.MemoryRepository", return_value=mock_memory_repo),
             patch("db.qdrant.delete_memory_from_qdrant", new=AsyncMock()) as mock_qdrant_delete,
-            patch.object(MemoryService, "_queue_forgotten_points", steps.queue),
-            patch.object(MemoryService, "delete_forgotten_points", steps.delete_points),
+            patch.object(MemoryService, "_queue_forgotten_points", AsyncMock()) as queue,
+            patch.object(MemoryService, "delete_forgotten_points", AsyncMock()) as delete_points,
         ):
-            await consolidation_task()
-        # No vector delete before the commit, on either path.
+            result = await consolidation_task()
+
+        # #3021: nothing is deleted, soft or hard, and no point is queued.
+        mock_memory_repo.delete.assert_not_called()
+        mock_memory_repo.soft_delete.assert_not_called()
         mock_qdrant_delete.assert_not_called()
-        return memo, mock_memory_repo, steps
+        queue.assert_not_called()
+        delete_points.assert_not_called()
+        mock_db.commit.assert_awaited_once()
+        return mock_memory_repo, result
 
     @pytest.mark.asyncio
-    async def test_never_deletes_an_open_memo(self, monkeypatch):
-        """#2584: the legacy pass honours SLEEP_ARCHIVE_EXEMPT_TAGS too (default
-        ``status:open``) — it is the pass a deployment without SLEEP_ENABLED runs,
-        and its delete is physical."""
-        _memo, repo, steps = await self._run_with_open_memo(monkeypatch, None)
+    async def test_keeps_an_old_never_returned_memory(self, monkeypatch):
+        """#3021 acceptance: with Sleep off (the only time this task runs), a
+        30-day-old working memory that no recall ever returned survives the
+        task; the result keeps its ``deleted`` key at 0."""
+        monkeypatch.setenv("SLEEP_ENABLED", "false")
+        old = _make_memory(access_count=0, importance=0.0, age_days=30)
+        older = _make_memory(access_count=0, importance=0.0, age_days=400)
 
-        repo.delete.assert_not_called()
-        steps.queue.assert_awaited_once_with([])
-        steps.delete_points.assert_awaited_once_with([])
+        repo, result = await self._run(old, older)
+
+        repo.bulk_promote_to_persistent.assert_not_called()
+        assert result == {"users": 1, "promoted": 0, "deleted": 0, "resource_skipped": 0}
 
     @pytest.mark.asyncio
-    async def test_an_empty_exempt_setting_deletes_the_memo(self, monkeypatch):
-        memo, repo, steps = await self._run_with_open_memo(monkeypatch, "")
+    async def test_still_promotes_by_rule_next_to_a_kept_memory(self, monkeypatch):
+        """Rule promotion is unchanged: the used row is promoted, the unused
+        old row stays working."""
+        monkeypatch.setenv("SLEEP_ENABLED", "false")
+        unused = _make_memory(access_count=0, importance=0.0, age_days=45)
+        used = _make_memory(access_count=1, importance=0.0, age_days=45)
 
-        repo.delete.assert_called_once_with(memo.id)
-        # The task ran to the end: the memo's point queued with the delete, the
-        # page committed, then the point deleted.
-        steps.queue.assert_awaited_once_with([(memo.id, memo.id, memo.context_id)])
-        steps.delete_points.assert_awaited_once_with([(memo.id, memo.id, "kagura_memories_x")])
-        assert [c[0] for c in steps.mock_calls] == ["queue", "commit", "delete_points"]
+        repo, result = await self._run(unused, used)
+
+        repo.bulk_promote_to_persistent.assert_awaited_once_with([used.id])
+        assert result is not None and result["promoted"] == 1 and result["deleted"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("marker", ["is_pinned", "is_tool_triggered", "open_memo"])
+    async def test_keeps_pinned_guardrail_and_memo_rows(self, monkeypatch, marker):
+        """The rows the old delete exempted are kept too, like every other row."""
+        monkeypatch.setenv("SLEEP_ENABLED", "false")
+        memory = _make_memory(access_count=0, importance=0.0, age_days=45)
+        if marker == "open_memo":
+            memory.tags = ["tech-debt", "status:open"]
+        else:
+            setattr(memory, marker, True)
+
+        repo, _result = await self._run(memory)
+
+        repo.bulk_promote_to_persistent.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_leaves_recent_unused_memory_alone(self):
         """A young, unused, unimportant memory is neither promoted nor deleted."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
+        mock_db.execute = AsyncMock()
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -496,7 +398,7 @@ class TestConsolidationTask:
         promoted, and both are counted."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
-        mock_db.execute = AsyncMock()  # #1985 graph learning lock
+        mock_db.execute = AsyncMock()
 
         mock_graph_repo = MagicMock()
         mock_graph_repo.list = AsyncMock(return_value=[_make_graph()])
@@ -646,13 +548,9 @@ class TestGraphPaging:
             {"skip": 0, "limit": 2},
             {"skip": 2, "limit": 2},
         ]
-        assert events == [
-            ("lock", "user-c"),
-            ("lock", "user-d"),
-            ("commit",),
-            ("lock", "user-a"),
-            ("commit",),
-        ]
+        # #3021: the task writes no edge (it deletes nothing, so nothing
+        # cascades to edge rows): it takes no graph learning lock.
+        assert events == [("commit",), ("commit",)]
         assert [
             c.kwargs["user_id"]
             for c in mock_memory_repo.list_working_with_resource_owned.await_args_list

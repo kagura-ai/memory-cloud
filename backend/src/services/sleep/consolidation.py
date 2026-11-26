@@ -2,16 +2,20 @@
 
 Issue #103: Replace rule-based consolidation with LLM-augmented version.
 
-Migrates logic from neural_tasks.py:consolidation_task (lines 92-225):
-- Fast path: existing rules for clear-cut cases (no LLM needed)
-- Borderline: LLM decides promote/keep (#1233: archival is rule-path only)
-- LLM off: identical behavior to legacy consolidation_task
-- Bridge node protection: never delete memories with high centrality
-- Exempt tags (#2584, ``sleep_archive_exempt_tags``): never archive a memory
-  carrying one (an open review memo, ``status:open`` by default)
+Migrates logic from neural_tasks.py:consolidation_task:
+- Rule pass: promotion by rule for clear-cut cases (no LLM needed); it always
+  runs in full mode
+- Borderline: the LLM judge decides promote/keep, only when
+  ``sleep_consolidation_judge_enabled`` is on and a Sleep LLM is configured
+  (#3021: off by default)
+- Nothing is archived or deleted (#3021): a memory is kept until its owner or
+  writer deletes it. The report keys ``rule_deleted``, ``llm_archived`` and
+  ``llm_archive_guarded`` stay and read 0, so older reports and their readers
+  keep parsing; ``rollback_sleep_run`` still restores the archives earlier
+  versions made.
 
 Backward compatibility:
-- When sleep_enabled=false, the legacy consolidation_task runs unchanged
+- When sleep_enabled=false, the legacy consolidation_task runs instead
 - When sleep_enabled=true, this phase replaces it entirely
 """
 
@@ -21,7 +25,6 @@ import os
 import random
 import string
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -29,22 +32,17 @@ if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepReporter
 
-from sqlalchemy import and_
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
-    DELETED_BY_SLEEP_ARCHIVE,
     Memory,
     not_pinned_predicate,
     not_resource_owned_predicate,
     not_tool_triggered_predicate,
 )
 from repositories.memory import MemoryRepository
-from services.deferred_point_deletes import PointDelete, queue_point_deletes
 from services.graph_service import GraphService
 from services.llm_service import LLMService, billed_usage
-from services.resource_indexer import unshared_point_id
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     CONSOLIDATION_JUDGE_SYSTEM,
@@ -67,11 +65,11 @@ logger = get_logger(__name__)
 BATCH_SIZE = 5
 
 # === Issue #1049: adoption-based consolidation thresholds (single source of truth) ===
-# The promotion/archival gate now reads ``reference_count`` — the #1046 *adoption*
-# signal, bumped only by a deliberate ``reference()`` — instead of the
-# surfacing-inflated ``access_count`` (every recall top-k return + explore spread
-# bumped that). Adoption is far sparser, so the old surfacing thresholds
-# (access_count >= 3 / >= 5 / >= 1) are re-tuned DOWN to the adoption scale.
+# The promotion gate reads ``reference_count`` — the #1046 *adoption* signal,
+# bumped only by a deliberate ``reference()`` — instead of the surfacing-inflated
+# ``access_count`` (every recall top-k return + explore spread bumped that).
+# Adoption is far sparser, so the old surfacing thresholds (access_count >= 3 /
+# >= 5 / >= 1) are re-tuned DOWN to the adoption scale.
 # Tests import these names directly (contract, not a copied literal).
 ADOPTION_PROMOTE_MIN = 2  # adoption alone, importance-agnostic (was access_count >= 5)
 ADOPTION_PROMOTE_WITH_IMPORTANCE = 1  # adoption + importance floor (was access_count >= 3)
@@ -80,59 +78,6 @@ PROMOTE_HIGH_IMPORTANCE = 0.8
 PROMOTE_HIGH_IMPORTANCE_MIN_AGE_DAYS = 3
 AGED_PROMOTE_MIN_AGE_DAYS = 30
 AGED_PROMOTE_ADOPTION_MIN = 1  # aged + any adoption (was access_count >= 1)
-ARCHIVE_MIN_AGE_DAYS = 30
-
-
-def _adoption_delete_cutoff() -> datetime | None:
-    """Issue #1049 RELEASE BLOCKER — grandfather pre-adoption memories from archival.
-
-    Historical adoption cannot be backfilled (``reference_count`` starts at 0 for
-    every pre-#1046 row), so an ``age>=30 and adoption==0`` delete would wrongly
-    archive every old memory. The adoption-based archival path therefore applies
-    ONLY to memories created AT/AFTER this cutoff (``CONSOLIDATION_ADOPTION_DELETE_CUTOFF``,
-    a naive-UTC ISO datetime — set it to the #1046/#1049 deploy date).
-
-    Unset (default) → ``None`` → adoption-based deletion is **fully disabled**: the
-    safest default that guarantees no pre-migration memory is archived. An operator
-    opts in only once enough post-deploy adoption data has accrued. An unparseable
-    value also returns None (fail-safe).
-    """
-    raw = os.getenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF")
-    if not raw:
-        return None
-    try:
-        cutoff = datetime.fromisoformat(raw)
-    except ValueError:
-        logger.warning("invalid_consolidation_adoption_delete_cutoff", value=raw)
-        return None
-    # Normalize to naive UTC to compare against the naive-UTC ``created_at`` column.
-    if cutoff.tzinfo is not None:
-        cutoff = cutoff.astimezone(UTC).replace(tzinfo=None)
-    return cutoff
-
-
-def _archival_eligible(
-    memory: Memory, age_days: int, cutoff: datetime | None, *, exempt_tags: frozenset[str]
-) -> bool:
-    """Deterministic archival eligibility (#1049/#1229), defined once.
-
-    The rule path ANDs this with the isolation check; the LLM path refuses
-    any archive verdict that fails it — eligibility is never the judge's
-    call, so the two paths cannot drift apart (#1229: the LLM path used to
-    bypass all three gates, archiving memories written minutes earlier and
-    violating the #1049 cutoff-unset RELEASE BLOCKER guarantee).
-
-    #2584: a memory carrying one of ``exempt_tags`` (exact match, the run's
-    ``sleep_archive_exempt_tags``) is never eligible. The tag is the only
-    state, so removing it makes the memory eligible again on the next run.
-    """
-    return (
-        age_days >= ARCHIVE_MIN_AGE_DAYS
-        and (memory.reference_count or 0) == 0
-        and cutoff is not None
-        and memory.created_at >= cutoff
-        and exempt_tags.isdisjoint(memory.tags or ())
-    )
 
 
 @dataclass(frozen=True)
@@ -154,10 +99,10 @@ class _ConsolidationTally:
     """
 
     promoted: int = 0
-    deleted: int = 0
     llm_promoted: int = 0
-    llm_archived: int = 0
-    llm_archive_guarded: int = 0
+    # #3019: borderline memories the judge never saw because the phase's LLM
+    # calls ran out (0 when the pass finished or did not run).
+    llm_unjudged: int = 0
 
 
 class ConsolidationPhase(LLMSpendTracker):
@@ -177,9 +122,6 @@ class ConsolidationPhase(LLMSpendTracker):
         # dedup phase established the pattern in #475).
         self._tokens_used: int = 0
         self._llm_breakdown: LLMCallBreakdown | None = None
-        # #2565: the archived rows' points, queued in the phase's savepoint;
-        # the orchestrator deletes them after its caller commits.
-        self.pending_point_deletes: list[PointDelete] = []
 
     @staticmethod
     def _should_promote(
@@ -217,12 +159,9 @@ class ConsolidationPhase(LLMSpendTracker):
         self,
         working: list[Memory],
         *,
-        user_id: str,
         graph_service: GraphService,
         has_graph: bool,
         thresholds: _NeuralThresholds,
-        adoption_delete_cutoff: datetime | None,
-        archive_exempt_tags: frozenset[str],
         result: PhaseResult,
         tally: _ConsolidationTally,
         reporter: SleepReporter | None,
@@ -230,15 +169,12 @@ class ConsolidationPhase(LLMSpendTracker):
     ) -> list[Memory]:
         """Deterministic triage of every working memory (#1456 extract).
 
-        Promote, archive, or defer. Archival gates on adoption==0 AND is
-        grandfathered — only memories created at/after the cutoff are eligible
-        (RELEASE BLOCKER, see ``_adoption_delete_cutoff``); ``cutoff=None``
-        disables adoption-based deletion entirely. A memory carrying an
-        exempt tag (#2584) is never archived; it can still be promoted.
+        Promote by rule, or defer. Nothing is archived (#3021): a memory the
+        rules do not promote stays working and is borderline.
 
         Returns:
-            The memories that matched neither rule — the LLM pass adjudicates
-            these, and only these.
+            The memories that matched no rule — the LLM pass adjudicates
+            these, and only these, when the judge is on.
         """
         borderline: list[Memory] = []
         # #1985: promotions are collected and written in one id-ordered
@@ -252,43 +188,8 @@ class ConsolidationPhase(LLMSpendTracker):
             if has_graph:
                 neural_metrics = await graph_service.get_node_metrics(str(memory.id))
 
-            should_delete = _archival_eligible(
-                memory, age_days, adoption_delete_cutoff, exempt_tags=archive_exempt_tags
-            ) and (not neural_metrics or neural_metrics["is_isolated"])
-
             if self._should_promote(memory, age_days, neural_metrics, thresholds):
                 to_promote[memory.id] = (memory, age_days)
-            elif should_delete:
-                try:
-                    if not await self._archive_tombstone(user_id, memory):
-                        continue
-                    tally.deleted += 1
-                    await self._record_action(
-                        reporter,
-                        report_id,
-                        "archive",
-                        memory.id,
-                        "rule",
-                        memory.importance,
-                        memory.access_count,
-                        age_days,
-                        memory.reference_count or 0,
-                        mode="tombstone",
-                    )
-                except SQLAlchemyError:
-                    # #2565: a database error (the stamp, the point's queue
-                    # row) aborted the phase's transaction. Going on would fail
-                    # every later statement, and a failed savepoint RELEASE
-                    # cannot roll back, which loses the whole run: fail the
-                    # phase here, so its savepoint takes the stamps and queue
-                    # rows with it.
-                    raise
-                except Exception as e:
-                    logger.warning(
-                        "consolidation_delete_failed",
-                        memory_id=str(memory.id),
-                        error=str(e),
-                    )
             else:
                 borderline.append(memory)
         tally.promoted += await self._promote_and_record(
@@ -308,7 +209,7 @@ class ConsolidationPhase(LLMSpendTracker):
         """Promote the collected memories in one id-ordered statement (#1985).
 
         Records a ``promote`` action for each id the statement actually
-        promoted. A row promoted, forgotten or archived since the candidate
+        promoted. A row promoted or forgotten since the candidate
         fetch is skipped by the statement and recorded as nothing.
 
         Args:
@@ -349,18 +250,25 @@ class ConsolidationPhase(LLMSpendTracker):
         workspace_id: str | None,
         context_id: str | None,
         budget: SleepBudget,
-        graph_service: GraphService,
-        has_graph: bool,
-        adoption_delete_cutoff: datetime | None,
-        archive_exempt_tags: frozenset[str],
         result: PhaseResult,
         tally: _ConsolidationTally,
         reporter: SleepReporter | None,
         report_id: UUID | None,
     ) -> None:
-        """Adjudicate the deferred memories in LLM batches (#1456 extract)."""
+        """Adjudicate the deferred memories in LLM batches (#1456 extract).
+
+        The judge answers promote or keep; a kept memory stays working. When
+        the phase's LLM calls run out, the rest is left unjudged and counted
+        in ``tally.llm_unjudged`` (#3019).
+        """
         for batch_start in range(0, len(borderline), BATCH_SIZE):
             if not budget.can_afford(llm_calls=1):
+                tally.llm_unjudged = len(borderline) - batch_start
+                logger.info(
+                    "consolidation_llm_pass_cut_for_budget",
+                    unjudged=tally.llm_unjudged,
+                    borderline=len(borderline),
+                )
                 break
 
             batch = borderline[batch_start : batch_start + BATCH_SIZE]
@@ -378,50 +286,8 @@ class ConsolidationPhase(LLMSpendTracker):
                         memory_id=str(memory_id),
                     )
                     continue
-                mem_age_days = (utcnow() - mem.created_at).days
                 if action == "promote":
-                    to_promote[memory_id] = (mem, mem_age_days)
-                elif action == "archive":
-                    # #1233: unreachable via _llm_judge_batch (the prompt no
-                    # longer offers "archive" and the parser rejects it) — kept
-                    # as a defensive backstop so any future decision source
-                    # still cannot archive an ineligible memory.
-                    # #1229: the LLM only chooses AMONG deterministically
-                    # archival-eligible candidates (shared predicate with the
-                    # rule path — see _archival_eligible).
-                    if not _archival_eligible(
-                        mem, mem_age_days, adoption_delete_cutoff, exempt_tags=archive_exempt_tags
-                    ):
-                        tally.llm_archive_guarded += 1
-                        logger.info(
-                            "consolidation_llm_archive_guarded",
-                            memory_id=str(memory_id),
-                            age_days=mem_age_days,
-                            adoption=mem.reference_count or 0,
-                            cutoff_set=adoption_delete_cutoff is not None,
-                            # #2584: the gate the three above do not show.
-                            exempt_tag=not archive_exempt_tags.isdisjoint(mem.tags or ()),
-                        )
-                        continue
-                    neural = None
-                    if has_graph:
-                        neural = await graph_service.get_node_metrics(str(memory_id))
-                    if not neural or neural["is_isolated"]:
-                        if not await self._archive_tombstone(user_id, mem):
-                            continue
-                        tally.llm_archived += 1
-                        await self._record_action(
-                            reporter,
-                            report_id,
-                            "archive",
-                            memory_id,
-                            "llm",
-                            mem.importance,
-                            mem.access_count,
-                            mem_age_days,
-                            mem.reference_count or 0,
-                            mode="tombstone",
-                        )
+                    to_promote[memory_id] = (mem, (utcnow() - mem.created_at).days)
             # #1985: one id-ordered promotion per batch (see _rule_pass).
             tally.llm_promoted += await self._promote_and_record(
                 to_promote, "llm", result=result, reporter=reporter, report_id=report_id
@@ -463,10 +329,6 @@ class ConsolidationPhase(LLMSpendTracker):
         centrality_threshold = float(os.getenv("NEURAL_CENTRALITY_THRESHOLD", "0.7"))
         hub_threshold = int(os.getenv("NEURAL_HUB_NODE_THRESHOLD", "5"))
         weight_threshold = float(os.getenv("NEURAL_EDGE_WEIGHT_THRESHOLD", "0.8"))
-        # Issue #1049: grandfather cutoff for the adoption==0 archival path (read once).
-        adoption_delete_cutoff = _adoption_delete_cutoff()
-        # #2584: tags that keep a memory out of archival (both paths).
-        archive_exempt_tags = frozenset(config.sleep_archive_exempt_tags)
 
         tally = _ConsolidationTally()
         thresholds = _NeuralThresholds(
@@ -475,19 +337,19 @@ class ConsolidationPhase(LLMSpendTracker):
 
         borderline = await self._rule_pass(
             working,
-            user_id=user_id,
             graph_service=graph_service,
             has_graph=has_graph,
             thresholds=thresholds,
-            adoption_delete_cutoff=adoption_delete_cutoff,
-            archive_exempt_tags=archive_exempt_tags,
             result=result,
             tally=tally,
             reporter=reporter,
             report_id=report_id,
         )
 
-        llm_enabled = config.sleep_llm_provider != ""
+        # #3021: the judge runs only when switched on and a Sleep LLM is set.
+        llm_enabled = bool(config.sleep_consolidation_judge_enabled) and (
+            config.sleep_llm_provider != ""
+        )
         if borderline and llm_enabled:
             await self._llm_pass(
                 borderline,
@@ -496,10 +358,6 @@ class ConsolidationPhase(LLMSpendTracker):
                 workspace_id=workspace_id,
                 context_id=context_id,
                 budget=budget,
-                graph_service=graph_service,
-                has_graph=has_graph,
-                adoption_delete_cutoff=adoption_delete_cutoff,
-                archive_exempt_tags=archive_exempt_tags,
                 result=result,
                 tally=tally,
                 reporter=reporter,
@@ -512,12 +370,17 @@ class ConsolidationPhase(LLMSpendTracker):
         result.details = {
             "working_count": len(working),
             "rule_promoted": tally.promoted,
-            "rule_deleted": tally.deleted,
+            # #3021: nothing is archived any more; the keys stay at 0 so older
+            # reports and their readers keep one shape.
+            "rule_deleted": 0,
             "borderline": len(borderline),
             "llm_promoted": tally.llm_promoted,
-            "llm_archived": tally.llm_archived,
-            # #1229: LLM archive verdicts blocked by the eligibility guard.
-            "llm_archive_guarded": tally.llm_archive_guarded,
+            # #3019: the judge's pass stopped because the phase's LLM calls ran
+            # out; the rule pass ran in full either way.
+            "llm_pass_cut_for_budget": tally.llm_unjudged > 0,
+            "llm_unjudged": tally.llm_unjudged,
+            "llm_archived": 0,
+            "llm_archive_guarded": 0,
             "llm_call_failures": self._llm_failures,  # #1183
         }
 
@@ -525,79 +388,9 @@ class ConsolidationPhase(LLMSpendTracker):
             "consolidation_completed",
             working=len(working),
             promoted=tally.promoted + tally.llm_promoted,
-            deleted=tally.deleted + tally.llm_archived,
         )
 
         return result
-
-    async def _archive_tombstone(self, user_id: str, memory: Memory) -> bool:
-        """Tombstone one archive candidate, then queue its vector (#1520).
-
-        Shared by the rule and LLM paths so the archive contract lives once.
-        The row is stamped FIRST: the candidate fetch is not locked, so a 0-row
-        stamp means the row was forgotten, archived by an overlapping run, or
-        its context was soft-deleted in between. Then nothing else is touched —
-        the Qdrant point in particular stays, because a soft-deleted context
-        keeps its points for recovery (#84), and a rollback must never
-        un-tombstone a deletion this run did not make. Returns whether the
-        caller should tally and record the archive.
-
-        #2565: the point is not deleted here. It is queued in
-        ``deferred_point_deletes`` beside the tombstone, inside the phase's
-        savepoint, and kept in ``pending_point_deletes``; the orchestrator
-        deletes it after its caller commits
-        (``SleepOrchestrator.delete_committed_points``) and the drain retries
-        what that step leaves. A run or phase that rolls back takes the queue
-        row with the tombstone, so the row keeps its point.
-
-        If the point lookup fails after the stamp, the tombstone stands and is
-        still recorded: rollback re-embeds (upsert) and the point is filtered
-        at read time by the PG row, so an orphan is a logged degradation, not a
-        lost restore.
-
-        #2065: the vector deleted is the row's own, by the rule ``forget``
-        follows: ``Memory.point_id`` (a resource-indexer row's is the
-        indexer's, not its id), unless another live row still names it
-        (``unshared_point_id``).
-        """
-        memory_id = memory.id
-        # #1523: the fetch excluded pinned rows, but the LLM pass runs between
-        # fetch and stamp — a pin landing in that window must still win, so the
-        # exemption rides on the UPDATE itself (0 rows → skipped, like any
-        # other state change since the fetch).
-        stamped = await self.memory_repo.soft_delete(
-            memory_id,
-            deleted_by=DELETED_BY_SLEEP_ARCHIVE,
-            # Tool guardrails share the exemption: an archived guardrail would
-            # silently stop firing in every client hook. #2996: a row the
-            # resource indexer owns is the source's to remove; it can become
-            # one between the fetch and here (the indexer re-points a
-            # ``remember(external_id)`` row it matches by natural key).
-            only_if=and_(
-                not_pinned_predicate(),
-                not_tool_triggered_predicate(),
-                not_resource_owned_predicate(),
-            ),
-        )
-        if stamped == 0:
-            logger.warning("consolidation_archive_stamp_missed", memory_id=str(memory_id))
-            return False
-        try:
-            point_id = await unshared_point_id(self.db, memory_id, memory.point_id)
-        except Exception as e:  # noqa: BLE001 — the tombstone is the truth; log the orphan
-            logger.warning(
-                "consolidation_archive_vector_delete_failed",
-                memory_id=str(memory_id),
-                error=str(e),
-            )
-            return True
-        if point_id is not None:
-            # In the transaction, beside the tombstone: a failure here is the
-            # phase's, and its savepoint undoes the stamp too.
-            entry = (memory_id, point_id, self.collection_name)
-            await queue_point_deletes(self.db, [entry])
-            self.pending_point_deletes.append(entry)
-        return True
 
     @staticmethod
     async def _record_action(
@@ -614,8 +407,9 @@ class ConsolidationPhase(LLMSpendTracker):
     ) -> None:
         """Record a consolidation action if reporter is available.
 
-        #1520: ``mode="tombstone"`` on archive actions lets ``rollback_sleep_run``
-        tell a restorable tombstone from a legacy hard delete (no mode key).
+        #1520: ``mode="tombstone"`` marked the archive actions earlier versions
+        recorded, so ``rollback_sleep_run`` can tell a restorable tombstone from
+        a legacy hard delete (no mode key). This phase records promotions only.
 
         Issue #1049: records ``reference_count`` (the adoption signal the gate now
         keys on) alongside ``access_count`` (surfacing, kept for comparison) so
@@ -651,8 +445,8 @@ class ConsolidationPhase(LLMSpendTracker):
             Memory.scope == "working",
             Memory.deleted_at.is_(None),
             # #1523: a pinned row can be working-scope (a rollback that demoted
-            # it before this rule, or a pin set on a working row). It must never
-            # reach the archive branch — same exemption dedup applies.
+            # it before this rule, or a pin set on a working row). Automated
+            # passes leave it alone — same exemption dedup applies.
             not_pinned_predicate(),
             # Tool guardrails: same exemption, the guardrail lane.
             not_tool_triggered_predicate(),
@@ -682,7 +476,7 @@ class ConsolidationPhase(LLMSpendTracker):
         """Use LLM to judge borderline working memories.
 
         Returns {memory_id: "promote"|"keep"} — "archive" is not offered
-        (#1233): rule-path archival is deterministic and already ran.
+        (#1233; nothing is archived since #3021).
         """
         labels = list(string.ascii_uppercase[: len(batch)])
         label_to_id = dict(zip(labels, [m.id for m in batch], strict=True))
@@ -730,11 +524,9 @@ class ConsolidationPhase(LLMSpendTracker):
                 )
             return {}
 
-        # Parse with label validation. #1233: "archive" is no longer offered
-        # (rule-path archival is deterministic and runs before the judge),
-        # so it is rejected here like any other invalid action; the
-        # execute()-side _archival_eligible guard remains as a defensive
-        # backstop should an archive decision ever reach it again.
+        # Parse with label validation. #1233: "archive" is no longer offered,
+        # so it is rejected here like any other invalid action (#3021: this
+        # phase archives nothing).
         decisions: dict[UUID, str] = {}
         for item in llm_resp.parsed.get("decisions", []):
             label = item.get("label")

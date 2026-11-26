@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter
+from services.sleep.reporter import PhaseResult, SleepBudget, SleepBudgetPlan, SleepReporter
 
 
 class TestPhaseResult:
@@ -80,6 +80,59 @@ class TestSleepBudget:
         budget = SleepBudget(max_llm_calls=0, max_memories=0)
         assert budget.exhausted
         assert budget.can_afford(llm_calls=0, memories=0)
+
+
+class TestSleepBudgetPlan:
+    """#3019: per-phase budgets of one run."""
+
+    def test_every_phase_gets_the_full_memory_allowance(self):
+        plan = SleepBudgetPlan(max_llm_calls=50, max_memories=200, llm_phases=["dedup_merge"])
+        for name in ("edge_discovery", "dedup_merge", "merge_retention", "consolidation"):
+            budget = plan.for_phase(name)
+            assert (budget.max_memories, budget.memories_used) == (200, 0)
+            plan.settle(name, budget)
+
+    def test_equal_shares_with_the_remainder_to_the_earliest(self):
+        plan = SleepBudgetPlan(max_llm_calls=10, max_memories=200, llm_phases=["a", "b", "c", "d"])
+        shares = []
+        for name in ("a", "b", "c", "d"):
+            budget = plan.for_phase(name)
+            shares.append(budget.max_llm_calls)
+            budget.consume(llm_calls=budget.max_llm_calls)
+            plan.settle(name, budget)
+        assert shares == [3, 3, 2, 2]
+
+    def test_unused_calls_roll_forward_and_the_total_holds(self):
+        plan = SleepBudgetPlan(max_llm_calls=9, max_memories=200, llm_phases=["a", "b", "c"])
+        a = plan.for_phase("a")
+        a.consume(llm_calls=1)
+        plan.settle("a", a)
+        b = plan.for_phase("b")
+        assert b.max_llm_calls == 3 + 2
+        b.consume(llm_calls=b.max_llm_calls)
+        plan.settle("b", b)
+        c = plan.for_phase("c")
+        assert c.max_llm_calls == 3
+        assert 1 + 5 + 3 == 9
+
+    def test_a_phase_that_calls_no_model_gets_no_calls_and_keeps_the_carry(self):
+        plan = SleepBudgetPlan(max_llm_calls=4, max_memories=200, llm_phases=["a", "b"])
+        a = plan.for_phase("a")
+        plan.settle("a", a)  # unused: 2 roll forward
+        retention = plan.for_phase("merge_retention")
+        assert (retention.max_llm_calls, plan.calls_model("merge_retention")) == (0, False)
+        assert not retention.can_afford(llm_calls=1)
+        assert retention.can_afford(memories=200)
+        plan.settle("merge_retention", retention)
+        assert plan.for_phase("b").max_llm_calls == 4
+
+    def test_a_cap_smaller_than_the_phase_count(self):
+        plan = SleepBudgetPlan(max_llm_calls=1, max_memories=10, llm_phases=["a", "b", "c"])
+        assert [plan.for_phase(n).max_llm_calls for n in ("a", "b", "c")] == [1, 0, 0]
+
+    def test_no_model_phase_at_all(self):
+        plan = SleepBudgetPlan(max_llm_calls=50, max_memories=200, llm_phases=[])
+        assert plan.for_phase("dedup_merge").max_llm_calls == 0
 
 
 class TestSleepReporter:

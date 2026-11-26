@@ -135,7 +135,7 @@ def test_every_manual_pointer_names_an_existing_topic():
         # remember / update_memory
         "Three layers",
         "never 'part 1/3'",
-        "consolidation_archive_min_age_days is a floor",
+        "consolidation_archive_min_age_days is always null",
         "upsert for sync workflows",
         "details is replaced wholesale",
         # reference / forget / explore

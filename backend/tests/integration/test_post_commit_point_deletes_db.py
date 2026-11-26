@@ -1,7 +1,6 @@
 """Point deletes after the commit, against a real Postgres (#2480).
 
-``forget_bulk``, ``cleanup_old_working_memories`` and ``rollback_session``
-follow ``forget`` (#2201, #2476): each point is queued in
+``forget_bulk`` and ``rollback_session`` follow ``forget`` (#2201, #2476): each point is queued in
 ``deferred_point_deletes`` in the transaction that removes its row, and the
 vector store is touched only after that commit, under the point-writer lock,
 for points no live row names. A transaction that never commits therefore
@@ -18,7 +17,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,7 +34,6 @@ from tests.integration.test_session_rollback_db import (  # noqa: F401 — fixtu
     _stubs,
     world,
 )
-from utils.datetime import utcnow
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -175,76 +172,6 @@ async def test_forget_bulk_with_the_lock_taken_leaves_the_points_queued(
         delete(DeferredPointDelete).where(DeferredPointDelete.memory_id.in_(ids))
     )
     await world.session.commit()
-
-
-# ------------------------------------------------ cleanup_old_working_memories
-
-
-async def _old_working(world: World, count: int) -> list[uuid.UUID]:
-    ids = [uuid.uuid4() for _ in range(count)]
-    world.session.add_all(
-        [
-            Memory(
-                id=mid,
-                user_id=world.owner,
-                workspace_id=world.workspace_id,
-                context_id=world.context_id,
-                summary="old working memory",
-                content="body",
-                type="note",
-                scope="working",
-                importance=0.2,
-                client="test",
-                embedding_status="success",
-                created_at=utcnow() - timedelta(days=40),
-            )
-            for mid in ids
-        ]
-    )
-    await world.session.commit()
-    return ids
-
-
-async def test_cleanup_whose_commit_fails_keeps_the_rows_and_their_points(
-    world: World, _stubs: dict[str, Any], chunks: AsyncMock
-) -> None:
-    ids = await _old_working(world, 2)
-    service = MemoryService(world.session)
-    with (
-        patch(
-            "services.memory_service.resolve_collection_name",
-            AsyncMock(return_value=_COLLECTION),
-        ),
-        # The per-row delete the old order ran before the commit.
-        patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()) as one_point,
-        patch.object(world.session, "commit", AsyncMock(side_effect=RuntimeError("commit failed"))),
-        pytest.raises(RuntimeError, match="commit failed"),
-    ):
-        await service.cleanup_old_working_memories(world.owner)
-    await world.session.rollback()
-
-    assert await _exist(world, ids) == 2
-    one_point.assert_not_awaited()
-    _stubs["points"].assert_not_awaited()
-    assert await _queued(world, ids) == set()
-
-
-async def test_cleanup_deletes_the_points_after_its_commit(
-    world: World, _stubs: dict[str, Any], chunks: AsyncMock
-) -> None:
-    ids = await _old_working(world, 2)
-    service = MemoryService(world.session)
-    with patch(
-        "services.memory_service.resolve_collection_name",
-        AsyncMock(return_value=_COLLECTION),
-    ):
-        assert await service.cleanup_old_working_memories(world.owner) == 2
-
-    assert await _exist(world, ids) == 0
-    assert _deleted_points(_stubs["points"]) == {str(i) for i in ids}
-    # The queue has no foreign key to memories: the hard delete keeps it,
-    # and the fast path dequeued it.
-    assert await _queued(world, ids) == set()
 
 
 # ------------------------------------------------------------ rollback_session

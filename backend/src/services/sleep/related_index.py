@@ -73,7 +73,11 @@ def current(index: SleepRelatedIndex, source: Memory, target: Memory) -> bool:
 
 
 class RelatedIndexPhase:
-    """Annotate existing discovered edges within the remaining Sleep budget."""
+    """Annotate existing discovered edges within this phase's memory allowance.
+
+    #3019: the phase has its own budget (the run's full memory allowance), so
+    its pair limit no longer shrinks by what edge discovery sampled before it.
+    """
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -181,7 +185,7 @@ class RelatedIndexPhase:
                 )
             written += 1
             indexed_ids.update((source.id, target.id))
-        # Charged to the run's budget: only the memories this run indexed.
+        # Charged to this phase's budget: only the memories this run indexed.
         result.memories_processed = len(indexed_ids)
         result.details = {"candidates": len(edges), "indexed": written}
         return result

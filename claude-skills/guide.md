@@ -84,7 +84,7 @@ A finding worth keeping but not worth an issue yet — a refactor, a duplicated 
 2. Pick up: before changing a file, `list(context_id=..., filters={"type": ["tech-debt", "needs-decision"], "tags": ["status:open", "file:<repo path>"], "tags_match": "all", "trust_tier": "trusted"})` finds its open memos; with `"tags": ["status:open"]` alone and `order_by="created_at", direction="asc"`, the same call is the planning view.
 3. Close: `/kagura-memory:maintain` lists the open memos with their age and files and, on your pick, closes one with `update_memory(memory_id=..., context_id=..., remove_tags=["status:open"], add_tags=["status:done"])` (`status:promoted` plus `issue:#N` when it became an issue).
 
-Sleep maintenance never archives a memo while it is tagged `status:open`. `add_tags` / `remove_tags` and that exemption need a v0.140.0 or later server; on an older one, close a memo by sending its whole tag list as `tags=[...]`.
+Sleep maintenance never merges a memo away while it is tagged `status:open`, and no pass removes a memory for age or disuse. `add_tags` / `remove_tags` and that exemption need a v0.140.0 or later server; on an older one, close a memo by sending its whole tag list as `tags=[...]`.
 
 ### 4. Using the memory tools well
 

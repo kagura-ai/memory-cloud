@@ -1,8 +1,12 @@
-"""Consolidation point deletes after the commit, against a real Postgres (#2565).
+"""Consolidation keeps memories; merge point deletes after the commit (#2565, #3021).
 
-The Sleep archive, the Sleep merge's loser and the legacy consolidation task
-follow ``forget`` (#2476, #2480): each point is queued in
-``deferred_point_deletes`` in the transaction that removes its row, and the
+#3021: a memory is kept until its owner or writer deletes it. A working row
+30 days old or more that no recall ever returned survives a Sleep run (Sleep
+on) and the legacy consolidation task (Sleep off), and nothing of it is queued
+for a point delete.
+
+The Sleep merge's loser follows ``forget`` (#2476, #2480): its point is queued
+in ``deferred_point_deletes`` in the transaction that removes its row, and the
 vector store is touched only after the caller's commit, under the point-writer
 lock, for points no live row names. A transaction that never commits leaves
 its rows live with their points and no queue row; a Sleep phase that fails
@@ -27,14 +31,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from db.qdrant import KAGURA_MEMORIES_COLLECTION
 from models.auth import Context
 from models.deferred_point_delete import DeferredPointDelete
-from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE, Memory
+from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.sleep import SleepReport
-from services.sleep.consolidation import ConsolidationPhase
 from services.sleep.dedup_merge import DedupMergePhase
 from services.sleep.orchestrator import SleepOrchestrator
 from services.sleep.reporter import PhaseResult, SleepBudget
@@ -98,9 +101,15 @@ def _deleted_points(points: AsyncMock) -> set[str]:
 
 
 async def _old_working(
-    world: World, count: int, *, importance: float = 0.1, summary: str = "old working memory"
+    world: World,
+    count: int,
+    *,
+    importance: float = 0.1,
+    summary: str = "old working memory",
+    age_days: int = 40,
 ) -> list[uuid.UUID]:
-    """Working rows nobody adopted or read, 40 days old: both archive rules take them."""
+    """Working rows nobody adopted or read, ``age_days`` old (what the removed
+    archive rules took)."""
     ids = [uuid.uuid4() for _ in range(count)]
     world.session.add_all(
         [
@@ -118,7 +127,7 @@ async def _old_working(
                 reference_count=0,
                 client="test",
                 embedding_status="success",
-                created_at=utcnow() - timedelta(days=40),
+                created_at=utcnow() - timedelta(days=age_days),
             )
             for mid in ids
         ]
@@ -149,8 +158,9 @@ async def _sleep_report(world: World) -> uuid.UUID:
     return report.id
 
 
-def _sleep_patches(world: World, stack: ExitStack, phase: str) -> None:
-    """Run only ``phase`` on the caller's session, archive rule switched on."""
+def _sleep_patches(world: World, stack: ExitStack, phases: set[str]) -> None:
+    """Run only ``phases`` on the caller's session; an old deployment's archive
+    cutoff setting is still in the environment (nothing reads it)."""
 
     async def get_db() -> AsyncIterator[Any]:
         yield world.session
@@ -159,26 +169,23 @@ def _sleep_patches(world: World, stack: ExitStack, phase: str) -> None:
     graph.stats = AsyncMock(return_value={"total_edges": 0})
     graph.get_node_metrics = AsyncMock(return_value=None)
     stack.enter_context(patch("db.base.get_db", get_db))
-    stack.enter_context(patch("services.sleep.orchestrator.FULL_PHASES", {phase}))
+    stack.enter_context(patch("services.sleep.orchestrator.FULL_PHASES", phases))
     stack.enter_context(patch("services.sleep.orchestrator.sleep_suspended", return_value=False))
     stack.enter_context(patch("services.sleep.consolidation.GraphService", return_value=graph))
     stack.enter_context(
-        patch(
-            "services.sleep.consolidation._adoption_delete_cutoff",
-            return_value=utcnow() - timedelta(days=365),
-        )
+        patch.dict("os.environ", {"CONSOLIDATION_ADOPTION_DELETE_CUTOFF": "2000-01-01T00:00:00"})
     )
 
 
 async def _run_sleep(
-    world: World, phase: str = "consolidation", *, commit_fails: bool = False
+    world: World, phases: str | set[str] = "consolidation", *, commit_fails: bool = False
 ) -> uuid.UUID:
     """The admin trigger's job: the orchestrator, then the caller's commit."""
     from api.routes.admin_sleep import _run_sleep_job
 
     report_id = await _sleep_report(world)
     with ExitStack() as stack:
-        _sleep_patches(world, stack, phase)
+        _sleep_patches(world, stack, {phases} if isinstance(phases, str) else phases)
         if commit_fails:
             stack.enter_context(_commit_fails(world))
         # Logs a failure and marks the report, never raises.
@@ -186,94 +193,83 @@ async def _run_sleep(
     return report_id
 
 
-async def test_a_sleep_archive_whose_commit_fails_keeps_the_rows_and_their_points(
-    world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
+@pytest.mark.parametrize(
+    "phases",
+    [
+        {"consolidation"},
+        # The non-LLM phases of full mode next to it (the code defaults keep
+        # edge discovery and importance re-evaluation off; dedup needs a
+        # vector store and is covered by the merge tests below).
+        {"consolidation", "merge_retention", "forget_retention", "measurement_retention"},
+    ],
+)
+async def test_a_sleep_run_keeps_an_old_never_returned_working_memory(
+    world: World,
+    _stubs: dict[str, Any],
+    chunks: AsyncMock,
+    client: MagicMock,
+    phases: set[str],
 ) -> None:
-    ids = await _old_working(world, 2)
-    await _run_sleep(world, commit_fails=True)
-    await world.session.rollback()
-
-    assert await _live(world, ids) == 2
-    client.delete.assert_not_awaited()
-    _stubs["points"].assert_not_awaited()
-    chunks.assert_not_awaited()
-    assert await _queued(world, ids) == set()
-
-
-async def test_a_sleep_archive_deletes_the_points_after_the_callers_commit(
-    world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
-) -> None:
-    ids = await _old_working(world, 2)
-    await _run_sleep(world)
-
-    rows = (
-        await world.session.execute(
-            select(Memory.deleted_at, Memory.deleted_by).where(Memory.id.in_(ids))
-        )
-    ).all()
-    assert {(row.deleted_at is not None, row.deleted_by) for row in rows} == {
-        (True, DELETED_BY_SLEEP_ARCHIVE)
-    }
-    # One point delete and one chunk delete for the collection, nothing per row.
-    client.delete.assert_not_awaited()
-    assert _deleted_points(_stubs["points"]) == {str(i) for i in ids}
-    assert _stubs["points"].await_args.args[1] == KAGURA_MEMORIES_COLLECTION
-    assert set(chunks.await_args.args[0]) == set(ids)
-    # The fast path dequeued what it handled, under the lock.
-    assert await _queued(world, ids) == set()
-
-
-async def test_a_failed_queue_insert_fails_the_archive_phase_and_keeps_the_rows(
-    world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
-) -> None:
-    """A queue INSERT that fails on the rule path fails the consolidation phase
-    alone: its savepoint takes the stamps with it, so no row is left without its
-    queue row, and the run still completes (the rule pass used to log the error
-    and go on in the aborted transaction, which then lost the whole run)."""
-    ids = await _old_working(world, 2)
-
-    async def insert_fails(db: Any, _entries: Any) -> None:
-        await db.execute(text("SELECT 1 / 0"))  # a database error in the phase's transaction
-
-    with patch("services.sleep.consolidation.queue_point_deletes", insert_fails):
-        report_id = await _run_sleep(world)
+    """#3021 acceptance, Sleep on: 30 and 400 days old, never read, never
+    adopted — kept, working, with nothing queued for its point."""
+    ids = await _old_working(world, 1, age_days=30) + await _old_working(world, 1, age_days=400)
+    report_id = await _run_sleep(world, phases)
 
     report = await world.session.get(SleepReport, report_id, populate_existing=True)
-    assert report is not None and report.status == "degraded"
+    assert report is not None and report.status == "completed"
     assert report.consolidation_result is not None
-    assert report.consolidation_result["success"] is False
-    assert await _live(world, ids) == 2
-    assert await _queued(world, ids) == set()
+    details = report.consolidation_result["details"]
+    assert (details["rule_deleted"], details["llm_archived"], details["borderline"]) == (0, 0, 2)
+    rows = (
+        await world.session.execute(
+            select(Memory.deleted_at, Memory.scope).where(Memory.id.in_(ids))
+        )
+    ).all()
+    assert [(row.deleted_at, row.scope) for row in rows] == [(None, "working")] * 2
     client.delete.assert_not_awaited()
     _stubs["points"].assert_not_awaited()
     chunks.assert_not_awaited()
+    assert await _queued(world, ids) == set()
 
 
 async def test_a_failed_sleep_phase_takes_its_queue_rows_down_with_its_savepoint(
     world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
 ) -> None:
+    """A phase that queued a point and then failed (a merge here) leaves the
+    row live and the queue empty: its savepoint takes both down."""
+    from repositories.memory import MemoryRepository
+    from services.deferred_point_deletes import queue_point_deletes
+
     [memory_id] = await _old_working(world, 1)
     orchestrator = SleepOrchestrator(world.session)
-    phase = ConsolidationPhase(world.session, MagicMock())
 
-    async def archive_then_fail(*_: Any, **__: Any) -> PhaseResult:
-        memory = await world.session.get(Memory, memory_id)
-        assert memory is not None
-        assert await phase._archive_tombstone(world.owner, memory)
-        assert await _queued(world, [memory_id]) == {memory_id}
-        raise RuntimeError("phase failed")
+    class _TombstoneThenFail:
+        """A phase that tombstones a row, queues its point, then raises."""
 
-    with patch.object(phase, "execute", archive_then_fail):
-        result = await orchestrator._run_phase(
-            "consolidation",
-            phase,
-            MagicMock(),
-            world.owner,
-            str(world.workspace_id),
-            str(world.context_id),
-            SleepBudget(),
-            report_id=uuid.uuid4(),
-        )
+        def __init__(self) -> None:
+            self.pending_point_deletes: list[Any] = []
+
+        async def execute(self, *_: Any, **__: Any) -> PhaseResult:
+            assert await MemoryRepository(world.session).soft_delete(
+                memory_id, deleted_by=DELETED_BY_SLEEP_MERGE
+            )
+            entry = (memory_id, memory_id, KAGURA_MEMORIES_COLLECTION)
+            await queue_point_deletes(world.session, [entry])
+            self.pending_point_deletes.append(entry)
+            assert await _queued(world, [memory_id]) == {memory_id}
+            raise RuntimeError("phase failed")
+
+    phase = _TombstoneThenFail()
+    result = await orchestrator._run_phase(
+        "dedup_merge",
+        phase,
+        MagicMock(),
+        world.owner,
+        str(world.workspace_id),
+        str(world.context_id),
+        SleepBudget(),
+        report_id=uuid.uuid4(),
+    )
     await world.session.commit()
     await orchestrator.delete_committed_points()
 
@@ -366,41 +362,35 @@ def _legacy_patches(world: World, stack: ExitStack) -> None:
     )
 
 
-async def test_the_legacy_task_whose_commit_fails_keeps_the_rows_and_their_points(
-    world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
+@pytest.mark.parametrize("age_days", [30, 400])
+async def test_the_legacy_task_keeps_an_old_never_returned_working_memory(
+    world: World,
+    _stubs: dict[str, Any],
+    chunks: AsyncMock,
+    client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    age_days: int,
 ) -> None:
+    """#3021 acceptance, Sleep off: the legacy task keeps the row (it used to
+    delete it physically), and still promotes a used one by rule."""
     from tasks.neural_tasks import consolidation_task
 
-    ids = await _old_working(world, 2, importance=0.0)
+    monkeypatch.setenv("SLEEP_ENABLED", "false")
+    ids = await _old_working(world, 2, importance=0.0, age_days=age_days)
+    [used] = await _old_working(world, 1, importance=0.0, age_days=age_days, summary="used")
+    await world.session.execute(
+        Memory.__table__.update().where(Memory.id == used).values(access_count=1)
+    )
+    await world.session.commit()
     with ExitStack() as stack:
         _legacy_patches(world, stack)
-        stack.enter_context(_commit_fails(world))
-        await consolidation_task()  # logs the failure, never raises
-    await world.session.rollback()
+        result = await consolidation_task()
 
-    assert await _exist(world, ids) == 2
+    assert result is not None and result["deleted"] == 0 and result["promoted"] == 1
+    assert await _live(world, ids) == 2
+    promoted = await world.session.get(Memory, used, populate_existing=True)
+    assert promoted is not None and promoted.scope == "persistent"
     client.delete.assert_not_awaited()
     _stubs["points"].assert_not_awaited()
     chunks.assert_not_awaited()
-    assert await _queued(world, ids) == set()
-
-
-async def test_the_legacy_task_deletes_the_points_after_its_commit(
-    world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock
-) -> None:
-    from tasks.neural_tasks import consolidation_task
-
-    ids = await _old_working(world, 2, importance=0.0)
-    with ExitStack() as stack:
-        _legacy_patches(world, stack)
-        await consolidation_task()
-
-    assert await _exist(world, ids) == 0
-    client.delete.assert_not_awaited()
-    assert _deleted_points(_stubs["points"]) == {str(i) for i in ids}
-    # The collection of the row's context, not the default one.
-    assert _stubs["points"].await_args.args[1] == _COLLECTION
-    assert set(chunks.await_args.args[0]) == set(ids)
-    # No foreign key to memories: the hard delete keeps the queue row, and
-    # the fast path dequeued it.
     assert await _queued(world, ids) == set()

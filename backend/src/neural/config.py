@@ -82,9 +82,9 @@ def supersede_suggest_threshold_llm_from_env() -> float:
     return clamped
 
 
-# #2584: memories carrying one of these tags (exact match) are never archived (or,
-# on the legacy pass, deleted) by consolidation and never retired as the losing
-# side of a near-duplicate merge. ``status:open`` marks an open review memo.
+# #2584: memories carrying one of these tags (exact match) are never retired as
+# the losing side of a near-duplicate merge. ``status:open`` marks an open review
+# memo. (Until #3021 consolidation also archived and honoured them.)
 SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT: tuple[str, ...] = ("status:open",)
 
 
@@ -96,7 +96,7 @@ def sleep_archive_exempt_tags_from_env() -> tuple[str, ...]:
     list (``status:open,status:blocked``). Entries are stripped, blanks and
     repeats dropped, so an empty value turns the exemption off. A JSON value
     that does not parse to strings keeps the default and logs a warning: a
-    typo must not stop the service, nor silently archive what it protects.
+    typo must not stop the service, nor silently retire what it protects.
     """
     import json
     import os
@@ -213,12 +213,16 @@ class NeuralMemoryConfig:
         sleep_max_llm_calls_per_run: LLM call budget per run
         sleep_dedup_enabled: Enable dedup/merge phase
         sleep_dedup_similarity_threshold: Cosine threshold for duplicate detection
-        sleep_edge_discovery_enabled: Enable edge discovery phase
+        sleep_edge_discovery_enabled: Enable edge discovery phase (off by
+            default, #3021)
         sleep_edge_discovery_sample_size: Memories sampled for edge discovery
         sleep_importance_reeval_enabled: Enable importance re-evaluation phase
-        sleep_archive_exempt_tags: Tags (exact match) that keep a memory out of
-            consolidation archive and off the losing side of a near-duplicate
-            merge (env-only, #2584)
+            (off by default, #3021)
+        sleep_consolidation_judge_enabled: Let the LLM judge decide promotion
+            of the memories consolidation's rules leave borderline (off by
+            default, #3021; rule promotion always runs)
+        sleep_archive_exempt_tags: Tags (exact match) that keep a memory off
+            the losing side of a near-duplicate merge (env-only, #2584)
 
         # Tag Co-Occurrence Cold-Start Seeding (Issue #223, Tier 2)
         tag_cooccurrence_enabled: Master switch for tag-cooccurrence seeding
@@ -428,13 +432,18 @@ class NeuralMemoryConfig:
     # loser alive-but-shadowed instead of soft-deleting it. Default OFF =
     # update-by-removal (pre-#1208 behavior).
     sleep_dedup_supersede_enabled: bool = False
-    sleep_edge_discovery_enabled: bool = True  # Phase 1 on/off
+    # #3021: off by default; a stored neural_config row still wins.
+    sleep_edge_discovery_enabled: bool = False  # Phase 1 on/off
     sleep_edge_discovery_sample_size: int = 30  # Memories sampled per run
-    sleep_importance_reeval_enabled: bool = True  # Phase 3 on/off
-    # #2584: a memory carrying one of these tags is exempt from consolidation
-    # archive and is never the retired side of a near-duplicate merge; removing
-    # the tag returns it to the normal lifecycle. Empty = no exemption. Env-only
-    # (SLEEP_ARCHIVE_EXEMPT_TAGS, see sleep_archive_exempt_tags_from_env).
+    sleep_importance_reeval_enabled: bool = False  # Phase 3 on/off
+    # #3021: the consolidation LLM judge for borderline memories. Off by
+    # default; rule promotion runs either way.
+    sleep_consolidation_judge_enabled: bool = False
+    # #2584: a memory carrying one of these tags is never the retired side of a
+    # near-duplicate merge; removing the tag returns it to the normal
+    # lifecycle. Empty = no exemption. Env-only (SLEEP_ARCHIVE_EXEMPT_TAGS, see
+    # sleep_archive_exempt_tags_from_env). The name predates #3021, when
+    # consolidation also archived and honoured the same tags.
     sleep_archive_exempt_tags: tuple[str, ...] = SLEEP_ARCHIVE_EXEMPT_TAGS_DEFAULT
 
     def __post_init__(self) -> None:
@@ -845,9 +854,10 @@ class NeuralMemoryConfig:
             sleep_forget_retention_days=get_int("SLEEP_FORGET_RETENTION_DAYS", 0),
             sleep_measurement_retention_days=get_int("SLEEP_MEASUREMENT_RETENTION_DAYS", 0),
             sleep_dedup_supersede_enabled=get_bool("SLEEP_DEDUP_SUPERSEDE_ENABLED", False),
-            sleep_edge_discovery_enabled=get_bool("SLEEP_EDGE_DISCOVERY_ENABLED", True),
+            sleep_edge_discovery_enabled=get_bool("SLEEP_EDGE_DISCOVERY_ENABLED", False),
             sleep_edge_discovery_sample_size=get_int("SLEEP_EDGE_DISCOVERY_SAMPLE_SIZE", 30),
-            sleep_importance_reeval_enabled=get_bool("SLEEP_IMPORTANCE_REEVAL_ENABLED", True),
+            sleep_importance_reeval_enabled=get_bool("SLEEP_IMPORTANCE_REEVAL_ENABLED", False),
+            sleep_consolidation_judge_enabled=get_bool("SLEEP_CONSOLIDATION_JUDGE_ENABLED", False),
             sleep_archive_exempt_tags=sleep_archive_exempt_tags_from_env(),
         )
 
@@ -1152,6 +1162,10 @@ class NeuralMemoryConfig:
             sleep_importance_reeval_enabled=configs.get(
                 "sleep_importance_reeval_enabled",
                 base_config.sleep_importance_reeval_enabled,
+            ),
+            sleep_consolidation_judge_enabled=configs.get(
+                "sleep_consolidation_judge_enabled",
+                base_config.sleep_consolidation_judge_enabled,
             ),
             sleep_archive_exempt_tags=base_config.sleep_archive_exempt_tags,  # env-only (#2584)
         )

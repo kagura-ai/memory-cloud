@@ -184,6 +184,37 @@ class TestEdgeDiscoveryPhase:
         assert result.skip_reason == "edge_discovery_disabled"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("configured", "allowance", "used"), [(200, 50, 50), (30, 200, 30), (30, 0, 0)]
+    )
+    async def test_the_sample_is_clamped_to_the_phase_allowance(
+        self, edge_phase, configured, allowance, used, monkeypatch
+    ):
+        """#3019: a sample above the phase's memory allowance is clamped at run
+        time with one warning (the configuration API accepts the pair)."""
+        import services.sleep.edge_discovery as edge_mod
+
+        spy = MagicMock()
+        monkeypatch.setattr(edge_mod, "logger", spy)
+        edge_phase._sample_memories = AsyncMock(return_value=[])
+
+        await edge_phase.execute(
+            _make_config(sample_size=configured),
+            "user-1",
+            "ws-1",
+            "ctx-1",
+            SleepBudget(max_memories=allowance),
+        )
+
+        assert edge_phase._sample_memories.await_args.args[3] == used
+        clamped = [
+            c
+            for c in spy.warning.call_args_list
+            if c.args[0] == "sleep_edge_discovery_sample_clamped"
+        ]
+        assert len(clamped) == (1 if used < configured else 0)
+
+    @pytest.mark.asyncio
     async def test_no_memories(self, edge_phase):
         config = _make_config()
         budget = SleepBudget()

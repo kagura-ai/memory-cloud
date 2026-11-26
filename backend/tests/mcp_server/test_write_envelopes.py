@@ -25,7 +25,7 @@ def _info() -> PersistenceInfo:
         scope="working",
         committed=True,
         promotes_via="consolidation",
-        consolidation_archive_min_age_days=7,
+        consolidation_archive_min_age_days=None,
         detail="Committed and durable now — 'working' is a lifecycle label.",
     )
 
@@ -37,7 +37,7 @@ def test_default_persistence_block_has_no_detail_prose():
         "scope": "working",
         "committed": True,
         "promotes_via": "consolidation",
-        "consolidation_archive_min_age_days": 7,
+        "consolidation_archive_min_age_days": None,
     }
 
 

@@ -315,10 +315,7 @@ You MUST respond with valid JSON only.
 """
 
 # #1233: the judge decides promote vs keep ONLY. Deletion is not on the
-# menu: rule-path archival is deterministic (_archival_eligible + isolation,
-# see consolidation.py) and runs before the judge, so an LLM archive pick
-# was always either redundant or guarded out — dead tokens and wasted
-# probability mass.
+# menu (#3021: consolidation archives nothing; a kept memory stays working).
 CONSOLIDATION_JUDGE_USER = """\
 Evaluate these working memories for consolidation.
 

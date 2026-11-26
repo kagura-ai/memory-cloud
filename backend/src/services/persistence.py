@@ -9,10 +9,15 @@ it survives until consolidation runs.
 What this module states, all read off the code that enforces it:
 
 * The row is committed to PostgreSQL before ``remember()`` returns. ``scope``
-  does not gate durability at all — it selects which consolidation lifecycle the
-  memory is on.
-* Which consolidation pass, if any, this deployment actually runs. The two are
-  mutually exclusive and neither is guaranteed to be on:
+  does not gate durability at all: ``persistent`` means used, or old enough by
+  rule; ``working`` is everything else. It has no effect on ranking, quota or
+  retention.
+* A memory is kept until its owner or writer deletes it (#3021). No pass
+  archives or deletes a memory for age or disuse, so
+  ``consolidation_archive_min_age_days`` is always null (the key stays so the
+  reply keeps its shape).
+* Which consolidation pass, if any, this deployment runs to promote working
+  memories. The two are mutually exclusive and neither is guaranteed to be on:
 
   - ``SLEEP_ENABLED=true`` + ``ENABLE_NEURAL_MEMORY=true`` -> the sleep pass
     (``services/sleep/consolidation.py``). Promotes on adoption (a deliberate
@@ -20,43 +25,37 @@ What this module states, all read off the code that enforces it:
   - ``SLEEP_ENABLED=true`` + ``ENABLE_NEURAL_MEMORY=false`` -> **neither**:
     ``sleep_maintenance_task`` returns at its neural-memory guard, and
     ``schedule_neural_tasks`` skips registering the legacy cron whenever sleep
-    is on. Nothing promotes or archives.
+    is on. Nothing promotes.
   - ``SLEEP_ENABLED`` unset/false -> the legacy pass
     (``tasks/neural_tasks.py::consolidation_task``, registered unconditionally
     by ``schedule_neural_tasks``, which ``api/main.py`` always calls). Promotes
     on ``access_count`` (surfacing, not adoption) or importance once aged; it
     has no centrality criterion.
 
-* The consolidation archival floor. Derived from whichever path is running so
-  the number can never describe a pass this deployment does not have.
-
 DELIBERATELY NOT CLAIMED — this is not a retention SLA:
 
-* Near-duplicate merge (``services/sleep/dedup_merge.py``) soft-deletes the
-  loser of a pair with **no age, scope, or adoption gate**: a pair at or above
-  ``SLEEP_DEDUP_SIMILARITY_THRESHOLD`` cosine (default 0.92) that the LLM judge
-  calls a duplicate, or, when no judge runs, a pair at or above 0.98
-  (``AUTO_MERGE_THRESHOLD``). ``_fetch_active_memories`` selects on
-  user/workspace/context, ``deleted_at IS NULL`` and the lane exemptions only
+* Near-duplicate merge (``services/sleep/dedup_merge.py``), when a deployment
+  enables it, soft-deletes the loser of a pair with **no age, scope, or
+  adoption gate**: a pair at or above ``SLEEP_DEDUP_SIMILARITY_THRESHOLD``
+  cosine (default 0.92) that the LLM judge calls a duplicate, or, when no judge
+  runs, a pair at or above 0.98 (``AUTO_MERGE_THRESHOLD``).
+  ``_fetch_active_memories`` selects on user/workspace/context,
+  ``deleted_at IS NULL`` and the lane exemptions only
   (``delivery_mode='always'`` rows never enter candidacy, #1519, and since
-  #1523 the same predicate exempts them from consolidation archive and
-  importance re-evaluation too — ``pinned=True`` below carries that promise;
-  ``type='time'`` rows never do either, #1524, since the Time Memory lane
-  serves them by trigger window, not summary; tool guardrails; and, since
-  #2996, rows the resource indexer owns, which are persistent from creation
-  and whose lifecycle belongs to their source). An unpinned, non-time memory
-  written minutes ago can lose a merge the
-  same night (its tags and edges transfer to the winner, but its id stops
-  resolving). Any global "nothing you write today can be removed" wording would
-  therefore be false, which is why the age field is named for consolidation and
-  the detail text scopes itself.
+  #1523 the same predicate exempts them from importance re-evaluation too —
+  ``pinned=True`` below carries that promise; ``type='time'`` rows never do
+  either, #1524, since the Time Memory lane serves them by trigger window, not
+  summary; tool guardrails; and, since #2996, rows the resource indexer owns,
+  which are persistent from creation and whose lifecycle belongs to their
+  source). An unpinned, non-time memory written minutes ago can lose a merge
+  the same night (its tags and edges transfer to the winner, but its id stops
+  resolving), which is why the detail text names the merge next to forget().
 * ``forget()`` and account erasure remove memories on demand.
 """
 
 from __future__ import annotations
 
 import os
-from functools import lru_cache
 
 from models.schemas import PersistenceInfo
 from utils.logger import get_logger
@@ -87,37 +86,6 @@ def active_consolidation_pass() -> str | None:
     return LEGACY_CONSOLIDATION
 
 
-@lru_cache(maxsize=1)
-def _sleep_archive_min_age_days() -> int:
-    """Archival age floor enforced by the sleep consolidation pass.
-
-    Imported lazily: ``services.sleep.consolidation`` pulls in Qdrant, the graph
-    service and the LLM service, none of which a write path should drag in at
-    import time.
-    """
-    from services.sleep.consolidation import ARCHIVE_MIN_AGE_DAYS
-
-    return ARCHIVE_MIN_AGE_DAYS
-
-
-@lru_cache(maxsize=1)
-def _legacy_archive_min_age_days() -> int:
-    """Archival age floor enforced by the legacy consolidation task."""
-    from tasks.neural_tasks import LEGACY_ARCHIVE_MIN_AGE_DAYS
-
-    return LEGACY_ARCHIVE_MIN_AGE_DAYS
-
-
-def consolidation_archive_min_age_days() -> int | None:
-    """The running pass's archival floor, or None when no pass runs."""
-    pass_name = active_consolidation_pass()
-    if pass_name == SLEEP_CONSOLIDATION:
-        return _sleep_archive_min_age_days()
-    if pass_name == LEGACY_CONSOLIDATION:
-        return _legacy_archive_min_age_days()
-    return None
-
-
 _PROMOTION_CRITERIA = {
     SLEEP_CONSOLIDATION: (
         "adoption via reference(), high importance once aged, or graph centrality"
@@ -145,15 +113,9 @@ def persistence_info(
         PersistenceInfo describing what that scope implies for durability, or
         None when it cannot be built. This block is advisory and is computed
         AFTER the write has committed, so it must be total: an unrecognized
-        scope, or any failure below, omits the field rather than raising.
-
-    Note:
-        The blanket guard is not defensive padding. The archival floor is read
-        through a lazy import of ``services.sleep.consolidation``, which pulls
-        in Qdrant, the graph service and the LLM service — the first write in a
-        process pays that import, and anything wrong in that chain would
-        otherwise surface as a failed ``remember()`` for a memory that is
-        already stored, prompting the caller to retry and duplicate it.
+        scope, or any failure below, omits the field rather than raising —
+        a failed ``remember()`` for a memory that is already stored would
+        prompt the caller to retry and duplicate it.
     """
     try:
         return _persistence_info(scope, pinned=pinned, tool_triggered=tool_triggered)
@@ -162,14 +124,17 @@ def persistence_info(
         return None
 
 
-def _merge_caveat(pinned: bool, *, floor: bool, tool_triggered: bool = False) -> str:
-    """The sentence about maintenance that is NOT consolidation.
+# #3021: the rule every block states, whatever the scope or the pass.
+_KEPT = "It is kept until deleted: nothing removes a memory for age or disuse."
 
-    ``floor`` selects the working-scope phrasing ("not bound by that floor")
-    over the persistent one ("not scope-gated"). Pinned memories (#1519, #1523)
-    and tool guardrails (``details.tool_trigger``) are excluded from every
-    automated deleter at its candidate fetch (one shared predicate each), so
-    for them the merge caveat becomes a promise and only forget() remains.
+
+def _merge_caveat(pinned: bool, *, tool_triggered: bool = False) -> str:
+    """The sentence about the removals that remain.
+
+    Pinned memories (#1519, #1523) and tool guardrails (``details.tool_trigger``)
+    are excluded from near-duplicate merge and importance re-evaluation at
+    their candidate fetch (one shared predicate each), so for them the merge
+    caveat becomes a promise and only forget() remains.
     """
     if pinned or tool_triggered:
         # Hedged on purpose: the exemption holds only while the pin / the
@@ -189,14 +154,8 @@ def _merge_caveat(pinned: bool, *, floor: bool, tool_triggered: bool = False) ->
         rollback = "never demotes it" if pinned else "leaves its importance alone"
         return (
             f"{hold}, Sleep maintenance does not select it — near-duplicate "
-            "merge, consolidation archive and importance re-evaluation all "
-            f"exclude it, and rollback {rollback}; an explicit forget() still "
-            "removes it" + (" and is not bound by that floor." if floor else ".")
-        )
-    if floor:
-        return (
-            "Separate maintenance (near-duplicate merge) and an explicit "
-            "forget() are not bound by that floor."
+            "merge and importance re-evaluation both exclude it, and rollback "
+            f"{rollback}; an explicit forget() still removes it."
         )
     return (
         "Separate maintenance (near-duplicate merge) and an explicit "
@@ -216,9 +175,8 @@ def _persistence_info(
             promotes_via=None,
             consolidation_archive_min_age_days=None,
             detail=(
-                "Committed and persistent. Consolidation acts only on "
-                "working-scope memories, so it will not archive this one. "
-                + _merge_caveat(pinned, floor=False, tool_triggered=tool_triggered)
+                f"Committed and persistent. {_KEPT} "
+                + _merge_caveat(pinned, tool_triggered=tool_triggered)
             ),
         )
     if scope != "working":
@@ -235,27 +193,21 @@ def _persistence_info(
             detail=(
                 "Committed and durable now — 'working' is a lifecycle label, "
                 "not a staging buffer. No consolidation pass is enabled on this "
-                "deployment, so it will stay working-scope and consolidation "
-                "will not archive it."
-                + (
-                    " " + _merge_caveat(pinned, floor=False, tool_triggered=tool_triggered)
-                    if protected
-                    else ""
-                )
+                f"deployment, so it will stay working-scope. {_KEPT}"
+                + (" " + _merge_caveat(pinned, tool_triggered=tool_triggered) if protected else "")
             ),
         )
 
-    days = consolidation_archive_min_age_days()
     return PersistenceInfo(
         scope="working",
         committed=True,
         promotes_via=pass_name,
-        consolidation_archive_min_age_days=days,
+        # #3021: no pass archives, so there is no age floor to state.
+        consolidation_archive_min_age_days=None,
         detail=(
             "Committed and durable now — 'working' is a lifecycle label, not a "
             f"staging buffer. Promotes to persistent via {pass_name} "
-            f"({_PROMOTION_CRITERIA[pass_name]}). That pass will not archive it "
-            f"before {days} days old, and only with zero adoption. "
-            + _merge_caveat(pinned, floor=True, tool_triggered=tool_triggered)
+            f"({_PROMOTION_CRITERIA[pass_name]}). {_KEPT} "
+            + _merge_caveat(pinned, tool_triggered=tool_triggered)
         ),
     )

@@ -287,6 +287,7 @@ class TestHandler:
 
         service = MagicMock()
         service.recall = recall
+        service.record_delivery = AsyncMock(return_value=True)  # #3022
         with (
             patch("db.base.get_db", new=_get_db_yielding(AsyncMock())),
             patch(
@@ -503,6 +504,7 @@ async def test_the_handler_marks_only_a_defaulted_full_as_trusted_only():
 
     service = MagicMock()
     service.recall = recall
+    service.record_delivery = AsyncMock(return_value=True)  # #3022
     with (
         patch("db.base.get_db", new=_get_db_yielding(AsyncMock())),
         patch(

@@ -466,13 +466,15 @@ async def test_builder_skips_indexed_edges_and_takes_a_bounded_share(monkeypatch
     db.execute = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
     db.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
     args = (None, source.user_id, str(source.workspace_id), str(source.context_id))
+    # #3019: the phase has its own budget, so what edge discovery sampled
+    # before it no longer shrinks the limit: a quarter of the 200 memories at
+    # two per pair -> 25 pairs (it was 21 after a 30-memory sample).
     result = await RelatedIndexPhase(db).execute(
-        *args, SleepBudget(max_memories=200, memories_used=30), report_id=uuid4()
+        *args, SleepBudget(max_memories=200), report_id=uuid4()
     )
     sql = _compiled(db.execute.call_args.args[0])
     assert "sleep_related_indexes.edge_id IS NULL" in sql
-    # A quarter of the 170 remaining memories at two per pair -> 21 pairs.
-    assert "LIMIT 21" in sql
+    assert "LIMIT 25" in sql
     assert sql.count("embedding_suppressed_at IS NULL") == 2
     assert result.memories_processed == 0
     db.execute.reset_mock()

@@ -156,41 +156,6 @@ class TestUnsharedPointIds:
         }
 
 
-class TestArchiveDeletesTheRowsOwnPoint:
-    @staticmethod
-    def _phase(db_session: AsyncSession):
-        from services.sleep.consolidation import ConsolidationPhase
-
-        with patch("services.sleep.consolidation.GraphService"):
-            return ConsolidationPhase(db_session, AsyncMock())
-
-    @pytest.mark.parametrize("scope", ["working", "persistent"])
-    async def test_an_indexer_row_is_never_archived_and_keeps_its_point(
-        self, db_session: AsyncSession, scope: str
-    ):
-        """#2996: the stamp refuses it (a row written as working before the
-        f62 migration included), so nothing is queued for the point."""
-        row = _indexer_row(scope=scope)
-        db_session.add(row)
-        await db_session.flush()
-
-        phase = self._phase(db_session)
-        assert await phase._archive_tombstone(_USER, row) is False
-
-        assert phase.pending_point_deletes == []
-        assert await _queued_points(db_session, row.id) == []
-
-    async def test_a_plain_row_loses_the_point_under_its_id(self, db_session: AsyncSession):
-        row = _row()
-        db_session.add(row)
-        await db_session.flush()
-
-        phase = self._phase(db_session)
-        assert await phase._archive_tombstone(_USER, row) is True
-
-        assert await _queued_points(db_session, row.id) == [row.id]
-
-
 class TestMergeDeletesTheLosersOwnPoint:
     @staticmethod
     def _phase(db_session: AsyncSession):

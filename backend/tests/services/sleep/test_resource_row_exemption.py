@@ -1,8 +1,9 @@
 """#2996: rows the resource indexer owns are out of reach of every automated pass.
 
 The source owns a resource-indexed row's lifecycle, whatever the context's
-settings: Sleep's archive, its dedup merge and its importance re-evaluation
-leave such a row alone, at the candidate fetch and again at the write.
+settings: Sleep consolidation, its dedup merge and its importance
+re-evaluation leave such a row alone, at the candidate fetch (and the merge
+again at the write).
 ``resource_owned_predicate`` is the one rule; the first class pins what it
 decides on each row shape, and where ``owns_resource_point`` (the uuid5 check
 the indexer's point addressing needs) answers differently. Rows are real
@@ -179,21 +180,6 @@ class TestConsolidationLeavesResourceRowsAlone:
         fetched = await self._phase(db_session)._fetch_working_memories(user, None, None)
 
         assert [m.id for m in fetched] == [plain.id]
-
-    async def test_the_archive_stamp_refuses_a_resource_row(self, db_session: AsyncSession):
-        """The row may become the indexer's between the fetch and the stamp (a
-        re-pointed ``remember(external_id)`` row): the UPDATE re-checks."""
-        user = _user()
-        resource = _indexer_row(user, scope="working")
-        db_session.add(resource)
-        await db_session.flush()
-
-        phase = self._phase(db_session)
-        assert await phase._archive_tombstone(user, resource) is False
-
-        await db_session.refresh(resource)
-        assert resource.deleted_at is None
-        assert phase.pending_point_deletes == []
 
 
 class TestDedupLeavesResourceRowsAlone:

@@ -9,7 +9,10 @@ Issue #101/#103: Coordinates all sleep maintenance phases in order:
   Phase 6: Report
 
 Each phase is independently recoverable — if phase N fails,
-phases N+1..6 still execute. Budget is shared across all phases.
+phases N+1..6 still execute. #3019: each phase has its own budget
+(``SleepBudgetPlan``): the full memory allowance, and a share of the run's
+LLM calls among the phases that call a model, so one phase cannot starve
+another; a phase that calls no model is never skipped for budget.
 """
 
 from __future__ import annotations
@@ -35,7 +38,13 @@ from services.sleep.measurement_retention import MeasurementRetentionPhase
 from services.sleep.merge_retention import MergeRetentionPhase
 from services.sleep.reindex import ReindexPhase
 from services.sleep.related_index import RelatedIndexPhase, index_enabled
-from services.sleep.reporter import LLMSpendTracker, PhaseResult, SleepBudget, SleepReporter
+from services.sleep.reporter import (
+    LLMSpendTracker,
+    PhaseResult,
+    SleepBudget,
+    SleepBudgetPlan,
+    SleepReporter,
+)
 from services.workspace_slot_gate import slot_suspended
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -60,6 +69,31 @@ EDGES_ONLY_PHASES = {"edge_discovery"}
 # A workspace whose plan suspends Sleep still runs these — only the paid LLM
 # passes pause.
 RETENTION_PHASES = {"merge_retention", "forget_retention", "measurement_retention"}
+
+
+def phase_calls_model(phase_name: str, config: NeuralMemoryConfig) -> bool:
+    """Whether ``phase_name`` calls a model in a run with ``config`` (#3019).
+
+    Edge discovery and dedup call one only with a Sleep LLM configured (they
+    have a rule path without it); importance re-evaluation always does;
+    consolidation only for its judge (its rule pass needs none). The
+    retention phases and the related index never do.
+    """
+    has_llm = config.sleep_llm_provider != ""
+    if phase_name == "edge_discovery":
+        return bool(config.sleep_edge_discovery_enabled) and has_llm
+    if phase_name == "dedup_merge":
+        return bool(config.sleep_dedup_enabled) and has_llm
+    if phase_name == "importance_reeval":
+        return bool(config.sleep_importance_reeval_enabled)
+    if phase_name == "consolidation":
+        return bool(config.sleep_consolidation_judge_enabled) and has_llm
+    return False
+
+
+# #3019: consolidation shares the run's LLM calls for its judge but is never
+# skipped at entry: its rule pass needs no model.
+_NEVER_GATED_LLM_PHASES = {"consolidation"}
 
 
 class SleepOrchestrator:
@@ -136,11 +170,6 @@ class SleepOrchestrator:
         # Get context's embedding model and Qdrant collection name
         embedding_model, collection_name = await self._get_context_embedding_info(context_id)
 
-        budget = SleepBudget(
-            max_llm_calls=config.sleep_max_llm_calls_per_run,
-            max_memories=config.sleep_max_memories_per_run,
-        )
-
         # Create report if caller did not supply one
         if report is None:
             report = await self.reporter.create_report(user_id, workspace_id, context_id)
@@ -168,6 +197,18 @@ class SleepOrchestrator:
             # updates updated_at. Later source edits still fail the fingerprint.
             phases.insert(1, ("related_index", lambda: RelatedIndexPhase(self.db)))
 
+        # #3019: one budget per phase, the LLM calls shared among the phases
+        # of this run that call a model.
+        plan = SleepBudgetPlan(
+            max_llm_calls=config.sleep_max_llm_calls_per_run,
+            max_memories=config.sleep_max_memories_per_run,
+            llm_phases=[
+                name
+                for name, _ in phases
+                if name in allowed_phases and phase_calls_model(name, config)
+            ],
+        )
+
         try:
             # Run phases 1-4 based on sleep_mode
             for phase_name, phase_factory in phases:
@@ -181,6 +222,7 @@ class SleepOrchestrator:
                     )
                     continue
 
+                budget = plan.for_phase(phase_name)
                 result = await self._run_phase(
                     phase_name,
                     phase_factory(),
@@ -190,7 +232,11 @@ class SleepOrchestrator:
                     context_id,
                     budget,
                     report_id=report.id,
+                    gate_on_budget=(
+                        plan.calls_model(phase_name) and phase_name not in _NEVER_GATED_LLM_PHASES
+                    ),
                 )
+                plan.settle(phase_name, budget)
                 phase_results.append(result)
                 changed_memory_ids.update(result.changed_memory_ids)
                 content_changed_memory_ids.update(
@@ -198,7 +244,6 @@ class SleepOrchestrator:
                     if result.content_changed_memory_ids is None
                     else result.content_changed_memory_ids
                 )
-                budget.consume(memories=result.memories_processed)
 
             # Phase 5: Reindex always runs if there are changes
             reindex = ReindexPhase(self.db, em, cn)
@@ -229,7 +274,7 @@ class SleepOrchestrator:
     async def delete_committed_points(self) -> None:
         """Delete the points this run queued; call only after the caller's commit.
 
-        #2565: the archive and merge steps queue each point in
+        #2565: the merge step queues each point in
         ``deferred_point_deletes`` beside the tombstone, inside the phase's
         savepoint (``pending_point_deletes``), instead of deleting it before
         the commit — a run that rolled back left live rows without their
@@ -256,16 +301,25 @@ class SleepOrchestrator:
         context_id: str | None,
         budget: SleepBudget,
         report_id: UUID,
+        *,
+        gate_on_budget: bool = False,
     ) -> PhaseResult:
-        """Run a single phase with error isolation and budget check."""
-        if budget.exhausted:
+        """Run a single phase with error isolation.
+
+        ``budget`` is the phase's own (#3019). ``gate_on_budget`` skips the
+        phase with ``skip_reason="budget_exhausted"`` when that budget is
+        already used up at entry; the orchestrator sets it only for a phase
+        that calls a model and cannot run without one, so the retention
+        phases, the related index and consolidation's rule pass always run.
+        """
+        if gate_on_budget and budget.exhausted:
             return PhaseResult(
                 phase_name=name,
                 skipped=True,
                 skip_reason="budget_exhausted",
             )
 
-        # #2060: the phase's share of the shared budget, for a phase that raises.
+        # #2060: the phase's spend, for a phase that raises.
         llm_calls_before = budget.llm_calls_used
         try:
             # #1229: every phase runs inside its own SAVEPOINT. A phase that

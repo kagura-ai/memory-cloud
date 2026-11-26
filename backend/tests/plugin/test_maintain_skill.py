@@ -471,8 +471,8 @@ def test_open_memos_are_listed_oldest_first_with_age_and_files(text) -> None:
     flat = _flat(text())
     assert OPEN_MEMOS_LIST in flat
     assert "`created_at`" in flat and "`file:` tags" in flat
-    # The memo stays out of archival while it is open, and a read counts as use.
-    assert re.search(r"never archives a memo[^.]*`status:open`", flat)
+    # The memo is never merged away while it is open, and a read counts as use.
+    assert re.search(r"never merges a memo[^.]*`status:open`", flat)
     assert "counts as adoption" in flat
 
 

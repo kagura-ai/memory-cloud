@@ -1,25 +1,13 @@
 """Data retention policies for Kagura Memory Cloud.
 
-Defines the Working memory retention period and the Working → Persistent
-promotion rule. Persistent memory is retained indefinitely; there is no
-per-plan retention here (plan tiers live in ``config.plan_tiers``).
+Defines the operation history retention and the Working → Persistent
+promotion rule. A memory, working or persistent, is kept until its owner or
+writer deletes it (#3021): no age-based clean-up of working memories exists.
+There is no per-plan retention here (plan tiers live in
+``config.plan_tiers``).
 
 Issue #2 - Phase 1: データ保持期間要件定義
 """
-
-from datetime import timedelta
-
-# ============================================================================
-# Working Memory Retention
-# ============================================================================
-
-# Working memory保持期間: 30日
-WORKING_MEMORY_RETENTION_DAYS = 30
-WORKING_MEMORY_RETENTION = timedelta(days=WORKING_MEMORY_RETENTION_DAYS)
-
-# 自動クリーンアップスケジュール
-CLEANUP_SCHEDULE = "daily"  # daily, hourly, weekly
-
 
 # ============================================================================
 # Workspace operation history retention (#2739)
@@ -98,25 +86,3 @@ def should_promote_to_persistent(
         return True
 
     return False
-
-
-# ============================================================================
-# Cleanup Settings
-# ============================================================================
-
-# Working memoryの自動削除設定
-AUTO_CLEANUP_ENABLED = True
-
-# クリーンアップ対象の条件
-CLEANUP_CRITERIA = {
-    "scope": "working",  # Working memoryのみ
-    "age_days": WORKING_MEMORY_RETENTION_DAYS,  # 30日以上
-    "not_promoted": True,  # Persistentに移行されていない
-}
-
-# LRU削除時の優先順位
-CLEANUP_PRIORITY = [
-    "importance",  # 重要度が低い
-    "last_used_at",  # 最終アクセスが古い
-    "created_at",  # 作成日が古い
-]

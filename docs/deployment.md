@@ -3078,8 +3078,7 @@ with `scope='persistent'` and `promoted_at` set (also on a working memory it
 takes over, such as a `remember(external_id)` memory it matches by document
 key), and every automated pass leaves
 such a memory to its source: Sleep's dedup merge, importance re-evaluation and
-consolidation archive, the legacy consolidation task (`SLEEP_ENABLED` off) and
-the working-memory cleanup. The rule follows the row, not the context's
+consolidation, and the legacy consolidation task (`SLEEP_ENABLED` off). The rule follows the row, not the context's
 settings, so a sync target that left feed management keeps its rows whatever
 its `sleep_mode`. [Concepts](concepts.md#sleep-maintenance) describes it.
 
@@ -3283,9 +3282,11 @@ migration before starting this version: `forget` writes to the table.
 take the same path: their points are queued with the delete, removed only
 after the commit, and deferred the same way
 ([#2480](https://github.com/kagura-ai/memory-cloud/issues/2480)). So do the
-memories Sleep archives or merges away and the ones the legacy consolidation
-task (`SLEEP_ENABLED=false`) deletes: a run whose commit fails leaves them
-with their points ([#2565](https://github.com/kagura-ai/memory-cloud/issues/2565)).
+memories Sleep merges away: a run whose commit fails leaves them with their
+points ([#2565](https://github.com/kagura-ai/memory-cloud/issues/2565)). Since
+[#3021](https://github.com/kagura-ai/memory-cloud/issues/3021) neither Sleep
+consolidation nor the legacy consolidation task (`SLEEP_ENABLED=false`)
+archives or deletes a memory.
 
 The resource indexer cleans up after itself as well. When a new version of a
 document replaces the old one, the indexer deletes the old row. Once the
@@ -3861,7 +3862,7 @@ would to a re-index.
 
 - Memories the purge already removed. After the retention window the context
   comes back empty — the dry run shows the count before you apply.
-- Memories forgotten before the deletion, and memories Sleep merged or archived.
+- Memories forgotten before the deletion, and memories Sleep merged (or archived, before v0.185.0).
   They were already deleted when the context was; the dry run lists them as
   "stay deleted".
 - The context's neural edges (deleted outright; Sleep rebuilds them where it runs),

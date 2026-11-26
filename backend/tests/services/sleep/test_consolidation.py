@@ -5,7 +5,7 @@ LLM borderline path, bridge node protection.
 """
 
 from datetime import timedelta
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -34,19 +34,18 @@ def consolidation_phase(mock_db, mock_llm):
     with (
         patch("services.sleep.consolidation.MemoryRepository"),
         patch("services.sleep.consolidation.GraphService"),
-        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
     ):
         phase = ConsolidationPhase(mock_db, mock_llm)
         phase.memory_repo = AsyncMock()
     return phase
 
 
-def _make_config(provider="openai", model="gpt-5-nano", exempt_tags=("status:open",)):
+def _make_config(provider="openai", model="gpt-5-nano", judge=True):
     config = MagicMock()
     config.sleep_llm_provider = provider
     config.sleep_llm_model = model
-    # #2584: the NeuralMemoryConfig default.
-    config.sleep_archive_exempt_tags = exempt_tags
+    # #3021: the judge switch (the NeuralMemoryConfig default is off).
+    config.sleep_consolidation_judge_enabled = judge
     return config
 
 
@@ -73,33 +72,20 @@ def _make_working_memory(
     return m
 
 
-async def _run_execute(
-    phase,
-    memories,
-    *,
-    cutoff=None,
-    reporter=None,
-    report_id=None,
-    soft_delete_rows=1,
-    exempt_tags=("status:open",),
-):
+async def _run_execute(phase, memories, *, reporter=None, report_id=None):
     """Drive ConsolidationPhase.execute() deterministically (LLM off, no graph).
 
-    Patches GraphService (no edges → neural_metrics None for all), the point
-    delete queue (#2565), and the #1049 grandfather cutoff. Returns the PhaseResult so tests can
-    assert absolute promote/delete rates via result.details + promote/delete calls.
+    Patches GraphService (no edges → neural_metrics None for all). Returns the
+    PhaseResult so tests can assert absolute promote rates via result.details +
+    promote calls; ``soft_delete`` is a mock so a test can assert it never runs.
     """
     phase._fetch_working_memories = AsyncMock(return_value=memories)
     phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
-    phase.memory_repo.soft_delete = AsyncMock(return_value=soft_delete_rows)
+    phase.memory_repo.soft_delete = AsyncMock(return_value=1)
     # LLM off → borderline memories stay put
-    config = _make_config(provider="", exempt_tags=exempt_tags)
+    config = _make_config(provider="")
     budget = SleepBudget()
-    with (
-        patch("services.sleep.consolidation.GraphService") as GS,
-        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
-        patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
-    ):
+    with patch("services.sleep.consolidation.GraphService") as GS:
         GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})
         return await phase.execute(
             config, "user-1", "ws-1", "ctx-1", budget, reporter=reporter, report_id=report_id
@@ -133,8 +119,7 @@ class TestAdoptionPromotionGate:
     @pytest.mark.asyncio
     async def test_rare_but_adopted_promotes_and_is_never_deleted(self, consolidation_phase):
         # Rare (zero surfacing) but ADOPTED — including an OLD one — must promote
-        # via the adoption gate and must NEVER be deleted (hard assert). cutoff is
-        # set, proving adoption (not the grandfather) is what spares them.
+        # via the adoption gate and must NEVER be deleted (hard assert).
         mems = [
             _make_working_memory(
                 reference_count=ADOPTION_PROMOTE_MIN, access_count=0, importance=0.1, age_days=5
@@ -149,7 +134,7 @@ class TestAdoptionPromotionGate:
                 reference_count=1, access_count=0, importance=0.1, age_days=40
             ),
         ]
-        result = await _run_execute(consolidation_phase, mems, cutoff=utcnow())
+        result = await _run_execute(consolidation_phase, mems)
 
         assert result.details["rule_promoted"] == len(mems)
         assert result.details["rule_deleted"] == 0
@@ -168,7 +153,7 @@ class TestAdoptionPromotionGate:
             _make_working_memory(reference_count=0, access_count=10, importance=0.3, age_days=5),
             _make_working_memory(reference_count=0, access_count=50, importance=0.2, age_days=10),
         ]
-        result = await _run_execute(consolidation_phase, mems, cutoff=None)
+        result = await _run_execute(consolidation_phase, mems)
 
         assert result.details["rule_promoted"] == 0
         assert result.details["rule_deleted"] == 0  # young → not deleted either
@@ -183,7 +168,7 @@ class TestPromotionBoundary:
         mem = _make_working_memory(
             reference_count=ADOPTION_PROMOTE_MIN, access_count=0, importance=0.1, age_days=5
         )
-        result = await _run_execute(consolidation_phase, [mem], cutoff=None)
+        result = await _run_execute(consolidation_phase, [mem])
         assert result.details["rule_promoted"] == 1
 
     @pytest.mark.asyncio
@@ -193,99 +178,54 @@ class TestPromotionBoundary:
         mem = _make_working_memory(
             reference_count=ADOPTION_PROMOTE_MIN - 1, access_count=0, importance=0.1, age_days=5
         )
-        result = await _run_execute(consolidation_phase, [mem], cutoff=None)
+        result = await _run_execute(consolidation_phase, [mem])
         assert result.details["rule_promoted"] == 0
 
 
-class TestAdoptionArchivalGrandfather:
-    """#1049 RELEASE BLOCKER: the adoption==0 archival path must NOT delete
-    pre-migration (pre-cutoff) memories — their adoption can't be backfilled."""
+class TestNothingIsArchived:
+    """#3021: a memory is kept until its owner or writer deletes it. An old,
+    never-adopted, isolated working memory — what the archive rule used to
+    take — is borderline now, and the report keys stay at 0."""
 
     @pytest.mark.asyncio
-    async def test_no_deletion_when_cutoff_unset(self, consolidation_phase):
-        # adoption==0, old, isolated — but cutoff unset (default) → NEVER deleted.
-        mem = _make_working_memory(reference_count=0, access_count=0, importance=0.1, age_days=60)
-        result = await _run_execute(consolidation_phase, [mem], cutoff=None)
-        assert result.details["rule_deleted"] == 0
-        consolidation_phase.memory_repo.soft_delete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_pre_cutoff_memory_grandfathered(self, consolidation_phase):
-        cutoff = utcnow() - timedelta(days=30)  # deploy date 30 days ago
-        pre = _make_working_memory(  # created 60 days ago → BEFORE cutoff
-            reference_count=0,
-            access_count=0,
-            importance=0.1,
-            created_at=utcnow() - timedelta(days=60),
-        )
-        result = await _run_execute(consolidation_phase, [pre], cutoff=cutoff)
-        assert result.details["rule_deleted"] == 0
-        consolidation_phase.memory_repo.soft_delete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_post_cutoff_unadopted_old_isolated_is_deleted(self, consolidation_phase):
-        cutoff = utcnow() - timedelta(days=60)  # deploy date 60 days ago
-        post = _make_working_memory(  # created 40 days ago → AFTER cutoff, age>=30
-            reference_count=0,
-            access_count=0,
-            importance=0.1,
-            created_at=utcnow() - timedelta(days=40),
-        )
-        result = await _run_execute(consolidation_phase, [post], cutoff=cutoff)
-        assert result.details["rule_deleted"] == 1
-        # #1520: "archive" is a tombstone, not a row delete — rollback_sleep_run
-        # can only restore what is still there.
-        consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
-            post.id, deleted_by="sleep_consolidation", only_if=ANY
-        )
-
-    @pytest.mark.asyncio
-    async def test_archive_action_records_tombstone_mode(self, consolidation_phase):
-        """#1520 review: the action must say HOW it archived, so rollback can tell a
-        legacy hard delete (no mode) from a purged tombstone without a version literal."""
-        post = _make_working_memory(
-            reference_count=0,
-            access_count=0,
-            importance=0.1,
-            created_at=utcnow() - timedelta(days=40),
+    @pytest.mark.parametrize("age_days", [30, 40, 400])
+    async def test_old_unadopted_isolated_memory_is_kept(self, consolidation_phase, age_days):
+        mem = _make_working_memory(
+            reference_count=0, access_count=0, importance=0.1, age_days=age_days
         )
         reporter = MagicMock()
         reporter.add_action = AsyncMock()
-        await _run_execute(
-            consolidation_phase,
-            [post],
-            cutoff=utcnow() - timedelta(days=60),
-            reporter=reporter,
-            report_id=uuid4(),
-        )
-        kwargs = reporter.add_action.await_args.kwargs
-        assert kwargs["action_type"] == "archive"
-        assert kwargs["details"]["mode"] == "tombstone"
 
-    @pytest.mark.asyncio
-    async def test_zero_row_stamp_is_not_an_archive(self, consolidation_phase):
-        """#1520 review: the candidate fetch is not locked, so the row can be
-        forgotten (or archived by an overlapping run) in between. A 0-row stamp
-        must not be counted or recorded — otherwise rollback would later
-        un-tombstone a deletion this run never made."""
-        post = _make_working_memory(
-            reference_count=0,
-            access_count=0,
-            importance=0.1,
-            created_at=utcnow() - timedelta(days=40),
-        )
-        reporter = MagicMock()
-        reporter.add_action = AsyncMock()
         result = await _run_execute(
-            consolidation_phase,
-            [post],
-            cutoff=utcnow() - timedelta(days=60),
-            reporter=reporter,
-            report_id=uuid4(),
-            soft_delete_rows=0,  # the row was forgotten between fetch and stamp
+            consolidation_phase, [mem], reporter=reporter, report_id=uuid4()
         )
-        assert result.details["rule_deleted"] == 0
+
+        consolidation_phase.memory_repo.soft_delete.assert_not_called()
+        consolidation_phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
         reporter.add_action.assert_not_awaited()
+        assert result.details["borderline"] == 1
+        assert result.details["rule_deleted"] == 0
+        assert result.details["llm_archived"] == 0
+        assert result.details["llm_archive_guarded"] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_cutoff_setting_no_longer_exists(self, consolidation_phase, monkeypatch):
+        """``CONSOLIDATION_ADOPTION_DELETE_CUTOFF`` set by an old deployment is
+        ignored: nothing reads it."""
+        monkeypatch.setenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF", "2000-01-01T00:00:00")
+        mem = _make_working_memory(reference_count=0, importance=0.1, age_days=60)
+
+        result = await _run_execute(consolidation_phase, [mem])
+
+        consolidation_phase.memory_repo.soft_delete.assert_not_called()
+        assert result.details["rule_deleted"] == 0
+
+    def test_the_phase_has_no_archive_path(self):
+        import services.sleep.consolidation as consolidation
+
+        for name in ("_adoption_delete_cutoff", "_archival_eligible", "ARCHIVE_MIN_AGE_DAYS"):
+            assert not hasattr(consolidation, name), name
+        assert not hasattr(ConsolidationPhase, "_archive_tombstone")
 
 
 class TestLLMJudgeParsing:
@@ -325,8 +265,7 @@ class TestLLMJudgeParsing:
     @pytest.mark.asyncio
     async def test_archive_action_dropped_at_parse(self, consolidation_phase):
         """#1233: 'archive' is no longer offered to the judge — a response
-        that uses it anyway is dropped at parse. The execute()-side
-        ``_archival_eligible`` guard stays as the defensive backstop."""
+        that uses it anyway is dropped at parse (#3021: nothing is archived)."""
         mem = _make_working_memory()
         decisions = await self._parse(
             consolidation_phase,
@@ -357,9 +296,8 @@ class TestLLMJudgeParsing:
 
 
 class TestConsolidationPromptContract:
-    """#1233: the judge prompt no longer offers the dead 'archive' action —
-    rule-path archival is deterministic and the judge's archive picks were
-    either redundant or guarded out, wasting tokens and probability mass."""
+    """#1233: the judge prompt does not offer an 'archive' action (#3021:
+    consolidation archives nothing)."""
 
     def test_prompt_no_longer_offers_archive(self):
         from services.sleep.prompts import (
@@ -442,9 +380,6 @@ class TestNeuralMetricsUnderIsolation:
             patch(
                 "services.sleep.consolidation.GraphService", return_value=graph
             ) as mock_graph_service,
-            patch(
-                "services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock
-            ) as queue,
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
             phase.memory_repo = AsyncMock()
@@ -454,7 +389,6 @@ class TestNeuralMetricsUnderIsolation:
 
         _assert_graph_service_isolation(mock_graph_service)
         phase.memory_repo.soft_delete.assert_not_called()
-        queue.assert_not_called()
         phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
         assert result.details["rule_deleted"] == 0
 
@@ -478,7 +412,6 @@ class TestNeuralMetricsUnderIsolation:
             patch(
                 "services.sleep.consolidation.GraphService", return_value=graph
             ) as mock_graph_service,
-            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
             phase.memory_repo = AsyncMock()
@@ -513,7 +446,6 @@ class TestNeuralMetricsUnderIsolation:
             patch(
                 "services.sleep.consolidation.GraphService", return_value=graph
             ) as mock_graph_service,
-            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
             phase.memory_repo = AsyncMock()
@@ -525,198 +457,106 @@ class TestNeuralMetricsUnderIsolation:
         assert graph.get_node_metrics.await_count == 1
 
 
-class TestLLMArchivalEligibilityGuard:
-    """#1229: the LLM may only archive memories the deterministic rule path
-    COULD have archived — eligibility (min-age, zero adoption, the #1049
-    grandfather cutoff) is not the judge's call. Without the guard, a memory
-    written minutes earlier could be archived by the same night's sleep run
-    (the eval's v2-current docs were eaten exactly this way), and the #1049
-    "no archival when the cutoff is unset" RELEASE BLOCKER guarantee was
-    silently bypassed by the LLM path.
-    """
+class TestConsolidationJudgeSwitch:
+    """#3021: the LLM judge runs only when ``sleep_consolidation_judge_enabled``
+    is on and a Sleep LLM is configured; rule promotion runs either way. A
+    judge verdict other than promote leaves the memory working."""
 
     @staticmethod
-    async def _run_llm_archive(phase, memory, *, cutoff, exempt_tags=("status:open",)):
-        phase._fetch_working_memories = AsyncMock(return_value=[memory])
-        phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
+    async def _run(phase, memories, config, decisions=None):
+        phase._fetch_working_memories = AsyncMock(return_value=memories)
+        phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: ids)
         phase.memory_repo.soft_delete = AsyncMock(return_value=1)
-        phase._llm_judge_batch = AsyncMock(return_value={memory.id: "archive"})
-        config = _make_config(exempt_tags=exempt_tags)  # LLM on
-        budget = SleepBudget()
-        with (
-            patch("services.sleep.consolidation.GraphService") as GS,
-            patch(
-                "services.sleep.consolidation.queue_point_deletes",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "services.sleep.consolidation._adoption_delete_cutoff",
-                return_value=cutoff,
-            ),
-        ):
+        phase._llm_judge_batch = AsyncMock(return_value=decisions or {})
+        with patch("services.sleep.consolidation.GraphService") as GS:
             GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})
-            return await phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
+            return await phase.execute(config, "user-1", "ws-1", "ctx-1", SleepBudget())
 
     @pytest.mark.asyncio
-    async def test_llm_cannot_archive_fresh_memory(self, consolidation_phase):
-        """A memory written today is not archival-eligible, whatever the
-        LLM says — min-age is deterministic."""
-        mem = _make_working_memory(age_days=0)
-        cutoff = utcnow() - timedelta(days=365)
+    async def test_judge_off_runs_only_the_rule_pass(self, consolidation_phase):
+        adopted = _make_working_memory(reference_count=ADOPTION_PROMOTE_MIN, importance=0.1)
+        borderline = _make_working_memory(reference_count=0, importance=0.1, age_days=40)
 
-        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
-
-        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
-        assert result.details["llm_archived"] == 0
-        assert result.details["llm_archive_guarded"] == 1
-
-    @pytest.mark.asyncio
-    async def test_llm_cannot_archive_when_cutoff_unset(self, consolidation_phase):
-        """#1049 RELEASE BLOCKER: cutoff unset → NO archival at all. The LLM
-        path must honor it like the rule path does."""
-        mem = _make_working_memory(age_days=40)
-
-        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=None)
-
-        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
-        assert result.details["llm_archived"] == 0
-        assert result.details["llm_archive_guarded"] == 1
-
-    @pytest.mark.asyncio
-    async def test_llm_cannot_archive_pre_cutoff_memory(self, consolidation_phase):
-        """Grandfathered rows (created before the cutoff) stay un-archivable."""
-        mem = _make_working_memory(age_days=40)
-        cutoff = utcnow() - timedelta(days=10)  # memory pre-dates the cutoff
-
-        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
-
-        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
-        assert result.details["llm_archive_guarded"] == 1
-
-    @pytest.mark.asyncio
-    async def test_eligible_memory_is_still_archived_by_the_rule_path(self, consolidation_phase):
-        """The guard must not block legitimate archival end-to-end: an old,
-        unadopted, post-cutoff, isolated memory is deleted — by the
-        deterministic RULE path, before the LLM is ever consulted. With the
-        eligibility guard in place, the LLM archive verdict only survives
-        for the residual case where isolation changed between the rule pass
-        and the LLM re-check (covered in test_consolidation_coverage)."""
-        mem = _make_working_memory(age_days=40)
-        cutoff = utcnow() - timedelta(days=365)
-
-        result = await self._run_llm_archive(consolidation_phase, mem, cutoff=cutoff)
-
-        consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation", only_if=ANY
+        result = await self._run(
+            consolidation_phase, [adopted, borderline], _make_config(judge=False)
         )
-        assert result.details["rule_deleted"] == 1
+
+        consolidation_phase._llm_judge_batch.assert_not_awaited()
+        consolidation_phase.memory_repo.bulk_promote_to_persistent.assert_awaited_once_with(
+            [adopted.id]
+        )
+        assert result.details["rule_promoted"] == 1
+        assert result.details["borderline"] == 1
+        assert result.llm_calls_used == 0
+
+    @pytest.mark.asyncio
+    async def test_judge_on_without_a_provider_does_not_run(self, consolidation_phase):
+        mem = _make_working_memory(reference_count=0, importance=0.1)
+
+        await self._run(consolidation_phase, [mem], _make_config(provider="", judge=True))
+
+        consolidation_phase._llm_judge_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_judge_on_promotes_its_picks(self, consolidation_phase):
+        mem = _make_working_memory(reference_count=0, importance=0.1)
+
+        result = await self._run(
+            consolidation_phase, [mem], _make_config(judge=True), {mem.id: "promote"}
+        )
+
+        consolidation_phase._llm_judge_batch.assert_awaited_once()
+        assert result.details["llm_promoted"] == 1
+
+    @pytest.mark.asyncio
+    async def test_an_archive_verdict_changes_nothing(self, consolidation_phase):
+        """Should a decision source ever answer "archive" again, the memory
+        stays as it is and nothing is counted."""
+        mem = _make_working_memory(reference_count=0, importance=0.1, age_days=400)
+
+        result = await self._run(
+            consolidation_phase, [mem], _make_config(judge=True), {mem.id: "archive"}
+        )
+
+        consolidation_phase.memory_repo.soft_delete.assert_not_called()
+        consolidation_phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
+        assert result.details["llm_promoted"] == 0
+        assert result.details["llm_archived"] == 0
         assert result.details["llm_archive_guarded"] == 0
 
+    @pytest.mark.asyncio
+    async def test_the_config_default_keeps_the_judge_off(self, consolidation_phase):
+        from neural.config import NeuralMemoryConfig
 
-class TestArchiveExemptTags:
-    """#2584: a memory carrying one of ``sleep_archive_exempt_tags`` (default
-    ``status:open``) is never archived — not by the rule path, not by an LLM
-    archive verdict. An open review memo waits for the change that touches its
-    files, often longer than the 30-day floor and with no ``reference()`` call.
-    The tag is the only state: removing it returns the memory to the normal
-    lifecycle.
-    """
+        mem = _make_working_memory(reference_count=0, importance=0.1)
+        config = NeuralMemoryConfig(sleep_llm_provider="openai", sleep_llm_model="m")
+
+        await self._run(consolidation_phase, [mem], config)
+
+        consolidation_phase._llm_judge_batch.assert_not_awaited()
+
+
+class TestOpenMemos:
+    """#2584 / #3021: an open review memo (``status:open``) is kept like every
+    other memory, and adoption still promotes it."""
 
     OPEN = ["tech-debt", "status:open", "source:review", "area:sleep"]
-    DONE = ["tech-debt", "status:done", "source:review", "area:sleep"]
-
-    @staticmethod
-    def _old_unadopted(tags):
-        """Archival-eligible on every other gate: 40 days old, never adopted,
-        created after a cutoff set 60 days ago, isolated (no graph)."""
-        return _make_working_memory(
-            reference_count=0,
-            access_count=0,
-            importance=0.1,
-            created_at=utcnow() - timedelta(days=40),
-            tags=tags,
-        )
 
     @pytest.mark.asyncio
-    async def test_open_memo_survives_the_rule_path(self, consolidation_phase):
-        memo = self._old_unadopted(self.OPEN)
+    async def test_open_memo_is_kept(self, consolidation_phase):
+        memo = _make_working_memory(reference_count=0, importance=0.1, age_days=40, tags=self.OPEN)
 
-        result = await _run_execute(
-            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60)
-        )
+        result = await _run_execute(consolidation_phase, [memo])
 
-        assert result.details["rule_deleted"] == 0
         consolidation_phase.memory_repo.soft_delete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_removing_the_tag_makes_it_eligible_again(self, consolidation_phase):
-        memo = self._old_unadopted(self.DONE)
-
-        result = await _run_execute(
-            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60)
-        )
-
-        assert result.details["rule_deleted"] == 1
-        consolidation_phase.memory_repo.soft_delete.assert_awaited_once_with(
-            memo.id, deleted_by="sleep_consolidation", only_if=ANY
-        )
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("tag", ["Status:Open", "status:opened", "status: open"])
-    async def test_the_match_is_exact(self, consolidation_phase, tag):
-        memo = self._old_unadopted(["tech-debt", tag])
-
-        result = await _run_execute(
-            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60)
-        )
-
-        assert result.details["rule_deleted"] == 1
-
-    @pytest.mark.asyncio
-    async def test_an_empty_setting_turns_the_exemption_off(self, consolidation_phase):
-        memo = self._old_unadopted(self.OPEN)
-
-        result = await _run_execute(
-            consolidation_phase, [memo], cutoff=utcnow() - timedelta(days=60), exempt_tags=()
-        )
-
-        assert result.details["rule_deleted"] == 1
-
-    @pytest.mark.asyncio
-    async def test_the_setting_can_widen_the_set(self, consolidation_phase):
-        memo = self._old_unadopted(["status:blocked"])
-
-        result = await _run_execute(
-            consolidation_phase,
-            [memo],
-            cutoff=utcnow() - timedelta(days=60),
-            exempt_tags=("status:open", "status:blocked"),
-        )
-
-        assert result.details["rule_deleted"] == 0
-
-    @pytest.mark.asyncio
-    async def test_open_memo_survives_an_llm_archive_verdict(self, consolidation_phase):
-        """The rule path defers the memo to the judge; an archive verdict for it
-        is refused by the shared eligibility predicate."""
-        memo = self._old_unadopted(self.OPEN)
-
-        result = await TestLLMArchivalEligibilityGuard._run_llm_archive(
-            consolidation_phase, memo, cutoff=utcnow() - timedelta(days=60)
-        )
-
-        consolidation_phase.memory_repo.soft_delete.assert_not_awaited()
-        assert result.details["rule_deleted"] == 0
-        assert result.details["llm_archived"] == 0
-        assert result.details["llm_archive_guarded"] == 1
+        assert result.details["borderline"] == 1
 
     @pytest.mark.asyncio
     async def test_open_memo_can_still_be_promoted(self, consolidation_phase):
-        """The exemption is from archival only: adoption still promotes it."""
         memo = _make_working_memory(
             reference_count=ADOPTION_PROMOTE_MIN, importance=0.1, age_days=40, tags=self.OPEN
         )
 
-        result = await _run_execute(consolidation_phase, [memo], cutoff=utcnow())
+        result = await _run_execute(consolidation_phase, [memo])
 
         assert result.details["rule_promoted"] == 1
