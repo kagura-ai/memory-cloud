@@ -20,7 +20,6 @@ from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
 from models.memory import (
     SOURCE_TYPE_CONNECTOR,
     Memory,
-    not_resource_owned_predicate,
     pinned_predicate,
     resource_owned_predicate,
     tool_triggered_predicate,
@@ -332,9 +331,10 @@ class MemoryRepository(BaseRepository[Memory]):
     ) -> int:
         """Tombstone a memory (``deleted_at`` + ``deleted_by``) without deleting the row.
 
-        #1520: consolidation's archive branch writes this, so an archive lands
-        in the same restorable lane as a merge loser instead of being a hard
-        ``DELETE`` that ``rollback_sleep_run`` cannot undo.
+        #1520: consolidation's archive branch wrote this (until #3021, which
+        removed archiving), so an archive landed in the same restorable lane as
+        a merge loser instead of being a hard ``DELETE`` that
+        ``rollback_sleep_run`` cannot undo.
 
         ``only_if`` (#1523) is an extra WHERE predicate evaluated at stamp time,
         so a caller whose candidate fetch was not locked can refuse a row whose
@@ -825,31 +825,3 @@ class MemoryRepository(BaseRepository[Memory]):
             await self.db.execute(select(func.count(Memory.id)).where(*conditions))
         ).scalar_one()
         return rows[:limit], total
-
-    async def get_old_working_memories(self, user_id: str, age_days: int = 30) -> list[Memory]:
-        """Get old working memories for cleanup.
-
-        Args:
-            user_id: User ID
-            age_days: Minimum age in days (default: 30)
-
-        Returns:
-            List of old working memories
-        """
-        from datetime import timedelta
-
-        cutoff_date = utcnow() - timedelta(days=age_days)
-
-        result = await self.db.execute(
-            select(Memory)
-            .where(
-                Memory.user_id == user_id,
-                Memory.scope == "working",
-                Memory.created_at < cutoff_date,
-                # #2996: the source owns a resource-indexed row's lifecycle.
-                not_resource_owned_predicate(),
-            )
-            .order_by(Memory.importance, Memory.last_used_at)
-        )
-
-        return list(result.scalars().all())

@@ -1122,11 +1122,10 @@ async def test_legacy_ordinary_backlog_is_not_silently_acknowledged_or_enrolled(
         assert await db.get(SyncManagedTarget, feeds.iid) is None
 
 
-@pytest.mark.parametrize("entrypoint", ["service", "legacy_task"])
-async def test_working_retention_skips_managed_data_and_cleans_ordinary_context(
-    managed, monkeypatch, entrypoint
-):
-    from services.memory_service import MemoryService
+async def test_legacy_task_keeps_managed_data_and_ordinary_rows(managed, monkeypatch):
+    """#3021: the legacy consolidation task deletes nothing — neither the
+    managed source row nor an old never-returned row of an ordinary context."""
+    from tasks import neural_tasks
     from utils.datetime import utcnow
 
     await committed(managed, [product()])
@@ -1160,41 +1159,27 @@ async def test_working_retention_skips_managed_data_and_cleans_ordinary_context(
         )
         await MemoryRepository(db).create(ordinary)
         ordinary_id = ordinary.id
-        if entrypoint == "legacy_task":
-            db.add(GraphMemory(user_id=managed.store.users["owner"], graph_data={}))
+        db.add(GraphMemory(user_id=managed.store.users["owner"], graph_data={}))
         await db.commit()
-        if entrypoint == "service":
-            service_instance = MemoryService(db)
-            service_instance._queue_forgotten_points = AsyncMock(return_value=[])
-            service_instance.delete_forgotten_points = AsyncMock()
-            assert (
-                await service_instance.cleanup_old_working_memories(managed.store.users["owner"])
-                == 1
-            )
-        else:
-            from tasks import neural_tasks
 
-            async def session_source():
-                yield db
+        async def session_source():
+            yield db
 
-            monkeypatch.setattr(neural_tasks, "get_db", session_source)
-            monkeypatch.setattr(
-                MemoryService, "_queue_forgotten_points", AsyncMock(return_value=[])
+        monkeypatch.setattr(neural_tasks, "get_db", session_source)
+        monkeypatch.setenv("SLEEP_ENABLED", "false")
+        try:
+            result = await neural_tasks.consolidation_task()
+            assert result["deleted"] == 0, result
+        finally:
+            await db.rollback()
+            await db.execute(
+                delete(GraphMemory).where(GraphMemory.user_id == managed.store.users["owner"])
             )
-            monkeypatch.setattr(MemoryService, "delete_forgotten_points", AsyncMock())
-            monkeypatch.setenv("SLEEP_ENABLED", "false")
-            try:
-                result = await neural_tasks.consolidation_task()
-                assert result["deleted"] >= 1, result
-            finally:
-                await db.rollback()
-                await db.execute(
-                    delete(GraphMemory).where(GraphMemory.user_id == managed.store.users["owner"])
-                )
-                await db.commit()
+            await db.commit()
     async with managed.factory() as db:
         assert await db.get(Memory, source_id) is not None
-        assert await db.get(Memory, ordinary_id) is None
+        kept = await db.get(Memory, ordinary_id)
+        assert kept is not None and kept.deleted_at is None
 
 
 async def test_indexed_rows_are_persistent_and_f62_keeps_the_canonical_index_complete(

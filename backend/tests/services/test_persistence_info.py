@@ -4,10 +4,10 @@ Three things are tested, and the split matters:
 
 1. The *contract* — what persistence_info() says for each scope, and for each
    of the three consolidation configurations (sleep / legacy / neither).
-2. The *truth of the numbers* — the advertised archival floor is checked against
-   the code that actually enforces it (``_archival_eligible`` for the sleep
-   path, the ``age_days`` comparison for the legacy path), so the response
-   cannot drift into promising a floor nobody enforces.
+2. The *truth of the rule* — #3021: a memory is kept until deleted. The
+   archive-age field is always null, and the two consolidation passes are
+   checked for having no delete left, so the response cannot drift into
+   promising a keep that a pass breaks.
 3. The *limits of the claim* — a first review of this change caught the response
    asserting "nothing you write today can be dropped", which is false: the
    near-duplicate merge pass soft-deletes at any age. The scoping is now part of
@@ -20,7 +20,6 @@ field fails here rather than shipping an invisible feature.
 
 import ast
 import contextlib
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,7 +33,6 @@ from services.persistence import (
     LEGACY_CONSOLIDATION,
     SLEEP_CONSOLIDATION,
     active_consolidation_pass,
-    consolidation_archive_min_age_days,
     persistence_info,
 )
 
@@ -75,7 +73,6 @@ def test_default_config_reports_the_legacy_pass(legacy_pass):
 def test_sleep_without_neural_memory_reports_no_pass(no_pass):
     """The configuration where NEITHER pass runs must not advertise one."""
     assert active_consolidation_pass() is None
-    assert consolidation_archive_min_age_days() is None
 
 
 def test_env_is_read_per_call_not_frozen_at_import(monkeypatch):
@@ -99,7 +96,8 @@ def test_working_scope_is_reported_as_already_committed(sleep_pass):
     assert info.scope == "working"
     assert info.committed is True
     assert info.promotes_via == SLEEP_CONSOLIDATION
-    assert info.consolidation_archive_min_age_days == consolidation_archive_min_age_days()
+    # #3021: no pass archives, so there is no age floor to advertise.
+    assert info.consolidation_archive_min_age_days is None
 
 
 def test_legacy_config_advertises_the_legacy_pass_and_its_criteria(legacy_pass):
@@ -155,8 +153,8 @@ def test_unpinned_persistent_still_carries_the_merge_caveat(sleep_pass):
 
 def test_pinned_working_wording_is_coherent(sleep_pass):
     """A pinned row CAN be scope='working' (rollback_sleep_run's _undo_promote demotes
-    without touching delivery_mode). The floor sentence and the pinned sentence must
-    not contradict each other: no "only forget() removes it" next to an archival floor."""
+    without touching delivery_mode). The pinned sentence must not claim that only
+    forget() removes it (deleting the context does too)."""
     info = persistence_info("working", pinned=True)
     assert info is not None
     assert "stays pinned" in info.detail
@@ -172,8 +170,8 @@ def test_pinned_no_pass_still_mentions_exemption(no_pass):
 
 @pytest.mark.parametrize("scope", ["persistent", "working"])
 def test_guardrail_write_reports_the_maintenance_exemption(sleep_pass, scope):
-    """A tool guardrail (details.tool_trigger) is excluded from dedup,
-    consolidation archive and importance re-evaluation like a pinned row, so the
+    """A tool guardrail (details.tool_trigger) is excluded from dedup and
+    importance re-evaluation like a pinned row, so the
     generic "merge still applies" caveat would be false for it."""
     info = persistence_info(scope, tool_triggered=True)
     assert info is not None
@@ -213,65 +211,53 @@ def test_unknown_scope_is_omitted_rather_than_raised():
 
 
 # ---------------------------------------------------------------------------
-# The advertised number is the enforced number
+# The advertised rule is the enforced rule (#3021: kept until deleted)
 # ---------------------------------------------------------------------------
 
 
-def test_advertised_floor_matches_the_sleep_path_archival_gate(sleep_pass):
-    """One day under the advertised floor must be archival-INELIGIBLE.
-
-    This is the anti-drift test: it exercises the predicate consolidation
-    actually calls, so retuning ARCHIVE_MIN_AGE_DAYS without updating the
-    response (or vice versa) fails here.
-    """
-    from services.sleep.consolidation import _archival_eligible
-
-    days = consolidation_archive_min_age_days()
-    assert days is not None
-    memory = MagicMock(reference_count=0, created_at=datetime(2020, 1, 1))  # noqa: DTZ001
-    cutoff = datetime(2019, 1, 1)  # noqa: DTZ001 — operator opt-in, already elapsed
-
-    assert _archival_eligible(memory, days - 1, cutoff, exempt_tags=frozenset()) is False, (
-        "response promises nothing is archived before this age, but the sleep path would archive it"
-    )
-    assert _archival_eligible(memory, days, cutoff, exempt_tags=frozenset()) is True, (
-        "advertised floor is more conservative than the enforced one — it is stale"
-    )
+@pytest.mark.parametrize("fixture", ["sleep_pass", "legacy_pass", "no_pass"])
+@pytest.mark.parametrize("scope", ["working", "persistent"])
+@pytest.mark.parametrize("pinned", [False, True])
+def test_every_block_says_kept_until_deleted_and_has_no_floor(request, fixture, scope, pinned):
+    request.getfixturevalue(fixture)
+    info = persistence_info(scope, pinned=pinned)
+    assert info is not None
+    assert info.consolidation_archive_min_age_days is None
+    assert "kept until deleted" in info.detail
+    assert "archive" not in info.detail
+    assert "floor" not in info.detail
 
 
-def test_legacy_floor_matches_the_legacy_constant(legacy_pass):
-    from tasks.neural_tasks import LEGACY_ARCHIVE_MIN_AGE_DAYS
+def _calls_named(fn: ast.AST, names: set[str]) -> set[str]:
+    """The attribute calls in ``fn`` whose method name is in ``names``."""
+    return {
+        node.func.attr
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in names
+    }
 
-    assert consolidation_archive_min_age_days() == LEGACY_ARCHIVE_MIN_AGE_DAYS
+
+_DELETES = {"delete", "soft_delete", "_queue_forgotten_points", "delete_forgotten_points"}
 
 
-def test_legacy_consolidation_compares_against_the_named_constant():
-    """The legacy constant must be load-bearing, not decorative.
-
-    consolidation_archive_min_age_days() derives from LEGACY_ARCHIVE_MIN_AGE_DAYS.
-    If consolidation_task went back to comparing a bare literal, that derivation
-    would report a number nothing reads — so assert the comparison itself.
-    """
+def test_the_legacy_consolidation_task_deletes_nothing():
+    """The rule the legacy pass's reply states: it promotes, it never deletes."""
     import tasks.neural_tasks as neural_tasks
 
-    tree = ast.parse(Path(neural_tasks.__file__).read_text(encoding="utf-8"))
-    task = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "consolidation_task"
+    assert _calls_named(_async_fn(neural_tasks, "consolidation_task"), _DELETES) == set()
+
+
+def test_sleep_consolidation_deletes_nothing():
+    """The same for the Sleep pass: no statement in the phase removes a row."""
+    import services.sleep.consolidation as consolidation
+
+    tree = ast.parse(Path(consolidation.__file__).read_text(encoding="utf-8"))
+    assert _calls_named(tree, _DELETES | {"queue_point_deletes"}) == set()
+    assert "DELETED_BY_SLEEP_ARCHIVE" not in Path(consolidation.__file__).read_text(
+        encoding="utf-8"
     )
-    guarded = [
-        cmp
-        for cmp in ast.walk(task)
-        if isinstance(cmp, ast.Compare)
-        and isinstance(cmp.left, ast.Name)
-        and cmp.left.id == "age_days"
-        and any(
-            isinstance(c, ast.Name) and c.id == "LEGACY_ARCHIVE_MIN_AGE_DAYS"
-            for c in cmp.comparators
-        )
-    ]
-    assert guarded, "consolidation_task no longer gates archival on LEGACY_ARCHIVE_MIN_AGE_DAYS"
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +266,7 @@ def test_legacy_consolidation_compares_against_the_named_constant():
 
 
 def test_dedup_merge_still_has_no_age_or_adoption_gate():
-    """Pin WHY the age field is named for consolidation only.
+    """Pin WHY the detail names the merge next to forget().
 
     ``DedupMergePhase._fetch_active_memories`` selects on identity columns,
     ``deleted_at`` and the two lane exemptions (#1519 pinned, #1524 time) alone
@@ -325,9 +311,8 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         "adoption gate was added, the persistence wording can be widened"
     )
     # #1519/#1523: the pinned exemption is the shared ``not_pinned_predicate()``
-    # call, not an inline column — an exemption, not an age/adoption gate; the
-    # working-scope floor wording stays as is and persistence_info(pinned=True)
-    # carries the widened promise for pinned writes.
+    # call, not an inline column — an exemption, not an age/adoption gate;
+    # persistence_info(pinned=True) carries the widened promise for pinned writes.
     assert _calls_not_pinned_predicate(fn)
 
 
@@ -371,7 +356,6 @@ def _async_fn(module, name: str) -> ast.AsyncFunctionDef:
         ("services.sleep.consolidation", "_fetch_working_memories"),
         ("services.sleep.importance_reeval", "_fetch_candidates"),
         # writes that follow an unlocked fetch (a pin can land in between)
-        ("services.sleep.consolidation", "_archive_tombstone"),
         ("services.sleep.importance_reeval", "execute"),
         # rollback writes
         ("mcp_server.tools.sleep", "_undo_promote"),
@@ -380,7 +364,7 @@ def _async_fn(module, name: str) -> ast.AsyncFunctionDef:
 )
 def test_every_automated_deleter_uses_the_shared_pinned_exemption(module_name, fn_name):
     """#1523: ``persistence_info(pinned=True)`` promises that Sleep maintenance does
-    not select, archive, re-score or demote a pinned row. That promise is only as
+    not select, merge, re-score or demote a pinned row. That promise is only as
     wide as the set of queries carrying ``not_pinned_predicate()`` as a WHERE /
     ``only_if`` argument — pin the set here so a new phase (or a hand-copied
     inline predicate) cannot silently narrow it."""
@@ -402,18 +386,16 @@ def test_every_automated_deleter_uses_the_shared_pinned_exemption(module_name, f
         ("services.sleep.consolidation", "_fetch_working_memories"),
         ("services.sleep.importance_reeval", "_fetch_candidates"),
         # writes that follow an unlocked fetch (a marking can land in between)
-        ("services.sleep.consolidation", "_archive_tombstone"),
         ("services.sleep.importance_reeval", "execute"),
         # rollback write — a guardrail keeps the importance its author set.
-        # (_undo_promote is deliberately absent: a guardrail is not scope-bound
-        # and consolidation's archive already excludes it, so a demote is
-        # harmless to the lane.)
+        # (_undo_promote is deliberately absent: a guardrail is not scope-bound,
+        # so a demote is harmless to the lane.)
         ("mcp_server.tools.sleep", "_undo_update_importance"),
     ],
 )
 def test_every_automated_deleter_uses_the_shared_tool_trigger_exemption(module_name, fn_name):
     """``persistence_info(tool_triggered=True)`` promises that Sleep maintenance
-    does not select, archive or re-score a tool guardrail, and that rollback
+    does not select, merge or re-score a tool guardrail, and that rollback
     leaves its importance alone. Pin the set of queries carrying
     ``not_tool_triggered_predicate()`` exactly as the pinned twin above does."""
     import importlib
@@ -441,12 +423,12 @@ def test_response_makes_no_unscoped_retention_promise(sleep_pass, scope):
     """The detail text must not read as a retention SLA for the whole system.
 
     Both scopes need the caveat: ``_fetch_active_memories`` has no scope filter
-    either, so "consolidation will not archive this one" is equally misleading
-    on a persistent memory if left unqualified.
+    either, so "kept until deleted" is equally misleading on a persistent memory
+    if left without the removals that remain.
     """
     detail = persistence_info(scope).detail
     assert "merge" in detail and "forget()" in detail, (
-        f"{scope} detail must name the lifecycles the consolidation floor does NOT bind"
+        f"{scope} detail must name the removals that remain"
     )
 
 
@@ -527,10 +509,7 @@ async def test_remember_response_carries_the_persistence_block(service, sleep_pa
     assert result.persistence is not None, "remember() dropped the #1505 block"
     assert result.persistence.scope == "working"
     assert result.persistence.committed is True
-    assert (
-        result.persistence.consolidation_archive_min_age_days
-        == consolidation_archive_min_age_days()
-    )
+    assert result.persistence.consolidation_archive_min_age_days is None
 
 
 @pytest.mark.asyncio
@@ -594,10 +573,7 @@ async def test_in_place_update_populates_persistence(service, sleep_pass):
 
     assert result.persistence is not None, "_update_in_place dropped the #1505 block"
     assert result.persistence.scope == "working"
-    assert (
-        result.persistence.consolidation_archive_min_age_days
-        == consolidation_archive_min_age_days()
-    )
+    assert result.persistence.consolidation_archive_min_age_days is None
 
 
 @pytest.mark.asyncio
@@ -806,7 +782,7 @@ def test_mcp_helper_emits_the_block_when_present(sleep_pass):
     assert payload["scope"] == "working"
     assert payload["committed"] is True
     assert payload["promotes_via"] == SLEEP_CONSOLIDATION
-    assert payload["consolidation_archive_min_age_days"] == consolidation_archive_min_age_days()
+    assert payload["consolidation_archive_min_age_days"] is None
     # #1851: the prose rides along only on request; guide(["persistence"]) has it.
     assert "detail" not in payload
     verbose = _persistence_response_field(persistence_info("working"), verbose=True)
@@ -873,10 +849,7 @@ async def test_remember_tool_json_carries_the_block(sleep_pass):
     assert payload["status"] == "success"
     assert payload["persistence"]["scope"] == "working"
     assert payload["persistence"]["committed"] is True
-    assert (
-        payload["persistence"]["consolidation_archive_min_age_days"]
-        == consolidation_archive_min_age_days()
-    )
+    assert payload["persistence"]["consolidation_archive_min_age_days"] is None
 
 
 @pytest.mark.asyncio
@@ -937,16 +910,15 @@ def test_persistence_schema_text_carries_no_bare_issue_ids():
 class TestPersistenceInfoCanNeverFailACommittedWrite:
     """Review finding: this runs inside remember()'s rollback try/except.
 
-    persistence_info reads the archival floor through a lazy import of
-    services.sleep.consolidation (Qdrant + graph service + LLM service). If that
-    chain raises, an unguarded call would surface as a failed remember() for a
-    memory that is already stored — and the handler logs memory_creation_failed
-    and re-raises, inviting a retry that duplicates the memory.
+    If building the block raises, an unguarded call would surface as a failed
+    remember() for a memory that is already stored — and the handler logs
+    memory_creation_failed and re-raises, inviting a retry that duplicates the
+    memory.
     """
 
-    def test_a_failing_floor_lookup_omits_the_block_instead_of_raising(self, sleep_pass):
+    def test_a_failing_build_omits_the_block_instead_of_raising(self, sleep_pass):
         with patch(
-            "services.persistence._sleep_archive_min_age_days",
+            "services.persistence._merge_caveat",
             side_effect=ImportError("simulated broken import chain"),
         ):
             assert persistence_info("working") is None

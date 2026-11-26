@@ -92,7 +92,8 @@ DELIVERY_MODE_ON_TRIGGER = "on_trigger"
 MEMORY_TYPE_TIME = "time"
 
 # ``deleted_by`` provenance for rows Sleep maintenance tombstones (#1209/#1520).
-# Merge losers and consolidation archives are both soft deletes that
+# Merge losers and consolidation archives (made by versions before #3021;
+# consolidation archives nothing now) are both soft deletes that
 # ``rollback_sleep_run`` can restore, and both are hard-purged by the SAME
 # retention window (``sleep_merge_retention_days``). The set is the single
 # source for every lane predicate; writers and guards use these constants.
@@ -1028,9 +1029,9 @@ def resource_owned_predicate() -> ColumnElement[bool]:
 
     The row carries the full natural key (``resource_id``, ``doc_id``, a
     numeric ``version``) and names a point other than its own id. Every
-    automated pass that removes, merges or rescores memories (the Sleep
-    archive, dedup merge and importance re-evaluation, the legacy
-    consolidation task, the working-memory cleanup) decides by it, with
+    automated pass that promotes, merges or rescores memories (Sleep
+    consolidation, dedup merge and importance re-evaluation, the legacy
+    consolidation task) decides by it, with
     ``not_resource_owned_predicate()`` or the flag selected with the row:
     the source owns such a row's lifecycle, whatever the context's settings.
 
@@ -1052,8 +1053,7 @@ def resource_owned_predicate() -> ColumnElement[bool]:
 
 def not_resource_owned_predicate() -> ColumnElement[bool]:
     """Exclusion side of ``resource_owned_predicate()`` for the automated passes
-    (Sleep archive, dedup merge, importance re-evaluation, working-memory
-    cleanup).
+    (Sleep consolidation, dedup merge, importance re-evaluation).
 
     Never NULL: each conjunct of the inclusion side is an ``IS NOT NULL`` test
     or a comparison of two columns those tests guarantee, so the negation is the

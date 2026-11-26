@@ -155,14 +155,26 @@ async def _run_mc_sleep(db: Any, owner: str, ws_id: Any, ctx_id: Any) -> dict[st
     per D1. A failed Sleep run is recorded, not raised — the MC arm is still
     scored (a failed consolidation is itself part of the honest result), and
     ``_summarize_sleep_report`` never raises for an unexpected report shape.
-    As in production (#2565), the merged and archived rows' points are deleted
-    right after the commit: no drain job runs in the harness.
+    As in production (#2565), the merged rows' points are deleted right after
+    the commit: no drain job runs in the harness.
+
+    #3021: edge discovery, importance re-evaluation and the consolidation judge
+    are off by default now; the pass switches them on explicitly so the arm
+    measures what it measured before (the stored rows of a fresh eval database
+    seed them off).
     """
+    from dataclasses import replace
+
     from neural.config import NeuralMemoryConfig
     from services.sleep.orchestrator import SleepOrchestrator
 
     NeuralMemoryConfig.invalidate_cache()
-    config = await NeuralMemoryConfig.from_db(db)
+    config = replace(
+        await NeuralMemoryConfig.from_db(db),
+        sleep_edge_discovery_enabled=True,
+        sleep_importance_reeval_enabled=True,
+        sleep_consolidation_judge_enabled=True,
+    )
     try:
         orchestrator = SleepOrchestrator(db)
         await orchestrator.run(

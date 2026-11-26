@@ -8051,9 +8051,8 @@ class MemoryService:
 
         ``point_deletes``: ``(memory id, point id, collection)``, each queued
         in ``deferred_point_deletes`` by ``forget``'s commit (#2476) — or by
-        ``forget_bulk``'s, ``cleanup_old_working_memories``' or a session
-        rollback's (#2480), or a Sleep run's archives and merges or the legacy
-        consolidation task's deletes (#2565). Never
+        ``forget_bulk``'s or a session rollback's (#2480), or a Sleep run's
+        merges (#2565). Never
         raises an ``Exception``: the rows are committed tombstones, a
         tombstone's leftover point is no hit, and a point left here keeps its
         queue row, which the drain job retries
@@ -8817,71 +8816,6 @@ class MemoryService:
             await self.delete_forgotten_points(forgotten)
 
         return ForgetResponse(deleted_count=len(deleted_ids), memory_ids=deleted_ids)
-
-    async def cleanup_old_working_memories(self, user_id: str, age_days: int = 30) -> int:
-        """Cleanup old working memories (30+ days, not promoted).
-
-        Args:
-            user_id: User ID
-            age_days: Minimum age in days (default: 30)
-
-        Returns:
-            Number of deleted memories
-        """
-        from config.retention import WORKING_MEMORY_RETENTION_DAYS
-
-        age_days = age_days or WORKING_MEMORY_RETENTION_DAYS
-
-        # Get old working memories
-        old_memories = await self.memory_repo.get_old_working_memories(user_id, age_days)
-
-        deleted_count = 0
-        # (memory id, point id, context id) of each deleted row, for after the
-        # commit (#2480).
-        point_deletes: list[tuple[UUID, UUID, UUID | None]] = []
-
-        for memory in old_memories:
-            # Skip if already promoted or high importance
-            if memory.scope == "persistent" or memory.importance >= 0.7:
-                continue
-
-            from services.sync_managed_guard import assert_memory_mutable
-            from utils.exceptions import ConflictError, ManagedDataLockedError
-
-            try:
-                await assert_memory_mutable(self.db, memory)
-            except (ConflictError, ManagedDataLockedError):
-                # Source ownership is not working-memory TTL. Leave protected
-                # or transitioning targets for their own lifecycle, and let
-                # unrelated ordinary contexts continue their normal retention.
-                continue
-
-            # Delete from PostgreSQL
-            await self.memory_repo.delete(memory.id)
-
-            # The row's point id (#1829), or None when another live row names it.
-            point_id = await self._point_to_delete(memory)
-            if point_id is not None:
-                point_deletes.append((memory.id, point_id, memory.context_id))
-
-            deleted_count += 1
-
-        # #2480: queued with the deletes (#2476), removed from Qdrant only
-        # after the commit — deleting first left live rows without their
-        # vectors when the commit never landed.
-        forgotten = await self._queue_forgotten_points(point_deletes)
-        await self.db.commit()
-
-        logger.info(
-            "old_memories_cleaned_up",
-            user_id=user_id,
-            deleted=deleted_count,
-            age_days=age_days,
-        )
-
-        # Never raises; what it leaves stays queued for the drain.
-        await self.delete_forgotten_points(forgotten)
-        return deleted_count
 
     async def explore(
         self,

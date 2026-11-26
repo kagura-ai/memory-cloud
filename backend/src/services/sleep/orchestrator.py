@@ -229,7 +229,7 @@ class SleepOrchestrator:
     async def delete_committed_points(self) -> None:
         """Delete the points this run queued; call only after the caller's commit.
 
-        #2565: the archive and merge steps queue each point in
+        #2565: the merge step queues each point in
         ``deferred_point_deletes`` beside the tombstone, inside the phase's
         savepoint (``pending_point_deletes``), instead of deleting it before
         the commit — a run that rolled back left live rows without their

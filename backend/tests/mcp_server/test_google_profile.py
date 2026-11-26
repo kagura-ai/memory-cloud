@@ -649,13 +649,10 @@ def _persistence_details() -> list[dict]:
         persistence_mod._persistence_info("persistent"),
         persistence_mod._persistence_info("persistent", pinned=True),
     ]
-    with (
-        patch.object(
-            persistence_mod,
-            "active_consolidation_pass",
-            return_value=persistence_mod.SLEEP_CONSOLIDATION,
-        ),
-        patch.object(persistence_mod, "consolidation_archive_min_age_days", return_value=7),
+    with patch.object(
+        persistence_mod,
+        "active_consolidation_pass",
+        return_value=persistence_mod.SLEEP_CONSOLIDATION,
     ):
         blocks.append(persistence_mod._persistence_info("working"))
     details = [block.model_dump() for block in blocks if block is not None]

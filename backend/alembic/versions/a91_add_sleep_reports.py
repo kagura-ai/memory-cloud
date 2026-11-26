@@ -94,6 +94,8 @@ def upgrade() -> None:
 
     # ================================================================
     # Seed sleep config into neural_config (idempotent)
+    # #3021: edge discovery and importance re-evaluation are seeded off. Only a
+    # fresh database runs this; one that ran it before keeps its stored rows.
     # ================================================================
     op.execute("""
         INSERT INTO neural_config (key, value, value_type, category, description, min_value, max_value) VALUES
@@ -103,9 +105,9 @@ def upgrade() -> None:
             ('sleep_max_llm_calls_per_run', '50', 'int', 'sleep', 'Max LLM API calls per sleep run', 1, 500),
             ('sleep_dedup_enabled', 'true', 'bool', 'sleep', 'Enable dedup/merge phase', NULL, NULL),
             ('sleep_dedup_similarity_threshold', '0.92', 'float', 'sleep', 'Cosine similarity threshold for duplicate detection', 0.5, 1.0),
-            ('sleep_edge_discovery_enabled', 'true', 'bool', 'sleep', 'Enable edge discovery phase', NULL, NULL),
+            ('sleep_edge_discovery_enabled', 'false', 'bool', 'sleep', 'Enable edge discovery phase', NULL, NULL),
             ('sleep_edge_discovery_sample_size', '30', 'int', 'sleep', 'Number of memories to sample per edge discovery run', 5, 200),
-            ('sleep_importance_reeval_enabled', 'true', 'bool', 'sleep', 'Enable importance re-evaluation phase', NULL, NULL)
+            ('sleep_importance_reeval_enabled', 'false', 'bool', 'sleep', 'Enable importance re-evaluation phase', NULL, NULL)
         ON CONFLICT (key) DO NOTHING;
     """)
 

@@ -3294,11 +3294,12 @@
         "sleep_max_llm_calls_per_run": "1 回の sleep 実行での最大 LLM API 呼び出し数",
         "sleep_dedup_enabled": "重複排除/マージフェーズを有効化",
         "sleep_dedup_similarity_threshold": "重複検出のコサイン類似度しきい値",
-        "sleep_merge_retention_days": "Sleep tombstone（マージ敗者・consolidation アーカイブ）のパージ猶予日数（0 = Sleep による追加パージなし。プラットフォームのクリーンアップ掃引 CLEANUP_DELETED_MEMORIES_RETENTION_DAYS（既定 30 日）は引き続き全 tombstone に適用）",
+        "sleep_merge_retention_days": "Sleep tombstone（マージ敗者・v0.185.0 より前に作られた consolidation アーカイブ）のパージ猶予日数（0 = Sleep による追加パージなし。プラットフォームのクリーンアップ掃引 CLEANUP_DELETED_MEMORIES_RETENTION_DAYS（既定 30 日）は引き続き全 tombstone に適用）",
         "sleep_dedup_supersede_enabled": "dedupシャドウモード：敗者を削除せず supersedes エッジを記録",
-        "sleep_edge_discovery_enabled": "エッジ発見フェーズを有効化",
+        "sleep_edge_discovery_enabled": "エッジ発見フェーズを有効化（既定はオフ）",
         "sleep_edge_discovery_sample_size": "エッジ発見 1 回あたりのサンプルメモリ数",
-        "sleep_importance_reeval_enabled": "重要度再評価フェーズを有効化"
+        "sleep_importance_reeval_enabled": "重要度再評価フェーズを有効化（既定はオフ）",
+        "sleep_consolidation_judge_enabled": "consolidation のルールで昇格しなかった working メモリの昇格を LLM ジャッジに判定させる（既定はオフ。ルールによる昇格は常に実行）"
       }
     },
     "cost": {
@@ -4147,7 +4148,7 @@
       "deferred_pairs": "重複の可能性があるメモリの組 {count} 件が後の実行に回されました（1 回の実行で比較できる数には上限があります）。後の実行で追いつきますが、それまでは検索結果に重複が出ることがあります。",
       "merge_backlog_old": "Sleep で他のメモリにまとめられたメモリは、復元できるようしばらく保管されます。最も古いものは {oldest_days} 日前です（{threshold_days} 日超）。検索結果には出ません。保管期間は管理者が決めます。",
       "edge_weight_violations": "メモリ同士のつながり {count} 本の強さが許容範囲 [{min}, {max}] を外れています。メモリの内容ではなくシステムの不具合を示すものです。管理者に報告してください。",
-      "cold_graph": "このコンテキストには {active_memories} 件のメモリがありますが、メモリ同士のつながりがまだありません。そのため検索で関連するメモリを呼び出せません。つながりはメモリが一緒に検索されたときと Sleep の実行時にできます。このコンテキストの Sleep 設定を確認してください。",
+      "cold_graph": "このコンテキストには {active_memories} 件のメモリがありますが、メモリ同士のつながりがまだありません。そのため検索で関連するメモリを呼び出せません。つながりはメモリの書き込み時に作られ、create_edge でも追加できます。エッジ探索と連想学習を有効にしている場合は、それらもつながりを追加します。",
       "write_only_store": "直近 {window_days} 日間、メモリの書き込みはありますが検索で呼び出されていません（このコンテキストのメモリ {active_memories} 件）。エージェントがこのコンテキストを使う想定なら、ここから recall しているか確認してください。",
       "idle_store": "直近 {window_days} 日間、MCP 経由の書き込みも検索もありません（このコンテキストのメモリ {active_memories} 件）。使われていないコンテキストのようです。この Web アプリ、REST API、コネクタからの書き込みはここでは数えていません。"
     },
@@ -4238,11 +4239,11 @@
     "sleepModeFull": "フル",
     "sleepModeEdgesOnly": "エッジのみ",
     "sleepModeSkip": "スキップ（デフォルト）",
-    "sleepModeFullDesc": "すべてのフェーズを実行：エッジ探索、重複排除、重要度更新、統合、再インデックス、レポート生成。",
-    "sleepModeEdgesOnlyDesc": "エッジ探索と再インデックスのみ実行。外部リファレンスマテリアルを取り込むリソースコンテキストに適しています。",
+    "sleepModeFullDesc": "デプロイメントで有効なフェーズをすべて実行：エッジ探索と重要度更新（どちらも既定でオフ）、重複排除、統合（昇格のみ。アーカイブはしません）、再インデックス、レポート生成。",
+    "sleepModeEdgesOnlyDesc": "エッジ探索（デプロイメントで有効な場合）と再インデックスのみ実行。外部リファレンスマテリアルを取り込むリソースコンテキストに適しています。",
     "sleepModeSkipDesc": "すべての Sleep メンテナンスフェーズを無効化。自動クリーンアップが不要な外部管理・大規模コンテキスト向け。",
     "sleepModeSkipTitle": "Sleep メンテナンスを無効化しますか？",
-    "sleepModeSkipWarning": "再有効化まですべての自動メンテナンスが停止します。既存データは保持されますが、新しいエッジ探索・重複排除・重要度更新は実行されません。",
+    "sleepModeSkipWarning": "再有効化まですべての自動メンテナンスが停止します。既存データは保持されますが、重複排除・昇格などの Sleep フェーズは実行されません。",
     "sleepModeSkipConfirm": "Sleep を無効化",
     "sleepQuotaUsage": "Sleep 有効コンテキスト数: {used} / {limit} (アドオン: {addon})",
     "sleepQuotaExceeded": "上限に達しました。Sleep 対象コンテキストの上限引き上げはワークスペース管理者にご相談ください。",

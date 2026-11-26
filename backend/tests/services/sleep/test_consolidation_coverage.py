@@ -3,24 +3,22 @@
 Complements ``test_consolidation.py`` by targeting the branches that the
 house-style suite leaves uncovered:
 
-- ``_adoption_delete_cutoff`` env parsing (unset / valid-naive / valid-aware /
-  unparseable fail-safe).
-- The LLM borderline path of ``execute()``: batch promote, batch archive
-  (graph-isolated vs connected guard), unknown-memory decision skip, budget
+- The LLM borderline path of ``execute()``: batch promote, an archive verdict
+  that changes nothing (#3021), unknown-memory decision skip, budget
   exhaustion break, and the LLM-disabled no-op.
 - ``_llm_judge_batch``: happy parse, invalid label / action filtering, the
   ``complete_json`` exception fallback (returns {}), token/breakdown
   accumulation, and the per-batch budget consume.
 - ``_record_action`` with and without a reporter/report_id.
 
-All external I/O (point-delete queue, LLM service, GraphService) is mocked; the DB
+All external I/O (LLM service, GraphService) is mocked; the DB
 is the ``AsyncMock`` repo from the source's own seam so no network call is made.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -28,7 +26,6 @@ import pytest
 from services.sleep.consolidation import (
     BATCH_SIZE,
     ConsolidationPhase,
-    _adoption_delete_cutoff,
 )
 from services.sleep.reporter import LLMCallBreakdown, SleepBudget
 from utils.datetime import utcnow
@@ -97,54 +94,16 @@ def _build_phase(memories):
     return phase, llm
 
 
-async def _run_with_graph(phase, *, total_edges=0, node_metrics=None, cutoff=None, config=None):
-    """Drive execute() with a controllable GraphService + cutoff."""
+async def _run_with_graph(phase, *, total_edges=0, node_metrics=None, config=None):
+    """Drive execute() with a controllable GraphService."""
     config = config or _make_config(provider="")
     budget = SleepBudget()
     graph = MagicMock()
     graph.stats = AsyncMock(return_value={"total_edges": total_edges})
     graph.get_node_metrics = AsyncMock(return_value=node_metrics)
-    with (
-        patch("services.sleep.consolidation.GraphService", return_value=graph),
-        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
-        patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
-    ):
+    with patch("services.sleep.consolidation.GraphService", return_value=graph):
         result = await phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
     return result, budget, graph
-
-
-# --------------------------------------------------------------------------- #
-# _adoption_delete_cutoff env parsing
-# --------------------------------------------------------------------------- #
-class TestAdoptionDeleteCutoffEnv:
-    """#1049: env-driven grandfather cutoff parsing (the real function, not a
-    patched stand-in)."""
-
-    def test_unset_returns_none(self, monkeypatch):
-        monkeypatch.delenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF", raising=False)
-        assert _adoption_delete_cutoff() is None
-
-    def test_empty_string_returns_none(self, monkeypatch):
-        monkeypatch.setenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF", "")
-        assert _adoption_delete_cutoff() is None
-
-    def test_valid_naive_iso_parsed(self, monkeypatch):
-        monkeypatch.setenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF", "2026-01-01T00:00:00")
-        cutoff = _adoption_delete_cutoff()
-        assert cutoff == datetime(2026, 1, 1, 0, 0, 0)
-        assert cutoff.tzinfo is None
-
-    def test_aware_iso_normalized_to_naive_utc(self, monkeypatch):
-        # +09:00 → the equivalent naive-UTC instant, tzinfo stripped.
-        monkeypatch.setenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF", "2026-01-01T09:00:00+09:00")
-        cutoff = _adoption_delete_cutoff()
-        assert cutoff is not None
-        assert cutoff.tzinfo is None
-        assert cutoff == datetime(2026, 1, 1, 0, 0, 0)  # 09:00 JST == 00:00 UTC
-
-    def test_unparseable_returns_none_failsafe(self, monkeypatch):
-        monkeypatch.setenv("CONSOLIDATION_ADOPTION_DELETE_CUTOFF", "not-a-datetime")
-        assert _adoption_delete_cutoff() is None
 
 
 # --------------------------------------------------------------------------- #
@@ -209,55 +168,13 @@ class TestLLMBorderlinePath:
         phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_llm_archive_connected_memory_is_protected(self):
-        # Graph present and the node is NOT isolated → bridge protection: an
-        # "archive" decision must be vetoed. #1229: the memory must be
-        # deterministically archival-eligible (age >= 30d, cutoff opted-in)
-        # or the eligibility guard short-circuits before the isolation veto
-        # is ever exercised. #1233 review: the parser now drops "archive",
-        # so this must bypass it (mock _llm_judge_batch) like the other
-        # backstop tests — routing through complete_json made it vacuous
-        # (mutation-confirmed: removing the isolation veto stayed green).
-        mem = _make_memory(age_days=40)
-        phase, llm = _build_phase([mem])
+    async def test_an_archive_verdict_on_an_isolated_old_memory_changes_nothing(self):
+        # #3021: should any decision source answer "archive" (the parser drops
+        # it; bypass the parser to pin the loop), an old, unadopted, isolated
+        # memory stays working — nothing archives, nothing is counted.
+        mem = _make_memory(age_days=400)
+        phase, _ = _build_phase([mem])
         phase._llm_judge_batch = AsyncMock(return_value={mem.id: "archive"})
-        connected = {
-            "centrality": 0.1,
-            "edge_count": 1,
-            "avg_edge_weight": 0.2,
-            "is_hub_node": False,
-            "is_isolated": False,
-        }
-        result, _, _ = await _run_with_graph(
-            phase,
-            total_edges=5,
-            node_metrics=connected,
-            cutoff=utcnow() - timedelta(days=365),
-            config=_make_config(),
-        )
-
-        assert result.details["llm_archive_guarded"] == 0
-        assert result.details["llm_archived"] == 0
-        phase.memory_repo.soft_delete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_archive_backstop_still_deletes_eligible_isolated(self):
-        # #1233: the parse path can no longer emit "archive", but the
-        # execute()-side lane is kept as a defensive backstop for any
-        # future decision source. Bypass the parser (mock _llm_judge_batch
-        # directly) to pin the backstop's behavior: deterministic
-        # eligibility (age/adoption/cutoff) + isolation still required,
-        # and an eligible isolated memory is deleted.
-        mem = _make_memory(age_days=40)
-        phase, llm = _build_phase([mem])
-        phase._llm_judge_batch = AsyncMock(return_value={mem.id: "archive"})
-        connected = {
-            "centrality": 0.1,
-            "edge_count": 1,
-            "avg_edge_weight": 0.2,
-            "is_hub_node": False,
-            "is_isolated": False,
-        }
         isolated = {
             "centrality": 0.0,
             "edge_count": 0,
@@ -265,27 +182,14 @@ class TestLLMBorderlinePath:
             "is_hub_node": False,
             "is_isolated": True,
         }
-        config = _make_config()
-        budget = SleepBudget()
-        graph = MagicMock()
-        graph.stats = AsyncMock(return_value={"total_edges": 5})
-        graph.get_node_metrics = AsyncMock(side_effect=[connected, isolated])
-        cutoff = utcnow() - timedelta(days=365)
-        with (
-            patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch(
-                "services.sleep.consolidation.queue_point_deletes",
-                new_callable=AsyncMock,
-            ),
-            patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
-        ):
-            result = await phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
-
-        assert result.details["llm_archive_guarded"] == 0
-        assert result.details["llm_archived"] == 1
-        phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation", only_if=ANY
+        result, _, _ = await _run_with_graph(
+            phase, total_edges=5, node_metrics=isolated, config=_make_config()
         )
+
+        assert result.details["llm_archived"] == 0
+        assert result.details["llm_archive_guarded"] == 0
+        phase.memory_repo.soft_delete.assert_not_called()
+        phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_llm_keep_decision_is_noop(self):
@@ -315,8 +219,6 @@ class TestLLMBorderlinePath:
         budget = SleepBudget(max_llm_calls=0)
         with (
             patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
-            patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=None),
         ):
             result = await phase.execute(_make_config(), "u", "ws", "ctx", budget)
 
@@ -580,8 +482,6 @@ class TestExecuteReporterAndRollup:
         graph.get_node_metrics = AsyncMock(return_value=None)
         with (
             patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
-            patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=None),
         ):
             result = await phase.execute(
                 _make_config(provider=""),
@@ -613,102 +513,6 @@ class TestExecuteReporterAndRollup:
         assert len(result.llm_breakdown) == 1
         assert result.llm_breakdown[0].calls == 1
         assert result.llm_breakdown[0].provider == "openai"
-
-
-# --------------------------------------------------------------------------- #
-# delete failure handling in the rule path
-# --------------------------------------------------------------------------- #
-class TestRuleDeleteFailure:
-    """The rule-archival point step: the point lookup that fails, and the queue (#2565)."""
-
-    @pytest.mark.asyncio
-    async def test_point_lookup_failure_is_swallowed(self):
-        # adoption==0, old, isolated, post-cutoff → should_delete True. The row
-        # is stamped FIRST (#1520 review: a soft-deleted context keeps its
-        # points, so the vector must never go before the tombstone). A point
-        # lookup failure after the stamp is logged, and the tombstone still
-        # counts and is recorded — otherwise rollback could not restore a row
-        # that IS gone. Nothing is queued: the point is left to the orphan sweep.
-        cutoff = utcnow() - timedelta(days=90)
-        mem = _make_memory(
-            reference_count=0,
-            access_count=0,
-            importance=0.1,
-            created_at=utcnow() - timedelta(days=40),
-        )
-        phase, _ = _build_phase([mem])
-        graph = MagicMock()
-        graph.stats = AsyncMock(return_value={"total_edges": 0})
-        graph.get_node_metrics = AsyncMock(return_value=None)
-        with (
-            patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch(
-                "services.sleep.consolidation.unshared_point_id",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("lookup failed"),
-            ),
-            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock) as q,
-            patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
-        ):
-            result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
-
-        assert result.details["rule_deleted"] == 1
-        phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation", only_if=ANY
-        )
-        q.assert_not_awaited()
-        assert phase.pending_point_deletes == []
-
-    @pytest.mark.asyncio
-    async def test_rule_delete_success_records_archive_action(self):
-        # Mirror image: the point is queued beside the tombstone, in the phase's
-        # transaction, and kept for the orchestrator's post-commit delete
-        # (#2565); counted, and an "archive"/"rule" action recorded (covers the
-        # success body of the rule-archival branch).
-        cutoff = utcnow() - timedelta(days=90)
-        mem = _make_memory(
-            reference_count=0,
-            access_count=0,
-            importance=0.1,
-            created_at=utcnow() - timedelta(days=40),
-        )
-        phase, _ = _build_phase([mem])
-        reporter = AsyncMock()
-        report_id = uuid4()
-        graph = MagicMock()
-        graph.stats = AsyncMock(return_value={"total_edges": 0})
-        graph.get_node_metrics = AsyncMock(return_value=None)
-        with (
-            patch("services.sleep.consolidation.GraphService", return_value=graph),
-            patch(
-                "services.sleep.consolidation.unshared_point_id",
-                new_callable=AsyncMock,
-                return_value=mem.id,
-            ),
-            patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock) as q,
-            patch("services.sleep.consolidation._adoption_delete_cutoff", return_value=cutoff),
-        ):
-            result = await phase.execute(
-                _make_config(provider=""),
-                "u",
-                "ws",
-                "ctx",
-                SleepBudget(),
-                reporter=reporter,
-                report_id=report_id,
-            )
-
-        assert result.details["rule_deleted"] == 1
-        phase.memory_repo.soft_delete.assert_awaited_once_with(
-            mem.id, deleted_by="sleep_consolidation", only_if=ANY
-        )
-        entry = (mem.id, mem.id, "kagura_memories")
-        q.assert_awaited_once_with(phase.db, [entry])
-        assert phase.pending_point_deletes == [entry]
-        reporter.add_action.assert_awaited_once()
-        _, kwargs = reporter.add_action.call_args
-        assert kwargs["action_type"] == "archive"
-        assert kwargs["details"]["reason"] == "rule"
 
 
 # --------------------------------------------------------------------------- #
@@ -764,8 +568,8 @@ class TestFetchWorkingMemories:
     @pytest.mark.asyncio
     async def test_excludes_pinned_working_rows(self, db_session):
         """#1523: a pinned row can be working-scope (a pre-#1523 rollback demoted
-        it, or the pin was set on a working row). It must never reach the archive
-        branch, so the shared exemption applies at the fetch."""
+        it, or the pin was set on a working row). Consolidation leaves it alone,
+        so the shared exemption applies at the fetch."""
         user = f"u-{uuid4()}"
         plain = _persist_memory(user_id=user, scope="working")
         pinned = _persist_memory(user_id=user, scope="working", delivery_mode="always")
@@ -782,8 +586,7 @@ class TestFetchWorkingMemories:
 
     @pytest.mark.asyncio
     async def test_excludes_tool_triggered_working_rows(self, db_session):
-        """Tool guardrails share the pinned exemption: an archived guardrail would
-        silently stop firing in every client hook, so the fetch drops them."""
+        """Tool guardrails share the pinned exemption: the fetch drops them."""
         user = f"u-{uuid4()}"
         plain = _persist_memory(user_id=user, scope="working", details={"other": 1})
         guardrail = _persist_memory(
@@ -808,45 +611,6 @@ class TestFetchWorkingMemories:
         ids = {r.id for r in rows}
         assert plain.id in ids
         assert guardrail.id not in ids
-
-    @pytest.mark.asyncio
-    async def test_archive_stamp_refuses_a_row_marked_guardrail_since_the_fetch(self, db_session):
-        """The archive UPDATE carries ``not_tool_triggered_predicate()`` beside
-        the pinned one, so a row marked between the fetch and the stamp is left
-        alone (0 rows stamped)."""
-        from sqlalchemy import and_
-
-        from models.memory import not_pinned_predicate, not_tool_triggered_predicate
-        from repositories.memory import MemoryRepository
-
-        user = f"u-{uuid4()}"
-        guardrail = _persist_memory(
-            user_id=user,
-            scope="working",
-            details={
-                "tool_trigger": {
-                    "tool": "Bash",
-                    "on": "pre",
-                    "match": "gh pr merge",
-                    "action": "inform",
-                }
-            },
-        )
-        plain = _persist_memory(user_id=user, scope="working")
-        db_session.add_all([guardrail, plain])
-        await db_session.flush()
-
-        repo = MemoryRepository(db_session)
-        only_if = and_(not_pinned_predicate(), not_tool_triggered_predicate())
-        assert (
-            await repo.soft_delete(guardrail.id, deleted_by="sleep_consolidation", only_if=only_if)
-            == 0
-        )
-        assert (
-            await repo.soft_delete(plain.id, deleted_by="sleep_consolidation", only_if=only_if) == 1
-        )
-        await db_session.refresh(guardrail)
-        assert guardrail.deleted_at is None
 
     @pytest.mark.asyncio
     async def test_workspace_filter_applied(self, db_session):

@@ -10,7 +10,7 @@ Arguments: $ARGUMENTS — `[context=<name or id>] [topic=<words>] [dry-run]`. An
 
 When the user asks — every few weeks, or when `/kagura-memory:session-start` warns of a large pinned set or lists a finished follow-up. `/kagura-memory:session-summary` covers one session's memories; this, one context.
 
-Sleep maintenance merges near-duplicates and archives unused working memories on its own. This skill is for what needs a person's judgment: a fact changed, a task finished, a pin went stale, a memo was dealt with.
+Sleep maintenance merges near-duplicates on its own; nothing removes a memory for age or disuse. This skill is for what needs a person's judgment: a fact changed, a task finished, a pin went stale, a memo was dealt with.
 
 ## Rules
 
@@ -68,7 +68,7 @@ Show at most 20. It returns no dates, so do not state how old a pin is. Do not c
 list(context_id=..., filters={"type": ["tech-debt", "needs-decision"], "tags": ["status:open"], "trust_tier": "trusted"}, order_by="created_at", direction="asc", limit=20)
 ```
 
-Reason: age in days (from `created_at`) and `file:` tags; with `has_more`, say `total`. Proposed action: keep. Sleep never archives a memo while it is `status:open`; a `reference` read of one counts as adoption.
+Reason: age in days (from `created_at`) and `file:` tags; with `has_more`, say `total`. Proposed action: keep. Sleep never merges a memo away while it is `status:open`; a `reference` read of one counts as adoption.
 
 **Memories the user names by topic** (only with `topic=`)
 

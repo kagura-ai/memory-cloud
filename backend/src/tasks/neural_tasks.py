@@ -8,7 +8,6 @@ Implements:
 import os
 from collections.abc import AsyncIterator
 from typing import Any, cast
-from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -27,7 +26,7 @@ from config.constants import (
 from db.base import get_db
 from db.graph_learning_lock import lock_graph_learning
 from models.memory import GraphMemory
-from neural.config import NeuralMemoryConfig, sleep_archive_exempt_tags_from_env
+from neural.config import NeuralMemoryConfig
 from neural.decay import DecayManager
 from repositories.graph import GraphRepository
 from repositories.memory import MemoryRepository
@@ -39,16 +38,6 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-# Issue #1505: the legacy consolidation path's archival floor, named so the
-# durability contract returned on every write (services/persistence.py) can be
-# derived from it instead of restating a literal that would silently rot if this
-# task were re-tuned. The sleep path's counterpart is
-# ``services.sleep.consolidation.ARCHIVE_MIN_AGE_DAYS``. At most one of the two
-# runs: this one only when SLEEP_ENABLED is off (see schedule_neural_tasks), the
-# sleep one only when SLEEP_ENABLED and ENABLE_NEURAL_MEMORY are both on — so
-# SLEEP_ENABLED=true with neural memory off leaves NEITHER running.
-LEGACY_ARCHIVE_MIN_AGE_DAYS = 30
 
 # #2385: graphs are read and committed in pages of this size. Each page is one
 # transaction, so the graph learning locks a pass holds (#1985) stay bounded.
@@ -169,47 +158,33 @@ async def weight_decay_task() -> JobResult:
 
 
 async def consolidation_task() -> JobResult:
-    """Consolidate working memories to persistent.
+    """Promote working memories to persistent by rule.
 
-    Runs daily at 3 AM UTC to promote frequently used working memories
-    and delete old unused ones.
+    Runs daily at 3 AM UTC and promotes frequently used, important or old
+    and used working memories (the Issue #1 criteria: access patterns,
+    importance, age). It deletes nothing (#3021): a memory is kept until its
+    owner or writer deletes it, and a working memory that was never returned
+    by a recall is no exception. The result keeps its ``deleted`` key at 0 for
+    readers of older job results.
 
     Issue #651: removed the Neural Memory metrics integration (the Issue #44
     enhancement). graph_service.stats() and graph_service.get_node_metrics()
     both require workspace_id and context_id, which are not available in this
     global cross-tenant task, and the get_stats validator rejects None pairs
-    to prevent cross-tenant aggregation (#273 H-2 / #383). Additionally, the
-    get_node_metrics call in main lacked an ``await``, so the entire neural-
-    enhanced branch was already raising TypeError and being swallowed by the
-    bare ``except`` — the integration was non-functional in practice. Promotion
-    and deletion now use only the original Issue #1 criteria (access patterns,
-    importance, age). The deletion guard's former ``is_isolated`` check is
-    therefore not restored here (it never executed in prod). Re-introducing
-    neural metrics under the 3-level isolation model — including a properly
-    awaited isolation-aware ``is_isolated`` deletion guard — is tracked as a
-    follow-up issue (TBD — to be filed when this PR lands).
+    to prevent cross-tenant aggregation (#273 H-2 / #383).
 
     Note: this task only runs when ``SLEEP_ENABLED=false``. With sleep
-    enabled (the production setting), ``services/sleep/consolidation.py``
-    handles consolidation and retains its own neural metrics path.
+    enabled, ``services/sleep/consolidation.py`` handles consolidation.
     """
-    # #2584: SLEEP_ARCHIVE_EXEMPT_TAGS binds this pass too — it is the one a
-    # deployment without SLEEP_ENABLED runs, and its delete is physical.
-    exempt_tags = frozenset(sleep_archive_exempt_tags_from_env())
     logger.info("consolidation_task_started")
 
     try:
         async for db in get_db():
-            from services.memory_service import MemoryService
-
             memory_repo = MemoryRepository(db)
             graph_repo = GraphRepository(db)
-            # #2565: forget's point-delete steps (queue, post-commit delete).
-            memory_service = MemoryService(db)
 
             total_users = 0
             total_promoted = 0
-            total_deleted = 0
             # #2996: rows the resource indexer owns, left to their source.
             total_resource_skipped = 0
 
@@ -218,22 +193,16 @@ async def consolidation_task() -> JobResult:
             async for graphs in _graph_pages(graph_repo):
                 user_ids = [g.user_id for g in graphs]
                 total_users += len(user_ids)
-                # (memory id, point id, context id) of the page's deleted
-                # rows, for after its commit (#2565).
-                point_deletes: list[tuple[UUID, UUID, UUID | None]] = []
 
                 for user_id in sorted(user_ids):
-                    # #1985: deleting a memory cascades to its edge rows; take the
-                    # graph learning lock first (users in a fixed order).
-                    await lock_graph_learning(db, user_id)
                     # Working memories, each with whether the resource indexer
                     # owns it (#2996: ``resource_owned_predicate``, read with
                     # the row, the rule every automated pass applies).
                     working_memories = await memory_repo.list_working_with_resource_owned(
                         user_id=user_id
                     )
-                    # #2918: nothing is promoted or deleted in a slot-suspended
-                    # workspace (no statement unless the mode is enforce).
+                    # #2918: nothing is promoted in a slot-suspended workspace
+                    # (no statement unless the mode is enforce).
                     suspended = await suspended_workspace_ids(
                         db,
                         {m.workspace_id for m, _ in working_memories if m.workspace_id is not None},
@@ -255,15 +224,15 @@ async def consolidation_task() -> JobResult:
                         try:
                             await assert_memory_mutable(db, memory)
                         except (ConflictError, ManagedDataLockedError):
-                            # A protected target must not abort retention of
+                            # A protected target must not abort promotion in
                             # ordinary contexts sharing this scheduled page.
                             continue
                         # #2996: the source owns a resource-indexed row's
-                        # lifecycle, whatever the context's settings: neither
-                        # promoted nor deleted here (the indexer writes its
-                        # rows persistent; one still working was written
-                        # before f62, or a rollback undid an earlier Sleep
-                        # promotion of it).
+                        # lifecycle, whatever the context's settings: not
+                        # promoted here (the indexer writes its rows
+                        # persistent; one still working was written before
+                        # f62, or a rollback undid an earlier Sleep promotion
+                        # of it).
                         if resource_owned:
                             total_resource_skipped += 1
                             continue
@@ -284,54 +253,6 @@ async def consolidation_task() -> JobResult:
                         if should_promote:
                             to_promote[memory.id] = (memory, age_days)
 
-                        # #1523: a pinned row (delivery_mode='always') is never an
-                        # automated-delete candidate — same exemption as the Sleep
-                        # phases, and this branch is a physical delete with no
-                        # tombstone to restore from.
-                        elif memory.is_pinned:
-                            logger.info(
-                                "legacy_consolidation_skipped_pinned", memory_id=str(memory.id)
-                            )
-
-                        # Tool guardrails share the exemption: a physically deleted
-                        # guardrail would silently stop firing in every client hook.
-                        elif memory.is_tool_triggered:
-                            logger.info(
-                                "legacy_consolidation_skipped_tool_triggered",
-                                memory_id=str(memory.id),
-                            )
-
-                        # #2584: an exempt-tagged row (an open review memo) is
-                        # never deleted; removing the tag ends the exemption.
-                        # Debug level: open memos are many and stay for months.
-                        elif not exempt_tags.isdisjoint(memory.tags or ()):
-                            logger.debug(
-                                "legacy_consolidation_skipped_exempt_tag",
-                                memory_id=str(memory.id),
-                            )
-
-                        # Deletion criteria
-                        elif age_days >= LEGACY_ARCHIVE_MIN_AGE_DAYS and memory.access_count == 0:
-                            # BUG FIX #83-10: the row's vector point goes too (no
-                            # orphan vectors). #2565: as cleanup_old_working_memories
-                            # does (#2480) — queued with the delete, removed from
-                            # Qdrant only after the page commits; deleting first left
-                            # live rows without their vectors when the commit failed.
-                            await memory_repo.delete(memory.id)
-                            # The row's point id (#1829), or None when another live
-                            # row names it.
-                            point_id = await memory_service._point_to_delete(memory)
-                            if point_id is not None:
-                                point_deletes.append((memory.id, point_id, memory.context_id))
-                            total_deleted += 1
-
-                            logger.info(
-                                "old_memory_deleted",
-                                memory_id=str(memory.id),
-                                user_id=user_id,
-                                age_days=age_days,
-                            )
-
                     promoted = (
                         await memory_repo.bulk_promote_to_persistent(list(to_promote))
                         if to_promote
@@ -349,24 +270,19 @@ async def consolidation_task() -> JobResult:
                             importance=memory.importance,
                         )
 
-                # Queued in the page's transaction, beside the deletes (#2476);
-                # the collection is the row's context's.
-                forgotten = await memory_service._queue_forgotten_points(point_deletes)
                 await db.commit()
-                # Never raises; what it leaves stays queued for the drain.
-                await memory_service.delete_forgotten_points(forgotten)
 
             logger.info(
                 "consolidation_task_completed",
                 users=total_users,
                 promoted=total_promoted,
-                deleted=total_deleted,
                 resource_skipped=total_resource_skipped,
             )
             return {
                 "users": total_users,
                 "promoted": total_promoted,
-                "deleted": total_deleted,
+                # #3021: this task deletes nothing; the key stays for readers.
+                "deleted": 0,
                 "resource_skipped": total_resource_skipped,
             }
 
@@ -409,16 +325,17 @@ async def cleanup_deleted_memories_task() -> JobResult:
     """Permanently delete every soft-deleted memory older than the sweep window.
 
     Runs daily at 4 AM UTC. Qdrant points are already removed at soft-delete
-    time (forget, context deletion, merge, archive), best-effort; the row is
-    what this task removes, and ``sweep_orphan_vectors_task`` removes a point
-    that outlived its row (#1798).
+    time (forget, context deletion, merge, and the archives earlier versions
+    made), best-effort; the row is what this task removes, and
+    ``sweep_orphan_vectors_task`` removes a point that outlived its row
+    (#1798).
 
     #1521: the window is ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`` (default
     30; 0 disables the sweep). It applies to every tombstone regardless of
     ``deleted_by`` or context state — this sweep is what bounds the erasure of
-    a ``forget()`` row (#1336) and the reversibility of merges and archives in
-    deployments where Sleep never visits the row (Sleep off, ``sleep_mode=
-    'skip'``, dead contexts). The Sleep retention windows
+    a ``forget()`` row (#1336) and the reversibility of merges (and of the
+    archives earlier versions made) in deployments where Sleep never visits
+    the row (Sleep off, ``sleep_mode='skip'``, dead contexts). The Sleep retention windows
     (``sleep_merge_retention_days`` / ``sleep_forget_retention_days``) purge
     earlier when set; they never extend past this one.
     """
