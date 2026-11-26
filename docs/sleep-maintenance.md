@@ -123,7 +123,7 @@ End users can change the mode via the REST API or the Web UI.
 ```bash
 curl -X PUT http://localhost:8080/api/v1/contexts/{context_id} \
   -H "Content-Type: application/json" \
-  -H "Cookie: session=..." \
+  -H "Cookie: kagura_session=..." \
   -d '{"sleep_mode": "skip"}'
 ```
 
@@ -266,12 +266,12 @@ Per-phase toggles apply on top of `sleep_mode`: a phase runs only if `sleep_mode
 
 ```bash
 curl -X PUT https://kagura.example.com/api/v1/admin/neural-config/sleep_edge_discovery_enabled \
-  -H "Content-Type: application/json" -H "Cookie: session=..." -d '{"value": "false"}'
+  -H "Content-Type: application/json" -H "Cookie: kagura_session=..." -d '{"value": "false"}'
 curl -X PUT https://kagura.example.com/api/v1/admin/neural-config/sleep_importance_reeval_enabled \
-  -H "Content-Type: application/json" -H "Cookie: session=..." -d '{"value": "false"}'
+  -H "Content-Type: application/json" -H "Cookie: kagura_session=..." -d '{"value": "false"}'
 ```
 
-(or the Neural Config page of the admin UI). The judge switch is new: migration `f64_3021_judge_switch` stores it as `false`, so the judge is off after the upgrade on every deployment until it is switched on the same way.
+(the cookie is a system admin's `kagura_session` session cookie in `SYSTEM_ADMIN_MODE=session`; in `service` mode send the operator credential and `X-Operator-Email` instead, see [deployment](deployment.md#system-admin-surface-issue-2767); or use the Neural Config page of the admin UI). The env variables of these keys (`SLEEP_EDGE_DISCOVERY_ENABLED`, `SLEEP_IMPORTANCE_REEVAL_ENABLED`, `SLEEP_CONSOLIDATION_JUDGE_ENABLED`) are read only for a key without a row, so on a database built by `alembic upgrade head` they change nothing. The judge switch is new: migration `f64_3021_judge_switch` stores it as `false`, so the judge is off after the upgrade on every deployment until it is switched on the same way.
 
 With edge discovery off, a context in `edges_only` mode runs no phase but Reindex and Report.
 
