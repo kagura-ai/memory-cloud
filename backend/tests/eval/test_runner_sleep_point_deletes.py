@@ -82,3 +82,33 @@ async def test_a_failed_commit_deletes_nothing(run_sleep: RunSleep) -> None:
 
     assert order == ["run", "commit", "rollback"]
     assert result["ok"] is False
+
+
+@pytest.mark.parametrize(
+    ("run_sleep", "expected"),
+    [
+        (_replay, {"sleep_edge_discovery_enabled": True}),
+        (
+            _update,
+            {
+                "sleep_edge_discovery_enabled": True,
+                "sleep_importance_reeval_enabled": True,
+                "sleep_consolidation_judge_enabled": True,
+            },
+        ),
+    ],
+    ids=["replay", "update"],
+)
+async def test_the_runners_switch_their_phases_on_explicitly(
+    run_sleep: RunSleep, expected: dict[str, bool]
+) -> None:
+    """#3021: the phases are off by default; the runners that measure them
+    switch them on, so their arms run what they ran before."""
+    order: list[str] = []
+    with _orchestrator(order):
+        from services.sleep.orchestrator import SleepOrchestrator
+
+        await run_sleep(_db(order))
+        config = SleepOrchestrator.return_value.run.await_args.kwargs["config"]
+
+    assert {key: getattr(config, key) for key in expected} == expected

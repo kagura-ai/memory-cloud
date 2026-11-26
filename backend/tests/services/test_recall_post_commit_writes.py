@@ -147,7 +147,8 @@ class TestRecallOrder:
         async def commit() -> None:
             order.append("commit")
 
-        async def record_access(_self, responses, memories, *, client) -> None:
+        async def record_access(_self, responses, memories, *, client, stamp_delivery) -> None:
+            assert stamp_delivery is True  # #3022: a direct caller ships the page as it is
             order.append(f"access:{client}:{len(responses)}")
 
         service.db.commit = AsyncMock(side_effect=commit)
@@ -169,6 +170,8 @@ class TestRecordAccess:
         fresh = _memory()
         already = _memory(scope="persistent", importance=0.9)
         responses = [_response(m) for m in (old, fresh, already)]
+        # #3022: the middle row carries content, the others are summary-only.
+        responses[1].content = "the body"
         session = _isolated(service)
         repo = MagicMock()
         repo.bulk_update_access_stats = AsyncMock(
@@ -188,11 +191,11 @@ class TestRecordAccess:
             )
 
         cls.assert_called_once_with(session)
+        # #1046: recall is surfacing, never adoption. #3022: only the row that
+        # carries content is stamped as delivered.
         repo.bulk_update_access_stats.assert_awaited_once_with(
-            [old.id, fresh.id, already.id], "claude"
+            [old.id, fresh.id, already.id], "claude", delivered_ids=[fresh.id]
         )
-        # #1046: recall is surfacing, never adoption.
-        assert repo.bulk_update_access_stats.await_args.kwargs == {}
         repo.bulk_promote_to_persistent.assert_awaited_once_with([old.id], skip_locked=True)
         session.commit.assert_awaited_once()
         assert [r.scope for r in responses] == ["persistent", "working", "persistent"]
@@ -403,6 +406,70 @@ class TestHebbianLearningLock:
             await self._learn(service, graph_db)
 
 
+class TestDeliveryStamp:
+    """#3022: a caller that fits its reply after recall returns (the MCP tool)
+    passes ``stamp_delivery=False`` and stamps the rows its reply carries."""
+
+    @pytest.mark.asyncio
+    async def test_no_stamp_in_the_access_write_when_the_caller_stamps(self, service):
+        memory = _memory()
+        responses = [_response(memory)]
+        responses[0].content = "the body"
+        _isolated(service)
+        repo = MagicMock()
+        repo.bulk_update_access_stats = AsyncMock(return_value={memory.id: _stats()})
+        repo.bulk_promote_to_persistent = AsyncMock(return_value=[])
+
+        with patch("services.memory_service.MemoryRepository", return_value=repo):
+            await service._recall_record_access(
+                responses, {"a": memory}, client="claude", stamp_delivery=False
+            )
+
+        repo.bulk_update_access_stats.assert_awaited_once_with(
+            [memory.id], "claude", delivered_ids=[]
+        )
+
+    @pytest.mark.asyncio
+    async def test_record_delivery_stamps_in_an_isolated_session(self, service):
+        ids = [uuid4(), uuid4()]
+        session = _isolated(service)
+        repo = MagicMock()
+        repo.stamp_delivery = AsyncMock(return_value=set(ids))
+
+        with patch("services.memory_service.MemoryRepository", return_value=repo) as cls:
+            assert await service.record_delivery(ids) is True
+
+        cls.assert_called_once_with(session)
+        repo.stamp_delivery.assert_awaited_once_with(ids)
+        session.commit.assert_awaited_once()
+        service.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_stamp_is_logged_and_never_raised(self, service):
+        _isolated(service)
+        repo = MagicMock()
+        repo.stamp_delivery = AsyncMock(side_effect=OperationalError("UPDATE", {}, Exception()))
+
+        with (
+            patch("services.memory_service.MemoryRepository", return_value=repo),
+            patch("services.memory_service.logger") as log,
+        ):
+            assert await service.record_delivery([uuid4()]) is False
+
+        log.warning.assert_called_once()
+        assert log.warning.call_args.args == ("delivery_stamp_failed",)
+        assert log.warning.call_args.kwargs == {
+            "error_type": "OperationalError",
+            "memory_count": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_stamp_opens_no_session(self, service):
+        service._isolated_session = MagicMock()  # type: ignore[method-assign]
+        assert await service.record_delivery([]) is True
+        service._isolated_session.assert_not_called()
+
+
 class TestReadOnlyRecall:
     """#2773: ``learning=False`` (the MCP recall on the google view) writes
     nothing later results depend on; the access bookkeeping still runs."""
@@ -423,7 +490,7 @@ class TestReadOnlyRecall:
                 responses, {"a": old}, client="claude", promote=False
             )
 
-        repo.bulk_update_access_stats.assert_awaited_once_with([old.id], "claude")
+        repo.bulk_update_access_stats.assert_awaited_once_with([old.id], "claude", delivered_ids=[])
         repo.bulk_promote_to_persistent.assert_not_awaited()
         session.commit.assert_awaited_once()
         assert responses[0].scope == "working"
@@ -440,5 +507,7 @@ class TestReadOnlyRecall:
 
         assert service._recall_run_hebbian_learning.await_count == (1 if learning else 0)
         service._recall_record_access.assert_awaited_once()
-        expected = {"client": "api"} if learning else {"client": "api", "promote": False}
+        expected = {"client": "api", "stamp_delivery": True}
+        if not learning:
+            expected["promote"] = False
         assert service._recall_record_access.await_args.kwargs == expected

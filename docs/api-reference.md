@@ -450,7 +450,7 @@ Retrieve complete details (Layer 3) of a specific memory by ID.
 |-------|------|----------|-------------|
 | `memory_id` | string (UUID) | Yes | Memory ID from recall results |
 | `version` | integer ≥ 1 | No | An earlier version to read ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)); omitted, the current one |
-| `record_access` | boolean | No | Default `true`: the read counts in the memory's access stats (`access_count`, the adoption signal `reference_count`, `last_used_at`). `false` reads without them, for a client's own re-read that is not an adoption ([#2518](https://github.com/kagura-ai/memory-cloud/issues/2518)); the access check and the response are unchanged |
+| `record_access` | boolean | No | Default `true`: the read counts in the memory's access stats (`access_count`, the adoption signal `reference_count`, `last_used_at`, and the delivery stamps `first_delivered_at` / `last_delivered_at`, [#3022](https://github.com/kagura-ai/memory-cloud/issues/3022)). `false` reads without them, for a client's own re-read that is not an adoption ([#2518](https://github.com/kagura-ai/memory-cloud/issues/2518)); the access check and the response are unchanged |
 
 **Response:**
 

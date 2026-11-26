@@ -184,9 +184,11 @@ class TestSleepMaintenanceConfig:
         assert config.sleep_max_llm_calls_per_run == 50
         assert config.sleep_dedup_enabled is True
         assert config.sleep_dedup_similarity_threshold == 0.92
-        assert config.sleep_edge_discovery_enabled is True
+        # #3021: the phases nothing reads by default, and the judge, start off.
+        assert config.sleep_edge_discovery_enabled is False
         assert config.sleep_edge_discovery_sample_size == 30
-        assert config.sleep_importance_reeval_enabled is True
+        assert config.sleep_importance_reeval_enabled is False
+        assert config.sleep_consolidation_judge_enabled is False
 
     def test_sleep_custom_values(self):
         """Test sleep config with custom values."""
@@ -664,6 +666,57 @@ class TestForgetRetentionConfigPlumbing:
 
         with _pytest.raises(ValueError, match="sleep_forget_retention_days"):
             NeuralMemoryConfig(sleep_forget_retention_days=-1)
+
+
+class TestSleepPhaseDefaults3021:
+    """#3021: edge discovery, importance re-evaluation and the consolidation
+    judge are off by default — in code, in env, and for a database without a
+    stored row (one built by ``create_all``). A stored row still wins, so an
+    existing deployment keeps what it stored."""
+
+    _KEYS = (
+        "sleep_edge_discovery_enabled",
+        "sleep_importance_reeval_enabled",
+        "sleep_consolidation_judge_enabled",
+    )
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, monkeypatch):
+        for env in (
+            "SLEEP_EDGE_DISCOVERY_ENABLED",
+            "SLEEP_IMPORTANCE_REEVAL_ENABLED",
+            "SLEEP_CONSOLIDATION_JUDGE_ENABLED",
+        ):
+            monkeypatch.delenv(env, raising=False)
+        NeuralMemoryConfig.invalidate_cache()
+        yield
+        NeuralMemoryConfig.invalidate_cache()
+
+    _db = staticmethod(TestForgetRetentionConfigPlumbing._db)
+
+    def test_env_defaults_are_off(self):
+        config = NeuralMemoryConfig.from_env()
+        assert [getattr(config, k) for k in self._KEYS] == [False, False, False]
+
+    async def test_a_database_without_rows_gets_the_code_default(self):
+        config = await NeuralMemoryConfig.from_db(self._db({}))
+        assert [getattr(config, k) for k in self._KEYS] == [False, False, False]
+
+    async def test_a_stored_true_still_wins(self):
+        config = await NeuralMemoryConfig.from_db(self._db(dict.fromkeys(self._KEYS, True)))
+        assert [getattr(config, k) for k in self._KEYS] == [True, True, True]
+
+    async def test_the_env_switches_them_on(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_EDGE_DISCOVERY_ENABLED", "true")
+        monkeypatch.setenv("SLEEP_IMPORTANCE_REEVAL_ENABLED", "true")
+        monkeypatch.setenv("SLEEP_CONSOLIDATION_JUDGE_ENABLED", "true")
+        config = await NeuralMemoryConfig.from_db(self._db({}))
+        assert [getattr(config, k) for k in self._KEYS] == [True, True, True]
+
+    def test_the_reset_defaults_are_off(self):
+        from api.routes.neural_config import DEFAULT_VALUES
+
+        assert [DEFAULT_VALUES[k] for k in self._KEYS] == ["false", "false", "false"]
 
 
 class TestSupersedeVerifyConfig:

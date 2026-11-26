@@ -4,7 +4,9 @@
 
 Sleep Maintenance is Kagura Memory Cloud's background cleanup cycle: a nightly, per-context batch process that discovers missing edges, merges duplicates, re-evaluates importance, consolidates working memories, re-indexes what changed, and records the entire run for auditing and rollback.
 
-Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Over time this leaves debt — near-duplicates, stale importance values, memories that should have been promoted or archived, and graph gaps between semantically related notes. Sleep is where that debt is paid down asynchronously so reads (`recall`, `explore`) stay precise.
+Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Over time this leaves debt — near-duplicates, stale importance values, memories that should have been promoted, and graph gaps between semantically related notes. Sleep is where that debt is paid down asynchronously so reads (`recall`, `explore`) stay precise.
+
+**A memory is kept until its owner or writer deletes it** (#3021). `forget`, a duplicate merge the deployment enabled (Phase 2) and the documented retention of deleted rows (Phase 2.5, the platform cleanup sweep) are the only ways a row goes away. No phase archives or deletes a memory for age or disuse, and neither does the legacy `consolidation_task` that runs when Sleep is off.
 
 ## Execution Flow
 
@@ -25,7 +27,7 @@ Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Ove
 │    1. Load NeuralMemoryConfig                                │
 │    2. Resolve context.sleep_mode → full / edges_only / skip │
 │    3. Create SleepReport (status=running)                    │
-│    4. Execute phases with shared SleepBudget                 │
+│    4. Execute phases, each with its own SleepBudget         │
 │    5. Finalize report (completed | failed | rolled_back)    │
 └─────────────────────────────────────────────────────────────┘
                               ↓
@@ -42,13 +44,13 @@ Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Ove
                       └───────────────┘
 ```
 
-Phases are independently recoverable. If phase N fails, phases N+1..6 still execute, the error is recorded in the report, and the run is marked `completed` with the failing phase's error captured — fatal exceptions mark the run `failed`. Budget (`SleepBudget`) is shared across all phases and enforces upper bounds on LLM calls and memories processed per run.
+Phases are independently recoverable. If phase N fails, phases N+1..6 still execute, the error is recorded in the report, and the run is marked `completed` with the failing phase's error captured — fatal exceptions mark the run `failed`. Each phase has its own budget (`SleepBudget`, #3019): the full memory allowance and a share of the run's LLM calls, so one phase cannot starve another (see "Budget enforcement" below).
 
 ## The Six Phases
 
 ### Phase 1 — Edge Discovery
 
-Finds missing edges between related memories using medium-similarity Qdrant search with optional LLM judgment.
+Finds missing edges between related memories using medium-similarity Qdrant search with optional LLM judgment. **Off by default** (`sleep_edge_discovery_enabled`, #3021): its edges are read by `explore` and the opt-in related index.
 
 - **Algorithm**: recency-weighted sampling of edge-poor memories → medium-similarity neighbor search (0.6–0.9) → drop pairs that already have edges → LLM batch judgment for `related`, `edge_type`, `confidence` → create confirmed edges via `NeuralEdgeRepository`.
 - **LLM**: yes (optional — skipped if the LLM service is disabled).
@@ -61,9 +63,9 @@ Detects and merges duplicate memories by clustering high-similarity neighbors.
 
 - **Algorithm**: per-memory high-similarity search → build candidate pairs → Union-Find clustering (cluster size capped at 5 to prevent runaway merges) → LLM batch judgment (`merge` / `keep_both`) in LLM mode, or auto-merge at similarity ≥ 0.98 in non-LLM mode → deterministic winner rules → keep winner, soft-delete losers, transfer edges, merge tags.
 - **Deterministic winner rules** (applied to every LLM decision; the duplicate verdict is trusted, the direction is enforced): **newer wins** (#1198 — the recency-aware veto that closed the stale-deletion failure mode found at 10–18% in the eval program), and at **equal recency, human-authored wins** (#1209 — a `source_type='manual'` memory never loses to ingested content on a tie). Overrides are counted in the report (`winner_overrides`, with a per-rule `winner_override_reasons` breakdown).
-- **Pinned memories are never candidates** (#1519, #1523): rows with `delivery_mode='always'` — the deterministic `load_pinned()` lane (#886) — are exempt from every automated deleter through one shared predicate (`not_pinned_predicate()` in `models/memory.py`): dedup merge, the consolidation archive branch and importance re-evaluation all exclude them at their candidate fetch, and `rollback_sleep_run` refuses to demote a pinned promotion. In dedup they can be neither a merge loser (which would silently drop a standing guardrail out of `load_pinned()`) nor a winner (merge folds only tags, so a pin "winning" would discard the newer unpinned fact instead of absorbing it). Candidate discovery restricts vector-search hits to the fetched set, so a pinned neighbour cannot re-enter that way either; the per-memory neighbour cap is widened by the number of pinned rows in scope (bounded) so pinned near-duplicates cannot crowd out an unpinned memory's true duplicate. An unpinned near-duplicate of a pinned memory is therefore left alone; the ingest-time `supersede_candidate` hint remains the surface that points it out. **Upgrading an install that already ran dedup:** the exclusion is write-side only — a pinned row that lost a merge before this rule stays soft-deleted (restore it with `undo_merge_action` while `sleep_merge_retention_days` allows), and in shadow mode a `supersedes` edge already written against a pinned row keeps hiding it from `recall()` until the edge is removed. Audit `sleep_actions` merge rows whose loser had `delivery_mode='always'`.
+- **Pinned memories are never candidates** (#1519, #1523): rows with `delivery_mode='always'` — the deterministic `load_pinned()` lane (#886) — are exempt from every automated pass through one shared predicate (`not_pinned_predicate()` in `models/memory.py`): dedup merge, consolidation and importance re-evaluation all exclude them at their candidate fetch, and `rollback_sleep_run` refuses to demote a pinned promotion. In dedup they can be neither a merge loser (which would silently drop a standing guardrail out of `load_pinned()`) nor a winner (merge folds only tags, so a pin "winning" would discard the newer unpinned fact instead of absorbing it). Candidate discovery restricts vector-search hits to the fetched set, so a pinned neighbour cannot re-enter that way either; the per-memory neighbour cap is widened by the number of pinned rows in scope (bounded) so pinned near-duplicates cannot crowd out an unpinned memory's true duplicate. An unpinned near-duplicate of a pinned memory is therefore left alone; the ingest-time `supersede_candidate` hint remains the surface that points it out. **Upgrading an install that already ran dedup:** the exclusion is write-side only — a pinned row that lost a merge before this rule stays soft-deleted (restore it with `undo_merge_action` while `sleep_merge_retention_days` allows), and in shadow mode a `supersedes` edge already written against a pinned row keeps hiding it from `recall()` until the edge is removed. Audit `sleep_actions` merge rows whose loser had `delivery_mode='always'`.
 - **Time memories are never candidates** (#1524): rows with `type='time'` — the deterministic `recall_upcoming()` lane, served by `details.trigger`, not by summary — are excluded at the same candidate fetch. Two occurrences of a recurring window ("standup 09:00" on different dates) share a summary and embed identically, and merge folds only tags, so the loser's window would silently vanish from the lane. Same upgrade note applies: the exclusion is write-side only; audit merge rows whose loser had `type='time'`.
-- **Resource-indexed rows are never candidates** (#2996): a row the resource indexer owns (it carries a resource's `resource_id`, `doc_id` and numeric `version` and names the indexer's point; `resource_owned_predicate()` in `models/memory.py`, the one rule every automated pass applies) belongs to its source, which alone replaces or removes it. Dedup merge, the consolidation archive and importance re-evaluation exclude it at their candidate fetch and again at the write (the archive's tombstone UPDATE, the merge's locked re-check, whose refusals are counted in the report's `skipped_resource_owned`, and the importance UPDATE), and the legacy `consolidation_task` neither promotes nor deletes it (counted in its `resource_skipped`). This holds whatever the context's settings: a sync target that left feed management (manual mode) with `sleep_mode='full'` keeps its rows. Such rows still answer the vector search, so they widen dedup's per-memory neighbour cap like pinned rows do. The indexer writes these rows `persistent` from creation (and makes a working row it takes over persistent); migration `f62_2996_resource_rows_persist` moved the ones written `working` before v0.181.0.
+- **Resource-indexed rows are never candidates** (#2996): a row the resource indexer owns (it carries a resource's `resource_id`, `doc_id` and numeric `version` and names the indexer's point; `resource_owned_predicate()` in `models/memory.py`, the one rule every automated pass applies) belongs to its source, which alone replaces or removes it. Dedup merge, consolidation and importance re-evaluation exclude it at their candidate fetch, and the writes check again (the merge's locked re-check, whose refusals are counted in the report's `skipped_resource_owned`, and the importance UPDATE); the legacy `consolidation_task` does not promote it (counted in its `resource_skipped`). This holds whatever the context's settings: a sync target that left feed management (manual mode) with `sleep_mode='full'` keeps its rows. Such rows still answer the vector search, so they widen dedup's per-memory neighbour cap like pinned rows do. The indexer writes these rows `persistent` from creation (and makes a working row it takes over persistent); migration `f62_2996_resource_rows_persist` moved the ones written `working` before v0.181.0.
 - **Open memos never lose a merge** (#2584): a pair whose loser carries one of `SLEEP_ARCHIVE_EXEMPT_TAGS` (exact match, default `status:open`) is skipped in both modes and counted as `skipped_exempt`. It is not flipped: merge folds only tags into the winner, so an exempt winner would discard the other side's (often newer) content — the reason pinned memories are excluded rather than made absolute winners. An exempt memory can still win and absorb a non-exempt duplicate; two exempt memories never merge, and their pair is judged again on later runs. The tag is read from the candidate fetch (no execution-time re-check, unlike a pin).
 - **Direct-score eligibility** (#1229, #1231): a merge decision only executes when the (winner, loser) pair's **direct** pairwise similarity is at/above the dedup threshold. Union-Find clusters chain transitively, so the judge can otherwise nominate two members whose true pairwise similarity is far below the threshold (observed 0.43–0.66 under 0.92) — merging distinct facts that merely share a template. The per-memory top-10 neighbor search saturates in dense duplicate clusters (#1231), so before judging, missing in-cluster pairwise scores are completed locally from the summary vectors already embedded during candidate discovery (≤10 cosines per cluster; the judge — LLM prompt and rule-based path alike — sees the true score instead of 0.0, and a genuinely duplicate pair merges instead of being false-positive vetoed). Report counters: `llm_merge_guarded` (sub-threshold vetoes only), `llm_merge_rescued` (merges on pairs the candidate cap had missed), `llm_merge_unverifiable` (no score computable — vector unavailable; fail-closed veto), `settled_decisions_skipped` (#1232 — shadow-mode judge re-nominations of pairs a supersedes edge already settled: skipped, never re-merged, never counted as guarded).
 - **Audit** (#1209): every merge writes a `sleep_actions` entry carrying `merge_reason` (the judge's rationale, or the rule id on the non-LLM path), override info, both sides' `source_type` provenance and recency keys — every merge is explainable and its decision inputs are snapshotted.
@@ -72,15 +74,15 @@ Detects and merges duplicate memories by clustering high-similarity neighbors.
 
 ### Phase 2.5 — Merge Retention (#1209)
 
-Hard-deletes merge losers whose soft-deletion is older than the declared retention window — destructive deletion as an explicit, telemetered second step, never a side effect of the merge itself. Consolidation archives (`deleted_by='sleep_consolidation'`, #1520) share this window — both sleep tombstone classes are one set (`SLEEP_TOMBSTONE_DELETED_BY`), and the user-forget window is defined as its complement.
+Hard-deletes merge losers whose soft-deletion is older than the declared retention window — destructive deletion as an explicit, telemetered second step, never a side effect of the merge itself. The consolidation archives earlier versions made (`deleted_by='sleep_consolidation'`, #1520; nothing archives since #3021) share this window — both sleep tombstone classes are one set (`SLEEP_TOMBSTONE_DELETED_BY`), and the user-forget window is defined as its complement.
 
-- **Default**: `sleep_merge_retention_days = 0` — **no additional Sleep purge**. This is not "retain forever": the platform-wide cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days, `0` disables it) still hard-deletes every tombstone older than its window, whether or not Sleep runs and regardless of who tombstoned the row (#1521). Since #1520 the same Sleep window bounds consolidation archives. Undo and rollback are possible inside whichever window is shorter.
+- **Default**: `sleep_merge_retention_days = 0` — **no additional Sleep purge**. This is not "retain forever": the platform-wide cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days, `0` disables it) still hard-deletes every tombstone older than its window, whether or not Sleep runs and regardless of who tombstoned the row (#1521). The same Sleep window bounds the consolidation archives earlier versions made. Undo and rollback are possible inside whichever window is shorter.
 - **When enabled**: losers past the window are purged and the run records one batch-summary `purge` action (`purged`, `retention_days`, `cutoff`). Per-merge undo and run rollback are only possible **inside** the window; the undo API returns 410 naming this setting once a loser is purged.
 - **LLM**: no.
 
 ### Phase 3 — Importance Re-evaluation
 
-Adjusts memory importance using LLM scoring combined with EMA smoothing.
+Adjusts memory importance using LLM scoring combined with EMA smoothing. **Off by default** (`sleep_importance_reeval_enabled`, #3021): importance reaches `recall` only through an explicit filter and a small re-rank.
 
 - **Algorithm**: target memories with importance ∈ [0.2, 0.8] and staleness ≥ 7 days → LLM batch score → `new = α · llm_score + (1 − α) · old`, with α defaulting to `importance_ema_alpha = 0.3` → clamp to [0.0, 1.0] → update PostgreSQL and Qdrant payloads.
 - **LLM**: yes.
@@ -88,13 +90,13 @@ Adjusts memory importance using LLM scoring combined with EMA smoothing.
 
 ### Phase 4 — Consolidation
 
-Promotes, keeps, or archives working memories based on fast-path rules plus LLM judgment for borderline cases. **Archive is a soft delete** (#1520): the row is tombstoned with `deleted_by='sleep_consolidation'` and its vector removed, so `rollback_sleep_run` restores it (row + re-embed) for as long as the tombstone survives — the Phase 2.5 retention window when set, and always the platform cleanup sweep (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), whichever is shorter; a rollback that finds no row reports it under `errors` instead of counting a restore. (The legacy `consolidation_task` cron used when `SLEEP_ENABLED` is not `true` still hard-deletes stale working memories with no tombstone or audit row.)
+Promotes working memories to `persistent` by rule, and optionally by an LLM judge for the borderline ones. It archives and deletes nothing (#3021): a memory the rules do not promote stays `working`. `scope` has no effect on ranking, quota or retention: `persistent` means used, or old enough by rule; `working` is everything else.
 
-- **Algorithm**: rule-based fast path for clear-cut `promote` / `archive` decisions (no LLM) → LLM judgment only for borderline cases → bridge-node protection (never delete memories with high graph centrality).
-- **Judge actions** (#1233): the LLM judge decides `promote` vs `keep` only. Archival is exclusively the deterministic rule path's job (`_archival_eligible` + isolation, which runs *before* the judge) — the judge's `archive` option was removed because its picks were always either redundant or guarded out (#1229), wasting prompt tokens and probability mass. The eligibility guard remains in code as a defensive backstop; `llm_archive_guarded` stays in the report vocabulary (expected 0).
-- **Exempt tags** (#2584): `_archival_eligible` is false for a memory carrying one of `SLEEP_ARCHIVE_EXEMPT_TAGS` (exact match, default `status:open` — an open review memo waits for the change that touches its files, often past the 30-day floor and without a `reference()`), so neither the rule path nor an LLM archive verdict archives it; it can still be promoted. Removing the tag makes it eligible again on the next run. A refused LLM verdict counts in `llm_archive_guarded` (log field `exempt_tag`). The legacy `consolidation_task` (run when `SLEEP_ENABLED` is off) never deletes such a memory either.
-- **LLM**: yes (optional — in non-LLM mode, behavior matches the legacy `consolidation_task`).
-- **Replaces**: the pre-Sleep rule-only `consolidation_task`.
+- **Algorithm**: rule-based promotion (adoption via `reference()`, high importance once aged, graph centrality; no LLM) → the LLM judge decides `promote` vs `keep` for the memories no rule promoted, only when `sleep_consolidation_judge_enabled` is on (**off by default**) and a Sleep LLM is configured.
+- **Report keys**: `rule_promoted`, `borderline`, `llm_promoted`; `rule_deleted`, `llm_archived` and `llm_archive_guarded` stay in the report and read 0, so older reports and their readers keep one shape. `rollback_sleep_run` still restores the archives (`deleted_by='sleep_consolidation'`) earlier versions made, while their tombstones survive.
+- **Upgrade note** (#3021): `CONSOLIDATION_ADOPTION_DELETE_CUTOFF` is gone; nothing reads it. A row that used to be archived (30 days old, never adopted, after the cutoff) is now borderline: it stays working, or the judge, when on, may promote it. Rows archived or deleted before the upgrade are not restored by it (`rollback_sleep_run` restores a past run's archives while their tombstones last).
+- **LLM**: optional (the judge); off by default.
+- **Replaces**: the pre-Sleep rule-only `consolidation_task`, which still runs when `SLEEP_ENABLED` is not `true`; it promotes by its own rules and deletes nothing.
 
 ### Phase 5 — Reindex
 
@@ -121,7 +123,7 @@ End users can change the mode via the REST API or the Web UI.
 ```bash
 curl -X PUT http://localhost:8080/api/v1/contexts/{context_id} \
   -H "Content-Type: application/json" \
-  -H "Cookie: session=..." \
+  -H "Cookie: kagura_session=..." \
   -d '{"sleep_mode": "skip"}'
 ```
 
@@ -136,12 +138,12 @@ Navigate to a context's **Settings** tab → **Sleep Maintenance** card. Select 
 | Mode          | Phases                                              | Typical use                                              |
 |---------------|-----------------------------------------------------|----------------------------------------------------------|
 | `full`        | Edge Discovery → Dedup → Importance → Consolidation → Reindex → Report | Interactive memory contexts (opt-in via owner Settings). |
-| `edges_only`  | Edge Discovery → Reindex → Report                   | Resource-ingested contexts (external docs, ref material). |
+| `edges_only`  | Edge Discovery (when `sleep_edge_discovery_enabled`) → Reindex → Report | Resource-ingested contexts (external docs, ref material). |
 | `skip`        | — (the run is aborted before any phase starts)      | Default for new contexts; externally managed / large-scale contexts where Sleep is unwanted. |
 
 If a context's `sleep_mode` is changed while a Sleep run is in progress for that context, the in-flight run is **not** interrupted; the new mode takes effect on the next scheduled run.
 
-Mode resolution happens in `SleepOrchestrator._get_sleep_mode()`. Unknown or missing contexts fall back to `"full"`. The Reindex and Report phases themselves are not gated by `sleep_mode`; they run whenever at least one preceding phase executed and produced changes.
+Mode resolution happens in `SleepOrchestrator._get_sleep_mode()`. Unknown or missing contexts fall back to `"skip"`. The Reindex and Report phases themselves are not gated by `sleep_mode`; they run whenever at least one preceding phase executed and produced changes.
 
 ## LLM Service Layer
 
@@ -151,11 +153,11 @@ Phases 1–4 call the LLM through `LLMService`, which supports:
 - **Provider / model precedence** (#1569): a `neural_config` row (`sleep_llm_provider` / `sleep_llm_model`) > explicit `SLEEP_LLM_PROVIDER` / `SLEEP_LLM_MODEL` env > the deployment's `MANAGED_LLM_PROVIDER` / `MANAGED_LLM_MODEL` (logged once as `sleep_llm_from_managed_lane`) > the code default `openai` / `gpt-5-nano`. `SLEEP_LLM_FORCE_ENV=1` pins env over the DB row.
 - **API key priority** (most specific wins): context-scoped key → workspace-scoped key → the provider's platform env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`; `SELF_HOSTED_BASE_URL` for `self_hosted`). With `RESOLVE_STORED_BYOK_KEYS=false` the two stored-key tiers are skipped, and a judge on the managed lane resolves the platform credential only (`platform_only`). See "LLM Credentials" in [deployment.md](deployment.md).
 - **Interface**: `complete_json()` returns `(parsed_json, tokens_used)`; each phase aggregates tokens into its `PhaseResult`, and the reporter rolls them up into the `SleepReport`.
-- **Budget enforcement**: every phase checks `SleepBudget.can_afford()` before issuing an LLM batch. When the budget is exhausted, later phases are skipped with `skip_reason="budget_exhausted"`. Defaults: `max_llm_calls=50`, `max_memories=200` per run (override via Neural Config).
+- **Budget enforcement** (#3019): each phase gets its own budget. Its memory allowance is the full `sleep_max_memories_per_run` (so a run's `memories_processed` can exceed it, one allowance per phase). The run's `sleep_max_llm_calls_per_run` is shared in equal parts among the enabled phases of the run that call a model — edge discovery and dedup with a Sleep LLM configured, importance re-evaluation, and the consolidation judge when it is on — in run order, the remainder of the division to the earliest; the calls a phase leaves unused roll forward to the next such phase, so the run never spends more than the setting. Every phase checks `SleepBudget.can_afford()` before an LLM batch. A model phase whose share is used up at entry is skipped with `skip_reason="budget_exhausted"` (the run stays `completed`); a phase that calls no model — the retention phases, the related index, and consolidation's rule pass — is never skipped for budget, and consolidation records `llm_pass_cut_for_budget` / `llm_unjudged` when its judge ran out of calls. `sleep_edge_discovery_sample_size` above the memory allowance is clamped at run time (log `sleep_edge_discovery_sample_clamped`); the configuration API accepts the pair. Defaults: `sleep_max_llm_calls_per_run=50`, `sleep_max_memories_per_run=200` (override via Neural Config).
 
 ### Trust boundary for memory content (prompt-injection hardening)
 
-A memory `summary` can be **untrusted** — it may originate from external text ingested via connectors. Phases 1–4 interpolate that summary into the LLM judgment prompt, so a crafted payload in a memory body could otherwise try to steer the nightly batch's judgments (graph pollution, false merges, false archival) in an unattended job. Two input-side defenses neutralize this (issue #919):
+A memory `summary` can be **untrusted** — it may originate from external text ingested via connectors. Phases 1–4 interpolate that summary into the LLM judgment prompt, so a crafted payload in a memory body could otherwise try to steer the nightly batch's judgments (graph pollution, false merges, false promotions) in an unattended job. Two input-side defenses neutralize this (issue #919):
 
 - **Structural isolation**: every summary is wrapped via `wrap_untrusted_content()` (`services/sleep/prompts.py`) between the explicit markers `[BEGIN UNTRUSTED MEMORY CONTENT]` … `[END UNTRUSTED MEMORY CONTENT]`. The helper also defangs any verbatim copy of those markers found *inside* the content, so a payload cannot forge the closing marker to "break out" of the wrapper. Truncation to 300 chars is applied to the raw content first.
 - **Injection-resistance directive**: every phase system prompt carries `INJECTION_RESISTANCE_DIRECTIVE`, instructing the model to treat everything between the markers strictly as data and to ignore any embedded directive that tries to change its task, rules, scoring, verdicts, or output format.
@@ -223,13 +225,13 @@ running  →  completed | failed | cancelled | rolled_back
 - **memory_merged** — restore the soft-deleted loser(s), revert winner's merged tags and content.
 - **importance_updated** — restore the previous importance value.
 - **memory_promoted** — revert the promotion.
-- **memory_archived** — restore from archive.
+- **memory_archived** — restore from archive (the archives versions before #3021 made; nothing archives now).
 
 Restored memories are re-embedded back into Qdrant. On full success the report moves to `rolled_back`; if any action fails to reverse, the report is marked `failed` and the partial state is recorded in the audit log.
 
-Sleep does not move a memory's `version` ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) and writes no `memory_revisions` rows: importance re-evaluation, the tag union of a merge, promotion, archiving and every rollback above are maintenance with their own record in `sleep_actions`, so an agent's `update_memory(expected_version=N)` is never refused because a Sleep run touched the memory in between.
+Sleep does not move a memory's `version` ([#2043](https://github.com/kagura-ai/memory-cloud/issues/2043)) and writes no `memory_revisions` rows: importance re-evaluation, the tag union of a merge, promotion and every rollback above are maintenance with their own record in `sleep_actions`, so an agent's `update_memory(expected_version=N)` is never refused because a Sleep run touched the memory in between.
 
-`rollback_session` ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)) and Sleep stay out of each other's way: a session memory that Sleep merged away or archived is skipped (`merged_by_sleep`) — undo that with `rollback_sleep_run` — and a merge winner the session created is forgotten while its loser keeps the Sleep tombstone `rollback_sleep_run` can still restore. Because Sleep does not version, a session rollback that puts back a memory's earlier tags or importance overwrites a tag union or re-evaluation Sleep made in between; the next run applies it again.
+`rollback_session` ([#2044](https://github.com/kagura-ai/memory-cloud/issues/2044)) and Sleep stay out of each other's way: a session memory that Sleep merged away (or archived, before #3021) is skipped (`merged_by_sleep`) — undo that with `rollback_sleep_run` — and a merge winner the session created is forgotten while its loser keeps the Sleep tombstone `rollback_sleep_run` can still restore. Because Sleep does not version, a session rollback that puts back a memory's earlier tags or importance overwrites a tag union or re-evaluation Sleep made in between; the next run applies it again.
 
 ### Per-merge undo (#1209)
 
@@ -250,17 +252,30 @@ All Sleep-specific settings live under the Sleep category of Neural Config (`bac
 |-------------------------------|----------------------------------------------------------------|
 | `sleep_llm_provider`          | `openai`, `anthropic`, `gemini` or `self_hosted`.               |
 | `sleep_llm_model`             | Model identifier passed to the provider.                       |
-| `sleep_max_memories_per_run`  | Upper bound on memories touched per context per run.           |
-| `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run (budget cap).     |
+| `sleep_max_memories_per_run`  | Upper bound on memories each phase touches per context per run (each phase has its own allowance, #3019). |
+| `sleep_max_llm_calls_per_run` | Upper bound on LLM calls per context per run, shared among the phases that call a model (#3019). |
 | `sleep_dedup_enabled`         | Master toggle for Phase 2.                                     |
 | `sleep_merge_retention_days`  | Sleep-tombstone purge window (#1209, #1520). `0` = no additional Sleep purge; the cleanup sweep still applies (#1521). |
-| `sleep_edge_discovery_enabled`| Master toggle for Phase 1.                                     |
-| `sleep_importance_reeval_enabled` | Master toggle for Phase 3.                                 |
-| `sleep_consolidation_enabled` | Master toggle for Phase 4.                                     |
+| `sleep_edge_discovery_enabled`| Master toggle for Phase 1. Default `false` (#3021).            |
+| `sleep_importance_reeval_enabled` | Master toggle for Phase 3. Default `false` (#3021).        |
+| `sleep_consolidation_judge_enabled` | LLM judge for the borderline memories of Phase 4. Default `false` (#3021); rule promotion always runs. |
 
-Per-phase toggles apply on top of `sleep_mode`: a phase runs only if `sleep_mode` allows it *and* the phase's enable flag is `true`.
+Per-phase toggles apply on top of `sleep_mode`: a phase runs only if `sleep_mode` allows it *and* the phase's enable flag is `true`. Consolidation has no toggle of its own: its rule pass runs in every `full` run.
 
-`SLEEP_ARCHIVE_EXEMPT_TAGS` (#2584) is env-only, not a Neural Config field: the tags that keep a memory out of consolidation archive and off the losing side of a merge. A JSON array (`["status:open"]`) or a comma-separated list (`status:open,status:blocked`); unset means `status:open`, an empty value (`""` or `[]`) turns the exemption off, and a JSON value that does not parse to strings keeps the default and logs `sleep_archive_exempt_tags_invalid`.
+**Defaults and stored rows** (#3021): a `neural_config` row wins over the env var and the code default. A fresh database is seeded with `false` for the three switches above, and a database built without seed rows (`create_all`) uses the code default (`false`). A deployment migrated before v0.185.0 keeps the `true` it stored for `sleep_edge_discovery_enabled` and `sleep_importance_reeval_enabled`; to adopt the new defaults, change each through the configuration API, as a system admin:
+
+```bash
+curl -X PUT https://kagura.example.com/api/v1/admin/neural-config/sleep_edge_discovery_enabled \
+  -H "Content-Type: application/json" -H "Cookie: kagura_session=..." -d '{"value": "false"}'
+curl -X PUT https://kagura.example.com/api/v1/admin/neural-config/sleep_importance_reeval_enabled \
+  -H "Content-Type: application/json" -H "Cookie: kagura_session=..." -d '{"value": "false"}'
+```
+
+(the cookie is a system admin's `kagura_session` session cookie in `SYSTEM_ADMIN_MODE=session`; in `service` mode send the operator credential and `X-Operator-Email` instead, see [deployment](deployment.md#system-admin-surface-issue-2767); or use the Neural Config page of the admin UI). The env variables of these keys (`SLEEP_EDGE_DISCOVERY_ENABLED`, `SLEEP_IMPORTANCE_REEVAL_ENABLED`, `SLEEP_CONSOLIDATION_JUDGE_ENABLED`) are read only for a key without a row, so on a database built by `alembic upgrade head` they change nothing. The judge switch is new: migration `f64_3021_judge_switch` stores it as `false`, so the judge is off after the upgrade on every deployment until it is switched on the same way.
+
+With edge discovery off, a context in `edges_only` mode runs no phase but Reindex and Report.
+
+`SLEEP_ARCHIVE_EXEMPT_TAGS` (#2584) is env-only, not a Neural Config field: the tags that keep a memory off the losing side of a merge (the name predates #3021, when consolidation archived too). A JSON array (`["status:open"]`) or a comma-separated list (`status:open,status:blocked`); unset means `status:open`, an empty value (`""` or `[]`) turns the exemption off, and a JSON value that does not parse to strings keeps the default and logs `sleep_archive_exempt_tags_invalid`.
 
 ## Related
 

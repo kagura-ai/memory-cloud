@@ -406,7 +406,17 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
             result.skip_reason = "edge_discovery_disabled"
             return result
 
-        sample_size = config.sleep_edge_discovery_sample_size
+        # #3019: the sample is charged to this phase's memory allowance; a
+        # configured sample above it is clamped here (the configuration API
+        # accepts the pair, since each PUT changes one key).
+        allowance = max(0, budget.max_memories - budget.memories_used)
+        sample_size = min(config.sleep_edge_discovery_sample_size, allowance)
+        if sample_size < config.sleep_edge_discovery_sample_size:
+            logger.warning(
+                "sleep_edge_discovery_sample_clamped",
+                configured=config.sleep_edge_discovery_sample_size,
+                used=sample_size,
+            )
         llm_enabled = config.sleep_llm_provider != ""
 
         # Step 1: Sample memories (recency-weighted)

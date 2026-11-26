@@ -708,7 +708,13 @@ async def _run_sleep(db: Any, owner: str, ctx: Any, ws: Any) -> dict[str, Any]:
     from services.sleep.orchestrator import SleepOrchestrator
 
     NeuralMemoryConfig.invalidate_cache()
-    config = replace(await NeuralMemoryConfig.from_db(db), sleep_llm_provider="")
+    # #3021: edge discovery is off by default now; the edges_only pass this
+    # runner measures switches it on explicitly.
+    config = replace(
+        await NeuralMemoryConfig.from_db(db),
+        sleep_llm_provider="",
+        sleep_edge_discovery_enabled=True,
+    )
     try:
         orchestrator = SleepOrchestrator(db)
         await orchestrator.run(

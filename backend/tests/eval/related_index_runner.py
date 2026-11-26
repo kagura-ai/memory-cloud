@@ -516,6 +516,8 @@ async def run(config: dict, output: Path) -> dict:
                 sleep_llm_provider="self_hosted",
                 sleep_llm_model=config["sleep_model"],
                 sleep_edge_discovery_sample_size=len(SOURCES),
+                # #3021: off by default now; this runner measures the phase.
+                sleep_edge_discovery_enabled=True,
             )
             llm = LLMService(db)
             phases = []

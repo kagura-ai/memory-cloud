@@ -257,10 +257,10 @@ class PersistenceInfo(BaseModel):
     implies, so a caller does not have to guess whether a memory survives until
     consolidation promotes it.
 
-    This is NOT a retention SLA. It describes the consolidation lifecycle only;
-    other maintenance (notably near-duplicate merge) has its own rules — pinned
-    memories (``delivery_mode='always'``) are exempt from it — and an
-    explicit forget() removes a memory at any time.
+    A memory is kept until its owner or writer deletes it: no pass
+    archives or deletes it for age or disuse. Removal is an explicit forget()
+    or, where a deployment enables it, near-duplicate merge — pinned memories
+    (``delivery_mode='always'``) are exempt from that.
     """
 
     scope: Literal["working", "persistent"]
@@ -283,13 +283,10 @@ class PersistenceInfo(BaseModel):
     consolidation_archive_min_age_days: int | None = Field(
         default=None,
         description=(
-            "Age floor CONSOLIDATION applies before it may archive this memory; "
-            "it also requires zero adoption. Scoped to consolidation only — it "
-            "is not a retention guarantee, and does not bind near-duplicate "
-            "merge (which skips pinned memories) or an explicit "
-            "forget(). Null when no consolidation pass is "
-            "enabled, or when the memory is persistent (consolidation acts only "
-            "on scope='working')."
+            "Always null: consolidation archives no memory, so there is no age "
+            "floor. Kept so the block keeps its shape; a memory is kept until "
+            "it is deleted (an explicit forget(), or near-duplicate merge where "
+            "enabled, which skips pinned memories)."
         ),
     )
     detail: str = Field(description="One-line summary of the above for the calling agent.")

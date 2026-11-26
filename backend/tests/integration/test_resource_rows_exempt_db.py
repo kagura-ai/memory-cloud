@@ -1,11 +1,12 @@
 """#2996: a resource-indexed row survives every automated pass in an unfenced context.
 
 The protection used to come from the context's feed settings alone. Here the
-context is ordinary (no feed, ``sleep_mode='full'``), the archive rule is on
-(``CONSOLIDATION_ADOPTION_DELETE_CUTOFF`` set), and the resource row is 31
-days old, never adopted and never read: the Sleep archive, the dedup merge and
-the legacy consolidation pass all leave it as it is, while a plain row of the
-same shape beside it is removed (the control that shows each pass ran).
+context is ordinary (no feed, ``sleep_mode='full'``) and the resource row is
+31 days old, never adopted and never read: Sleep consolidation, the dedup
+merge and the legacy consolidation pass all leave it as it is. Since #3021 no
+consolidation pass removes anything, so a plain row of the same shape is kept
+too; the dedup merge, which still removes, has the control that shows it ran
+(a plain duplicate beside it is merged).
 
 The row is tried both as the indexer writes it now (persistent) and as it
 was written before the f62 migration (working). The vector store is stubbed
@@ -25,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import select
 
-from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE, Memory
+from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from neural.config import NeuralMemoryConfig
 from services.resource_indexer import resource_point_id
 from services.sleep.dedup_merge import DedupMergePhase
@@ -100,7 +101,7 @@ async def _state(world: World, memory_id: uuid.UUID) -> tuple[bool, str | None] 
 
 
 @pytest.mark.parametrize("scope", ["persistent", "working"])
-async def test_the_sleep_archive_keeps_the_resource_row(
+async def test_sleep_consolidation_keeps_the_resource_row(
     world: World, _stubs: dict[str, Any], chunks: AsyncMock, client: MagicMock, scope: str
 ) -> None:
     resource, plain = await _seed(world, scope)
@@ -108,11 +109,8 @@ async def test_the_sleep_archive_keeps_the_resource_row(
     await _run_sleep(world)
 
     assert await _state(world, resource) == (True, None)
-    assert await _state(world, plain) == (False, DELETED_BY_SLEEP_ARCHIVE)
-    assert _stubs["points"].await_count >= 1
-    assert str(resource_point_id("catalog", "item-1", 1)) not in {
-        p for call in _stubs["points"].await_args_list for p in call.args[0]
-    }
+    assert await _state(world, plain) == (True, None)
+    _stubs["points"].assert_not_awaited()
 
 
 @pytest.mark.parametrize("scope", ["persistent", "working"])
@@ -171,9 +169,9 @@ async def test_the_legacy_pass_keeps_the_resource_row(
         result = await consolidation_task()
 
     assert await _state(world, resource) == (True, None)
-    assert await _state(world, plain) is None
+    assert await _state(world, plain) == (True, None)
     assert result is not None
-    assert result["deleted"] == 1
+    assert result["deleted"] == 0
     # Counted only when the pass reached it (a working row).
     assert result["resource_skipped"] == (1 if scope == "working" else 0)
 

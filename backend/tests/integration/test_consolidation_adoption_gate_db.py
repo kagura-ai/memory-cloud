@@ -3,8 +3,8 @@
 Drives ConsolidationPhase.execute() with a real MemoryRepository + real Memory
 rows (carrying the #1046 ``reference_count`` column) to verify the adoption gate
 end-to-end: an adopted memory promotes; a surfaced-but-unadopted one does not.
-Graph and the point-delete queue are patched (no neural edges); LLM is off.
-Also pins the #2584 archive exemption (``status:open``) on real rows.
+Graph is patched (no neural edges); LLM is off. Also pins #3021 on real rows:
+an old, never-adopted working memory is kept, whatever its tags.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from models.memory import Memory
 from services.sleep.consolidation import ADOPTION_PROMOTE_MIN, ConsolidationPhase
@@ -52,10 +52,7 @@ async def test_adoption_gate_switch_against_real_schema(db_session):
     config.sleep_llm_model = "x"
 
     phase = ConsolidationPhase(db_session, MagicMock())  # real MemoryRepository(db_session)
-    with (
-        patch("services.sleep.consolidation.GraphService") as GS,
-        patch("services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock),
-    ):
+    with patch("services.sleep.consolidation.GraphService") as GS:
         GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})  # no graph → no neural
         result = await phase.execute(config, uid, None, None, SleepBudget())
 
@@ -71,14 +68,13 @@ async def test_adoption_gate_switch_against_real_schema(db_session):
 
 
 @pytest.mark.asyncio
-async def test_open_memo_survives_archival_until_its_tag_is_removed(db_session):
-    """#2584 against the real schema and the real config default: a 40-day-old,
-    never-adopted, post-cutoff memo tagged ``status:open`` is not archived; the
-    same row is archived on the next run once the tag is gone (no stored state
-    besides the tag)."""
+async def test_old_unadopted_memories_are_kept_whatever_their_tags(db_session):
+    """#3021 against the real schema and the real config defaults: a 40-day-old,
+    never-adopted memo is kept by consolidation, open (``status:open``) or
+    closed, on every run."""
     from neural.config import NeuralMemoryConfig
 
-    uid = f"user-2584-{uuid4().hex[:8]}"
+    uid = f"user-3021-{uuid4().hex[:8]}"
 
     def _old(summary, tags):
         return Memory(
@@ -102,50 +98,21 @@ async def test_open_memo_survives_archival_until_its_tag_is_removed(db_session):
     db_session.add_all([memo, closed])
     await db_session.commit()
 
-    config = NeuralMemoryConfig(sleep_llm_provider="")  # LLM off, default exempt tags
-    assert config.sleep_archive_exempt_tags == ("status:open",)
+    config = NeuralMemoryConfig(sleep_llm_provider="openai")  # judge off by default
 
-    queued: list = []
-
-    async def _run():
+    for _ in range(2):
         phase = ConsolidationPhase(db_session, MagicMock())
-        with (
-            patch("services.sleep.consolidation.GraphService") as GS,
-            # #2565: the archived row's point is queued, deleted after the commit.
-            patch(
-                "services.sleep.consolidation.queue_point_deletes", new_callable=AsyncMock
-            ) as queue,
-            patch(
-                "services.sleep.consolidation._adoption_delete_cutoff",
-                return_value=utcnow() - timedelta(days=60),
-            ),
-        ):
+        with patch("services.sleep.consolidation.GraphService") as GS:
             GS.return_value.stats = AsyncMock(return_value={"total_edges": 0})
             result = await phase.execute(config, uid, None, None, SleepBudget())
-        queued[:] = [entry[0] for call in queue.await_args_list for entry in call.args[1]]
-        return result
+        await db_session.commit()
 
-    async def _deleted_by(memory_id):
-        return (
-            await db_session.execute(select(Memory.deleted_by).where(Memory.id == memory_id))
-        ).scalar_one()
-
-    result = await _run()
-    await db_session.commit()
-
-    assert result.details["rule_deleted"] == 1
-    assert await _deleted_by(closed.id) == "sleep_consolidation"
-    assert await _deleted_by(memo.id) is None
-    assert queued == [closed.id]
-
-    await db_session.execute(
-        update(Memory).where(Memory.id == memo.id).values(tags=["tech-debt", "status:done"])
-    )
-    await db_session.commit()
-
-    result = await _run()
-    await db_session.commit()
-
-    assert result.details["rule_deleted"] == 1
-    assert await _deleted_by(memo.id) == "sleep_consolidation"
-    assert queued == [memo.id]
+        assert result.details["rule_deleted"] == 0
+        assert result.details["borderline"] == 2
+        assert result.llm_calls_used == 0
+        rows = (
+            await db_session.execute(
+                select(Memory.deleted_at, Memory.scope).where(Memory.id.in_([memo.id, closed.id]))
+            )
+        ).all()
+        assert [(r.deleted_at, r.scope) for r in rows] == [(None, "working")] * 2

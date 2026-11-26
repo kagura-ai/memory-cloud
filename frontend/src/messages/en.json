@@ -3294,11 +3294,12 @@
         "sleep_max_llm_calls_per_run": "Max LLM API calls per sleep run",
         "sleep_dedup_enabled": "Enable dedup/merge phase",
         "sleep_dedup_similarity_threshold": "Cosine similarity threshold for duplicate detection",
-        "sleep_merge_retention_days": "Sleep-tombstone purge window in days — merge losers and consolidation archives (0 = no additional Sleep purge; the platform cleanup sweep, CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, default 30 days, still bounds every tombstone)",
+        "sleep_merge_retention_days": "Sleep-tombstone purge window in days — merge losers and the consolidation archives made before v0.185.0 (0 = no additional Sleep purge; the platform cleanup sweep, CLEANUP_DELETED_MEMORIES_RETENTION_DAYS, default 30 days, still bounds every tombstone)",
         "sleep_dedup_supersede_enabled": "Dedup shadow mode: record supersedes edges instead of deleting losers",
-        "sleep_edge_discovery_enabled": "Enable edge discovery phase",
+        "sleep_edge_discovery_enabled": "Enable edge discovery phase (off by default)",
         "sleep_edge_discovery_sample_size": "Number of memories to sample per edge discovery run",
-        "sleep_importance_reeval_enabled": "Enable importance re-evaluation phase"
+        "sleep_importance_reeval_enabled": "Enable importance re-evaluation phase (off by default)",
+        "sleep_consolidation_judge_enabled": "Let the LLM judge promote the working memories the consolidation rules leave borderline (off by default; rule promotion always runs)"
       }
     },
     "cost": {
@@ -3450,7 +3451,7 @@
           "skippedNoReason": "Skipped",
           "skippedUnknown": "Skipped: {reason}",
           "skipReasons": {
-            "budgetExhausted": "Skipped: LLM budget exhausted",
+            "budgetExhausted": "Skipped: run budget used up",
             "phaseDisabled": "Skipped: phase disabled in configuration",
             "sleepMode": "Skipped: sleep mode is {mode}"
           },
@@ -4147,7 +4148,7 @@
       "deferred_pairs": "{count} pair(s) of possibly duplicate memories were left for a later run, because one run compares only so many. Later runs catch up; until then some duplicates may show up in recall.",
       "merge_backlog_old": "Memories that sleep merged into others are kept for a while so they can be restored; the oldest is {oldest_days} days old (more than {threshold_days}). They do not show up in recall; your administrator decides how long they are kept.",
       "edge_weight_violations": "{count} link(s) between memories have a strength outside the allowed range [{min}, {max}]. This points to a fault in the system, not in your memories: please report it to your administrator.",
-      "cold_graph": "This context holds {active_memories} memories but no links between them yet, so recall cannot bring up related memories. Links form when memories are recalled together and when sleep runs: check the sleep setting of this context.",
+      "cold_graph": "This context holds {active_memories} memories but no links between them yet, so recall cannot bring up related memories. Links are seeded when memories are written and can be added with create_edge; edge discovery and association learning add more where they are switched on.",
       "write_only_store": "Memories were written in the last {window_days} days but none were recalled ({active_memories} memories in this context). If your agents should use this context, make sure they recall from it.",
       "idle_store": "Nothing was written or recalled through MCP in the last {window_days} days ({active_memories} memories in this context): the context looks unused. Writes made in this web app, through the REST API or by connectors are not counted here."
     },
@@ -4238,11 +4239,11 @@
     "sleepModeFull": "Full",
     "sleepModeEdgesOnly": "Edges Only",
     "sleepModeSkip": "Skip (default)",
-    "sleepModeFullDesc": "Run all phases: Edge Discovery, Deduplication, Importance Update, Consolidation, Reindex, and Report generation.",
-    "sleepModeEdgesOnlyDesc": "Run Edge Discovery and Reindex only. Suitable for resource-ingested contexts with external reference material.",
+    "sleepModeFullDesc": "Run every phase the deployment has switched on: Edge Discovery and Importance Update (both off by default), Deduplication, Consolidation (promotion only; nothing is archived), Reindex, and Report generation.",
+    "sleepModeEdgesOnlyDesc": "Run Edge Discovery (when the deployment has it on) and Reindex only. Suitable for resource-ingested contexts with external reference material.",
     "sleepModeSkipDesc": "Disable all Sleep Maintenance phases. Use for externally managed or large-scale contexts where automated cleanup is unwanted.",
     "sleepModeSkipTitle": "Disable Sleep Maintenance?",
-    "sleepModeSkipWarning": "This will stop all automated maintenance until re-enabled. Existing data is preserved, but no new edges, deduplication, or importance updates will run.",
+    "sleepModeSkipWarning": "This will stop all automated maintenance until re-enabled. Existing data is preserved, but no deduplication, promotion, or other Sleep phase will run.",
     "sleepModeSkipConfirm": "Disable Sleep",
     "sleepQuotaUsage": "Sleep-enabled contexts: {used} / {limit} (addon: {addon})",
     "sleepQuotaExceeded": "Quota reached — contact your workspace admin to request a higher Sleep Maintenance cap.",

@@ -12,7 +12,8 @@ stored memories, contexts, edges, files, secrets and grants, agents and
 bindings, settings, or learned state that changes later results — the Hebbian
 graph updates and working → persistent promotions a ``recall`` makes, or a
 ``feedback`` row the ranking reads. Usage and audit logging, access bookkeeping
-(``access_count``, ``reference_count``, ``last_used_at``) and sweeping
+(``access_count``, ``reference_count``, ``last_used_at``, and the #3022 delivery
+stamps ``first_delivered_at`` / ``last_delivered_at``) and sweeping
 already-expired state do not count, although re-ranking and consolidation read
 those counters later: the call changes nothing a user stored or can see. The
 once-only delivery row ``bootstrap`` writes for a service notice (#2762) is
@@ -95,7 +96,8 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     # prunes those that decay below the threshold and evicts the weakest
     # automatic edges past the per-node cap; it also promotes working memories.
     "recall": _destructive("Search Memories", idempotent=False),
-    "reference": _read("Read Memory"),  # bumps reference_count: bookkeeping
+    # bumps reference_count and the delivery stamp: bookkeeping
+    "reference": _read("Read Memory"),
     "recall_upcoming": _read("List Upcoming Memories"),
     "recall_nearby": _read("List Nearby Memories"),
     "load_pinned": _read("Load Pinned Memories"),

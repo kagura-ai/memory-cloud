@@ -242,10 +242,11 @@ class EmbeddingSpendTracker(LLMSpendTracker):
 
 @dataclass
 class SleepBudget:
-    """Tracks LLM call and memory processing budget across phases.
+    """Tracks the LLM call and memory processing budget of one phase.
 
-    Shared across all phases in a single sleep run.
-    Phases check can_afford() before each LLM batch call.
+    #3019: each phase of a run gets its own (``SleepBudgetPlan.for_phase``),
+    so one phase cannot use up another's. Phases check can_afford() before
+    each LLM batch call.
     """
 
     max_llm_calls: int = 50
@@ -269,6 +270,45 @@ class SleepBudget:
     def exhausted(self) -> bool:
         """Check if budget is fully exhausted."""
         return self.llm_calls_used >= self.max_llm_calls or self.memories_used >= self.max_memories
+
+
+class SleepBudgetPlan:
+    """The per-phase budgets of one Sleep run (#3019).
+
+    Every phase gets the full memory allowance (``max_memories``). The run's
+    LLM calls (``max_llm_calls``) are shared among ``llm_phases`` — the
+    enabled phases of this run that call a model, in run order — in equal
+    shares (the remainder of the division goes to the earliest phases, one
+    call each), and the calls a phase leaves unused roll forward to the next
+    of them. The run never spends more than ``max_llm_calls``. A phase that
+    calls no model gets no LLM calls and is never gated on them.
+    """
+
+    def __init__(self, max_llm_calls: int, max_memories: int, llm_phases: list[str]) -> None:
+        self.max_llm_calls = max_llm_calls
+        self.max_memories = max_memories
+        self.llm_phases = tuple(llm_phases)
+        base, extra = divmod(max_llm_calls, len(self.llm_phases)) if self.llm_phases else (0, 0)
+        self._shares = {
+            name: base + (1 if index < extra else 0) for index, name in enumerate(self.llm_phases)
+        }
+        self._carry = 0
+
+    def calls_model(self, phase_name: str) -> bool:
+        """Whether ``phase_name`` is one of this run's LLM phases."""
+        return phase_name in self._shares
+
+    def for_phase(self, phase_name: str) -> SleepBudget:
+        """A fresh budget for ``phase_name``: its LLM share plus the carry."""
+        calls = 0
+        if phase_name in self._shares:
+            calls, self._carry = self._shares[phase_name] + self._carry, 0
+        return SleepBudget(max_llm_calls=calls, max_memories=self.max_memories)
+
+    def settle(self, phase_name: str, budget: SleepBudget) -> None:
+        """Roll the calls ``phase_name`` left unused forward to the next LLM phase."""
+        if phase_name in self._shares:
+            self._carry += max(0, budget.max_llm_calls - budget.llm_calls_used)
 
 
 class SleepReporter:

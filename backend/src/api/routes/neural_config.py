@@ -124,9 +124,11 @@ DEFAULT_VALUES: dict[str, str] = {
     "sleep_max_llm_calls_per_run": "50",
     "sleep_dedup_enabled": "true",
     "sleep_dedup_similarity_threshold": "0.92",
-    "sleep_edge_discovery_enabled": "true",
+    # #3021: the two phases nothing reads by default start off.
+    "sleep_edge_discovery_enabled": "false",
     "sleep_edge_discovery_sample_size": "30",
-    "sleep_importance_reeval_enabled": "true",
+    "sleep_importance_reeval_enabled": "false",
+    "sleep_consolidation_judge_enabled": "false",
 }
 
 
