@@ -129,7 +129,17 @@ def _patched(search: _Search):
     return patch.object(SearchService, "hybrid_search", new=fake)
 
 
-async def _run(db, owner, ws, ctx, search: _Search, *, opt_in: bool = True, **request_kw):
+async def _run(
+    db,
+    owner,
+    ws,
+    ctx,
+    search: _Search,
+    *,
+    opt_in: bool = True,
+    stamp_delivery: bool = True,
+    **request_kw,
+):
     with _patched(search):
         return await MemoryService(db).recall(
             RecallRequest(query="how do I carry the bags upstairs", **request_kw),
@@ -137,6 +147,7 @@ async def _run(db, owner, ws, ctx, search: _Search, *, opt_in: bool = True, **re
             current_context_id=ctx.id,
             current_workspace_id=ws.id,
             user_facts_lane=opt_in,
+            stamp_delivery=stamp_delivery,
         )
 
 
@@ -391,6 +402,42 @@ async def test_a_lane_row_with_content_is_stamped_as_delivered(db_session, quiet
     assert tuple(stored)[:3] == (0, 0, None)
     assert stored.first_delivered_at is not None
     assert stored.first_delivered_at == stored.last_delivered_at
+
+
+_DELIVERY = (Memory.access_count, Memory.first_delivered_at, Memory.last_delivered_at)
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_fits_its_reply_stamps_what_the_reply_carries(db_session, quiet_write):
+    """#3022: with ``stamp_delivery=False`` (the MCP tool, which fits its reply
+    to ``max_chars`` after recall returns) neither the page nor the lane is
+    stamped; the caller's ``record_delivery`` then stamps the rows it shipped
+    with content, and only those, without moving an access counter."""
+    owner, ws, ctx = await _scope(db_session)
+    bags = await _remember(db_session, owner, ws, ctx, "Shopping list", "Rice.", "note")
+    knee = await _remember(db_session, owner, ws, ctx, "The user injured a knee", "Stairs.")
+    search = _Search(main=[bags], lane=[knee])
+
+    service = MemoryService(db_session)
+    with patch.object(MemoryService, "_recall_record_access", new=AsyncMock()) as access:
+        response = await _run(db_session, owner, ws, ctx, search, k=5, full=1, stamp_delivery=False)
+
+    assert response.user_facts[0].content == "Stairs."
+    assert access.await_args.kwargs["stamp_delivery"] is False
+    db_session.expire_all()
+    for memory_id in (bags, knee):
+        stored = (await db_session.execute(select(*_DELIVERY).where(Memory.id == memory_id))).one()
+        assert tuple(stored)[1:] == (None, None)
+
+    # The reply shipped the lane row's content and the page row summary-only.
+    assert await service.record_delivery([knee]) is True
+    db_session.expire_all()
+    stamped = (await db_session.execute(select(*_DELIVERY).where(Memory.id == knee))).one()
+    assert stamped.access_count == 0
+    assert stamped.first_delivered_at is not None
+    assert stamped.first_delivered_at == stamped.last_delivered_at
+    untouched = (await db_session.execute(select(*_DELIVERY).where(Memory.id == bags))).one()
+    assert tuple(untouched)[1:] == (None, None)
 
 
 @pytest.mark.asyncio

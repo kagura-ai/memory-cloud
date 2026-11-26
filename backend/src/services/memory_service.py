@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import AsyncIterator, Collection, Iterable, Mapping
+from collections.abc import AsyncIterator, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -6426,6 +6426,45 @@ class MemoryService:
             return False
         return memory_id in updated
 
+    async def record_delivery(self, memory_ids: Sequence[UUID]) -> bool:
+        """Stamp the delivery (#3022) of the memories a reply shipped with content.
+
+        For a caller that builds its reply after :meth:`recall` returned and
+        called it with ``stamp_delivery=False``: the MCP recall tool, whose
+        ``max_chars`` fit takes content off the lowest-ranked rows and the user
+        facts rows and cuts rows. It passes the rows whose content the final
+        reply carries, page and user facts lane alike, so a row that reaches
+        the reader summary-only, or not at all, is never stamped.
+
+        ``last_delivered_at`` = now, ``first_delivered_at`` kept or set to now,
+        no access counter moved; one lock-ordered ``FOR UPDATE SKIP LOCKED``
+        statement in an isolated session (a row another transaction holds is
+        not stamped this time). The caller commits its own session first.
+        Best-effort: a failure is logged as ``delivery_stamp_failed``
+        (``error_type`` only) and never raised.
+
+        Args:
+            memory_ids: The memories whose content the reply carries.
+
+        Returns:
+            False when the write failed; True otherwise (nothing to stamp
+            included).
+        """
+        if not memory_ids:
+            return True
+        try:
+            async with self._isolated_session() as stamp_db:
+                await MemoryRepository(stamp_db).stamp_delivery(memory_ids)
+                await stamp_db.commit()
+        except Exception as exc:  # noqa: BLE001 — the reply is built; never fail it
+            logger.warning(
+                "delivery_stamp_failed",
+                error_type=type(exc).__name__,
+                memory_count=len(memory_ids),
+            )
+            return False
+        return True
+
     async def _recall_record_access(
         self,
         responses: list[MemoryResponse],
@@ -6433,12 +6472,15 @@ class MemoryService:
         *,
         client: str,
         promote: bool = True,
+        stamp_delivery: bool = True,
     ) -> None:
         """Bump access stats for the shipped page and promote what qualifies.
 
         #3022: the same statement stamps the delivery (``last_delivered_at``,
         ``first_delivered_at``) of the rows that carry content; a row returned
-        summary-only is bumped without it.
+        summary-only is bumped without it. With ``stamp_delivery=False`` it
+        stamps none: the caller ships a reply of its own making and stamps
+        what that reply carries (:meth:`record_delivery`).
 
         Issue #1985: runs after the recall commit in an isolated session. The
         bump is one lock-ordered statement over the page and promotion is
@@ -6454,12 +6496,16 @@ class MemoryService:
             memories: Hydrated point-id → Memory map (read state).
             client: Client name recorded in ``accessed_by_clients``.
             promote: #2773 False bumps the stats only (a read-only recall).
+            stamp_delivery: #3022 False leaves the delivery stamp to the
+                caller (see :meth:`recall`).
         """
         if not responses:
             return
         rows = {memory.id: memory for memory in memories.values()}
         page_ids = [response.memory_id for response in responses]
-        delivered = [r.memory_id for r in responses if r.content is not None]
+        delivered = (
+            [r.memory_id for r in responses if r.content is not None] if stamp_delivery else []
+        )
         try:
             async with self._isolated_session() as stats_db:
                 repo = MemoryRepository(stats_db)
@@ -7111,6 +7157,7 @@ class MemoryService:
         list_hint: bool = False,
         learning: bool = True,
         user_facts_lane: bool = False,
+        stamp_delivery: bool = True,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -7176,6 +7223,12 @@ class MemoryService:
                 on (:mod:`services.user_facts_lane`). Only the MCP recall tool
                 and the REST recall route pass True; bootstrap, share-key reads
                 and forget(query=) never run it.
+            stamp_delivery: #3022 True stamps the delivery of the rows the
+                response carries with content (page and user facts lane), for
+                a caller that ships the response as it is (REST). False stamps
+                none: the MCP recall tool fits its reply to ``max_chars``
+                afterwards and stamps what the fitted reply carries with
+                :meth:`record_delivery`.
 
         Returns:
             RecallResponse with search results
@@ -7258,6 +7311,7 @@ class MemoryService:
                 workspace_id=effective_workspace_id,
                 is_shared_context_read=is_shared_context_read,
                 content_trusted_only=content_trusted_only,
+                stamp_delivery=stamp_delivery,
             )
 
         # Issue #496: pre-resolve the ``analysis_cluster`` filter. A non-None
@@ -7639,9 +7693,17 @@ class MemoryService:
         client = request.filters.get("client", "api") if request.filters else "api"
         with timings.stage("post_commit"):
             if learning:
-                await self._recall_record_access(responses, memories, client=client)
+                await self._recall_record_access(
+                    responses, memories, client=client, stamp_delivery=stamp_delivery
+                )
             else:
-                await self._recall_record_access(responses, memories, client=client, promote=False)
+                await self._recall_record_access(
+                    responses,
+                    memories,
+                    client=client,
+                    promote=False,
+                    stamp_delivery=stamp_delivery,
+                )
 
         # Related candidates can transfer scores and ordering through folding.
         # Do not train the graph on its own derived evidence. Empty/failed

@@ -93,7 +93,8 @@ ADOPTION_ACCESS_STATS_STATEMENT: TextClause = text(
 ).bindparams(_IDS_PARAM)
 
 # #3022: the delivery stamp alone, for the user facts lane (its rows bump no
-# access counter). Lock-ordered and never waiting, like the statements above.
+# access counter) and the MCP recall tool's fitted reply (its access write
+# already ran). Lock-ordered and never waiting, like the statements above.
 DELIVERY_STAMP_STATEMENT: TextClause = text(
     "UPDATE memories AS m SET last_delivered_at = :now, "
     "first_delivered_at = COALESCE(m.first_delivered_at, :now) "
@@ -533,8 +534,10 @@ class MemoryRepository(BaseRepository[Memory]):
         """Record that these memories' content was shipped to a reader (#3022).
 
         The stamp alone — ``last_delivered_at`` = now, ``first_delivered_at``
-        kept or set to now — with no access counter moved, for a read that
-        does not count as an access (the user facts lane). One lock-ordered
+        kept or set to now — with no access counter moved: for a read that
+        does not count as an access (the user facts lane), and for the MCP
+        recall tool, which stamps what its fitted reply carries after the
+        access write ran (``MemoryService.record_delivery``). One lock-ordered
         ``FOR UPDATE SKIP LOCKED`` statement like the access statistics: it
         never waits, so a row another transaction holds is not stamped this
         time. Soft-deleted and unknown ids are skipped. Runs in the caller's

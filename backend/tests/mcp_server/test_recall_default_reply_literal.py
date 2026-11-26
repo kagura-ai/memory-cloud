@@ -141,7 +141,7 @@ async def _mcp(args: dict[str, Any]) -> str:
     async def fake_recall(request: RecallRequest, **_kw: Any) -> RecallResponse:
         return _response()
 
-    service = MagicMock(recall=fake_recall)
+    service = MagicMock(recall=fake_recall, record_delivery=AsyncMock(return_value=True))
     context = MagicMock(trust_tier="trusted", workspace_id=UUID(int=9), is_private=False)
     with (
         patch("db.base.get_db", new=fake_get_db),

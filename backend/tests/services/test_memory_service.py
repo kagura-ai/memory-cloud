@@ -1711,7 +1711,10 @@ class TestExploreHints:
         # after its commit (the adoption flag is pinned in
         # tests/services/test_recall_post_commit_writes.py).
         service._recall_record_access.assert_awaited_once()
-        assert service._recall_record_access.await_args.kwargs == {"client": "api"}
+        assert service._recall_record_access.await_args.kwargs == {
+            "client": "api",
+            "stamp_delivery": True,  # #3022: shipped as it is, stamped here
+        }
 
     @pytest.mark.asyncio
     async def test_recall_hints_with_opt_in(self, service, context_id, workspace_id):

@@ -1370,6 +1370,24 @@ def _recall_reply(
     return reply
 
 
+async def _record_reply_delivery(service: Any, reply: dict[str, Any]) -> None:
+    """Stamp the delivery (#3022) of the rows whose content ``reply`` carries.
+
+    The reply is final here (fitted, cut and sorted by :func:`_recall_reply`),
+    so a row the fit left summary-only, or cut, is not stamped. A failed stamp
+    follows the user facts lane's failure rule: the reply goes without
+    ``user_facts`` when its rows carried content (dropping a key keeps it
+    within ``max_chars``); ``results`` are returned as they are, as with the
+    access statistics.
+    """
+    lane = reply.get("user_facts") or []
+    shipped = [UUID(item["memory_id"]) for item in (*reply["results"], *lane) if "content" in item]
+    if not shipped or await service.record_delivery(shipped):
+        return
+    if any("content" in item for item in lane):
+        del reply["user_facts"]
+
+
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -1587,6 +1605,9 @@ async def handle_recall(
                     learning=learning,
                     # #3014: the context's user facts lane, where it is on.
                     user_facts_lane=True,
+                    # #3022: the reply below is fitted to max_chars; the
+                    # delivery stamp follows what it carries, not the page.
+                    stamp_delivery=False,
                 ),
                 operation_name="recall",
             )
@@ -1618,6 +1639,8 @@ async def handle_recall(
             ):
                 await _touch_context_last_used(db, touch_ctx)
             await db.commit()
+            # After the commit: the stamp takes a connection of its own.
+            await _record_reply_delivery(service, response_data)
 
             return [
                 TextContent(

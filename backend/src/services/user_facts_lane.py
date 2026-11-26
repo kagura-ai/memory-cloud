@@ -10,7 +10,10 @@ up to :data:`USER_FACTS_ROWS` of them, those not already in ``results``, under
 ``user_facts``.
 
 The lane writes one thing only: the delivery stamp (#3022) of the rows it
-returns with content. Compared with a normal recall it:
+returns with content, and only for a caller that ships the response as it is
+(``stamp_delivery=True``, the REST route). The MCP tool fits its reply to
+``max_chars`` afterwards (lane rows can lose their content there) and stamps
+what the fitted reply carries itself. Compared with a normal recall it:
 
 * embeds its fixed query once per embedding provider, model and dimensions (a process-level
   cache, :data:`_QUERY_VECTORS`, over the embedding service's shared cache) and
@@ -29,7 +32,9 @@ returns with content. Compared with a normal recall it:
   within :data:`USER_FACTS_TIMEOUT_SECONDS`. Any error or timeout, the stamp's
   included, is logged once as ``user_facts_lane_failed`` and the recall returns
   without the key (so a row is shipped only when its stamp was written or
-  skipped as held).
+  skipped as held). The MCP tool applies the same rule to its own stamp: when
+  it fails, the reply goes without ``user_facts`` if those rows carried
+  content.
 """
 
 from __future__ import annotations
@@ -125,11 +130,13 @@ async def attach_user_facts(
     workspace_id: UUID,
     is_shared_context_read: bool,
     content_trusted_only: bool,
+    stamp_delivery: bool = True,
 ) -> RecallResponse:
     """``response`` with ``user_facts`` set, or unchanged when the lane failed.
 
     Never raises: an error or a timeout is logged once and the recall's own
-    response goes back without the key.
+    response goes back without the key. ``stamp_delivery=False`` (#3022):
+    the rows are not stamped here; the caller stamps what its reply carries.
     """
     # The recall's transaction holds a pooled connection; release it before
     # the lane takes one of its own (read-only here: the recall committed its
@@ -147,6 +154,7 @@ async def attach_user_facts(
                 workspace_id=workspace_id,
                 is_shared_context_read=is_shared_context_read,
                 content_trusted_only=content_trusted_only,
+                stamp_delivery=stamp_delivery,
             ),
             timeout=USER_FACTS_TIMEOUT_SECONDS,
         )
@@ -183,6 +191,7 @@ async def _search(
     workspace_id: UUID,
     is_shared_context_read: bool,
     content_trusted_only: bool,
+    stamp_delivery: bool = True,
 ) -> list[MemoryResponse]:
     """The lane's search, hydration and rows, in a session of its own."""
     filters = lane_filters(request)
@@ -264,9 +273,12 @@ async def _search(
             )
             for hit, memory in picked
         ]
-        # #3022: the delivery stamp of the rows shipped with content; no
-        # access counter moves. Otherwise the lane wrote nothing.
-        delivered = [row.memory_id for row in rows if row.content is not None]
+        # #3022: the delivery stamp of the rows shipped with content, unless
+        # the caller stamps its own reply; no access counter moves. Otherwise
+        # the lane wrote nothing.
+        delivered = (
+            [row.memory_id for row in rows if row.content is not None] if stamp_delivery else []
+        )
         if delivered:
             await MemoryRepository(lane_db).stamp_delivery(delivered)
             await lane_db.commit()
