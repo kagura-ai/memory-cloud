@@ -12,7 +12,7 @@ Karpathy's pattern describes any "living knowledge base" as 5 layers. Kagura's i
 | **Compile** | LLM rewrites raw → structured wiki pages | **MCP-as-compile-API**: chat agent emits structured `remember(summary, content, type, tags, importance)` per fact (continuous micro-compile). Sleep Maintenance phases (consolidation, deduplication, edge formation) handle batch consolidation. | `backend/src/mcp_server/tools/memory.py`, `backend/src/services/sleep/orchestrator.py` |
 | **Index** | Page-level TOC for navigation | **Triple-index, all auto-maintained**: BM25 (keyword) + Qdrant vector (semantic) + Hebbian graph (relational). Context-level TOC via `list_contexts` / `get_context_info`. | `backend/src/services/search_service.py`, `backend/src/services/graph_service.py`, Qdrant collection |
 | **Query** | Read pages directly, retrieve when needed | Hybrid Search (60% semantic + 40% BM25), AI Reranker (Voyage / Cohere / Self-hosted (Ollama, vLLM)), `explore` graph traversal for serendipity | `backend/src/services/search_service.py`, `backend/src/services/reranker_service.py` |
-| **Enhance** | Compounding loop — answers feed back as new pages | **Hebbian learning**: every `recall()` strengthens edges between co-retrieved memories (zero LLM cost background graph evolution). Sleep Maintenance phases reorganize periodically. **Explicit write-back**: `/kagura-memory:session-summary` skill encourages user/agent to file synthesized answers as new memories — opt-in to avoid noise. | `backend/src/neural/`, `backend/src/services/sleep/`, `claude-skills/session-summary.md` |
+| **Enhance** | Compounding loop — answers feed back as new pages | **Hebbian learning** (opt-in, `RECALL_ASSOCIATION_LEARNING_ENABLED`): a `recall()` strengthens edges between co-retrieved memories (zero LLM cost background graph evolution). Sleep Maintenance phases reorganize periodically. **Explicit write-back**: `/kagura-memory:session-summary` skill encourages user/agent to file synthesized answers as new memories — opt-in to avoid noise. | `backend/src/neural/`, `backend/src/services/sleep/`, `claude-skills/session-summary.md` |
 
 **Difference from Karpathy's pattern**: Kagura targets team/org scale (multi-tenant DB) and treats each `remember()` as a micro-compile (continuous), where the LLM Wiki pattern targets personal scale (~100 markdown pages) with batch wiki rewrites. The compile interface is schema-enforced (Pydantic `MemoryCreate`) rather than free-form prose.
 
@@ -180,7 +180,7 @@ Neural Memory edges carry an `origin` discriminator (`neural_memory_edges.origin
 
 #### Formulas
 
-**Hebbian update** (`backend/src/neural/hebbian.py` — applied per `recall()` for co-activated pairs that pass the semantic-gating threshold `min_similarity_for_edge`):
+**Hebbian update** (`backend/src/neural/hebbian.py` — applied per `recall()` for co-activated pairs that pass the semantic-gating threshold `min_similarity_for_edge`, when `RECALL_ASSOCIATION_LEARNING_ENABLED=true`; off by default since #3023):
 
 ```
 Δw_ij ← η · (a_i · C_i) · (a_j · C_j) − λ · w_ij

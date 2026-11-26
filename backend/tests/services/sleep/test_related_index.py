@@ -396,10 +396,12 @@ async def test_cross_pool_fold_preserves_baseline_scores(monkeypatch, derived_ne
 
 @pytest.mark.asyncio
 async def test_empty_expansion_keeps_normal_learning(monkeypatch):
+    from config.settings import get_settings
     from services.memory_service import MemoryService
     from tests.services.test_supersede_fold import _mem, _pool, _run_recall
 
     monkeypatch.setenv("RECALL_RELATED_INDEX_ENABLED", "true")
+    monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", True)  # #3023
     hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7))
     service = MemoryService(db=AsyncMock())
     with patch("services.recall_related_index.expand_recall", AsyncMock(return_value=([], {}))):

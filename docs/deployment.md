@@ -4382,6 +4382,14 @@ Two settings change what an MCP `recall` returns when the caller leaves an argum
 
 The count is "at least N matching this search": it is taken over the recall's candidate pool, which is wider than `k` only when the search over-fetches, so it is never the context's total and costs no query. The tag with the most candidates wins (ties: more rows on the page, then alphabetical). Off, the reply is unchanged. MCP recall tool only: the line names the MCP `list` tool, so the REST `POST /api/v1/memory/recall`, the share-key recall, the agent bootstrap's recall component and `forget(query=...)` never compute or return it.
 
+### Recall-time association learning — Issue #3023
+
+| Variable | Default | Effect |
+|---|---|---|
+| `RECALL_ASSOCIATION_LEARNING_ENABLED` | `false` | With `ENABLE_NEURAL_MEMORY=true`, a recall (not keyword-only, not degraded, not a read-only `learning=False` call) runs the association learning pass after its search: memories returned together get their `origin='hebbian'` edge created or strengthened. |
+
+Off (the default), recall writes no association edge. Nothing in the default recall ranking reads these edges; the readers are the opt-in graph boost (`KAGURA_GRAPH_BOOST_ENABLED`), `explore`, `list_edges`, explore hints and the graph metrics Sleep consolidation uses. Unchanged whatever the switch says: working → persistent promotion and the access counters at recall, seeding at write time (nearest-neighbour and tag co-occurrence seeds), the periodic decay and pruning of `origin='hebbian'` edges, `explore`, `create_edge`, Sleep edge discovery and the related index. Upgrading from a release before v0.185.0: recall stops writing these edges unless the key is set to `true`; existing edges are not deleted by the upgrade, and learned edges decay as they always did when nothing reinforces them.
+
 ## Public MCP endpoints — Issue #2675
 
 A workspace owner can publish one resource context as an **anonymous, read-only MCP endpoint** at `/mcp/public/<public_id>` (how: [Resource Tokens Guide › Publishing a resource as a public MCP endpoint](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint); client setup: [MCP Client Setup › Public read-only endpoint](mcp-clients.md#public-read-only-endpoint-no-sign-in)). The operator decides whether this deployment serves such endpoints at all.

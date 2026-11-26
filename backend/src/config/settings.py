@@ -1290,6 +1290,16 @@ class Settings(BaseSettings):
         description="recall may add a hint naming list() for a tag the page under-shows",
     )
 
+    # #3023: the association learning pass a recall runs after its search
+    # (co-recalled memories get their ``origin='hebbian'`` edge created or
+    # strengthened). Off by default: nothing in the default recall path reads
+    # those edges. Promotion and access counters at recall, seeding at write
+    # time, decay/prune, explore and Sleep do not depend on it.
+    recall_association_learning_enabled: bool = Field(
+        default=False,
+        description="recall strengthens associations between memories it returns together",
+    )
+
     # #1740: MCP Streamable HTTP spec alignment. ``/mcp`` answers a request
     # whose ``Origin`` header is present and not allow-listed with 403 (the
     # spec's DNS-rebinding defence). The allow-list is ``CORS_ORIGINS``, the

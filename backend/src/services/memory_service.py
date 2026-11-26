@@ -7638,9 +7638,13 @@ class MemoryService:
         # Related candidates can transfer scores and ordering through folding.
         # Do not train the graph on its own derived evidence. Empty/failed
         # expansion keeps the ordinary learning path exactly as before.
+        # #3023: the pass itself is opt-in per deployment.
+        from config.settings import get_settings
+
         if (
             learning
             and neural_enabled
+            and get_settings().recall_association_learning_enabled
             and request.search_mode != "keyword"
             and not degradation.get("degraded")
             and baseline_pool is None

@@ -18,6 +18,8 @@ NOT a membership).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -107,3 +109,23 @@ async def provision_eval_context(
     await db.flush()
     await db.commit()
     return owner, ws, ctx, emb_model, emb_dims
+
+
+@contextmanager
+def recall_association_learning_on() -> Iterator[None]:
+    """Run with recall-time association learning on (#3023).
+
+    The learning pass is opt-in per deployment
+    (``RECALL_ASSOCIATION_LEARNING_ENABLED``, default off). The runners whose
+    neural-on arms or warming rely on ``recall()`` writing association edges
+    switch it on for that stretch, so they measure what they did before the
+    switch existed: with ``ENABLE_NEURAL_MEMORY=true`` a recall learns, with it
+    false nothing changes.
+    """
+    settings = get_settings()
+    previous = settings.recall_association_learning_enabled
+    settings.recall_association_learning_enabled = True
+    try:
+        yield
+    finally:
+        settings.recall_association_learning_enabled = previous

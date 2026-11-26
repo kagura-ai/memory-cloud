@@ -141,7 +141,13 @@ async def _measure_arms(svc, db, corpus, plan, id_map, owner, ctx, ws) -> dict[s
     """Warm the graph once, then run the four paired arms."""
     # --- warm build: provisional τ → replay (neural ON) → sleep -------------
     tau_info = await _seed_provisional_tau(db, corpus, plan, id_map, ctx)
-    with _env("ENABLE_NEURAL_MEMORY", "true"), _env("KAGURA_GRAPH_BOOST_ENABLED", "false"):
+    from tests.eval._provisioning import recall_association_learning_on
+
+    with (
+        _env("ENABLE_NEURAL_MEMORY", "true"),
+        _env("KAGURA_GRAPH_BOOST_ENABLED", "false"),
+        recall_association_learning_on(),  # #3023: the warm build learns at recall
+    ):
         replayed = await _replay(svc, corpus, plan, owner, ctx, ws)
         sleep_info = await _run_sleep(db, owner, ctx, ws)
 

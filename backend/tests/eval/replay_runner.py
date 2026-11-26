@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from tests.eval._provisioning import recall_association_learning_on
 from tests.eval.compounding import (
     REPLAY_MODES,
     PairAudit,
@@ -380,19 +381,21 @@ async def _replay(svc: Any, corpus: Corpus, plan: ReplayPlan, owner: str, ctx: A
     os.environ["KAGURA_GRAPH_BOOST_ENABLED"] = "false"
     recalls = 0
     try:
-        for _ in range(plan.rounds):
-            for query_id in plan.replay_query_ids:
-                await svc.recall(
-                    request=RecallRequest(
-                        query=queries_by_id[query_id].text,
-                        k=_RECALL_K,
-                        search_mode="hybrid",
-                    ),
-                    user_id=owner,
-                    current_context_id=ctx.id,
-                    current_workspace_id=ws.id,
-                )
-                recalls += 1
+        # #3023: the warming relies on recall writing association edges.
+        with recall_association_learning_on():
+            for _ in range(plan.rounds):
+                for query_id in plan.replay_query_ids:
+                    await svc.recall(
+                        request=RecallRequest(
+                            query=queries_by_id[query_id].text,
+                            k=_RECALL_K,
+                            search_mode="hybrid",
+                        ),
+                        user_id=owner,
+                        current_context_id=ctx.id,
+                        current_workspace_id=ws.id,
+                    )
+                    recalls += 1
     finally:
         _restore_env("ENABLE_NEURAL_MEMORY", prev_neural)
         _restore_env("KAGURA_GRAPH_BOOST_ENABLED", prev_boost)

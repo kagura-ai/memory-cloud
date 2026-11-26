@@ -117,6 +117,7 @@ def get_config_categories() -> dict[str, list[str]]:
             "CORS_ORIGINS",
             # Neural Memory Feature Flags (architectural switches)
             "ENABLE_NEURAL_MEMORY",
+            "RECALL_ASSOCIATION_LEARNING_ENABLED",
             "TRACK_CO_ACTIVATION",
             "ENABLE_DECAY",
             # Note: User sharding is always enabled at database schema level.
@@ -338,9 +339,31 @@ def get_config_schema() -> dict[str, ConfigKeySchema]:
             description="Enable Neural Memory system (Hebbian Learning + Activation Spreading)",
             default_value=False,
             requires_restart=True,
-            impact="Enables automatic memory association learning and graph-based recall enhancement",
+            impact=(
+                "Enables the neural memory layer (association graph, decay, Sleep); "
+                "recall-time association learning also needs RECALL_ASSOCIATION_LEARNING_ENABLED"
+            ),
             examples=["true", "false"],
             recommended="true (enables advanced memory features)",
+        ),
+        "RECALL_ASSOCIATION_LEARNING_ENABLED": ConfigKeySchema(
+            key="RECALL_ASSOCIATION_LEARNING_ENABLED",
+            type="boolean",
+            category="system",
+            description=(
+                "Recall strengthens the associations between memories it returns "
+                "together (needs ENABLE_NEURAL_MEMORY)"
+            ),
+            default_value=False,
+            requires_restart=True,
+            impact=(
+                "On: each learning recall runs a write pass that creates or strengthens "
+                "origin='hebbian' edges. Off: recall writes no association edge; promotion, "
+                "access counters, seeding at write time, decay and Sleep are unchanged."
+            ),
+            examples=["true", "false"],
+            recommended="false unless something reads the learned edges (graph boost, explore)",
+            documentation_url="https://github.com/kagura-ai/memory-cloud/issues/3023",
         ),
         # Neural Memory - Hebbian Learning (Issue #20参照)
         "LEARNING_RATE": ConfigKeySchema(

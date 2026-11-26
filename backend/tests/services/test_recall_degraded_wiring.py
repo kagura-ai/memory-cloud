@@ -235,10 +235,13 @@ class TestRecallTimingsWiring:
         on a fake clock: one recall_completed line, every stage reported from
         where it actually runs, and the stages plus other_ms summing to
         duration_ms."""
+        from config.settings import get_settings
         from services import memory_service as ms
         from services.memory_service import MemoryService
         from services.recall_timings import RecallTimings
 
+        # #3023: the learning pass is one of the stages this test times.
+        monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", True)
         clock = {"now": 0.0}
 
         def advance(seconds):

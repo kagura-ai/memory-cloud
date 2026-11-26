@@ -254,7 +254,7 @@ Neural Memory edges are tagged with one of three **origins**, each with differen
 | Encodes | "fired together recently" — episodic co-activation | "about similar things" — content neighborhood | "I'm telling you these are related" — explicit user assertion |
 | Created by | runtime `recall()` co-activation | sleep `edge_discovery` (an LLM judges pairs in the 0.6–0.9 similarity band), plus weak k-NN seed edges when a memory is created | MCP `create_edge` tool |
 | Weight | 0.0–3.0 co-activation amplitude | set at creation (seed edges stay below 0.5) | user-supplied (default 1.0) |
-| Decays? | yes — strengthens with co-recall, fades without | **no** — content similarity is a static property | **no** — user-asserted, never auto-removed |
+| Decays? | yes — strengthens with co-recall (when recall-time learning is enabled, `RECALL_ASSOCIATION_LEARNING_ENABLED`), fades without | **no** — content similarity is a static property | **no** — user-asserted, never auto-removed |
 | Maintenance | nightly Hebbian decay + prune below threshold | monthly `semantic_edge_reverify` drops edges with deleted endpoints | none — lives until the user deletes it |
 
 > This is a **pedagogical analogy, not an implementation claim**. The system does not model the hippocampus or cortex directly — the parallel is in lifetime semantics: episodic-decay vs static-content vs user-pinned.

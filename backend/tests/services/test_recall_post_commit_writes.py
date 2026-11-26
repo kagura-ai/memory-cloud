@@ -430,9 +430,11 @@ class TestReadOnlyRecall:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("learning", [True, False])
-    async def test_the_hebbian_pass_and_promotion_follow_learning(self, learning):
+    async def test_the_hebbian_pass_and_promotion_follow_learning(self, learning, monkeypatch):
+        from config.settings import get_settings
         from tests.services.test_supersede_fold import _mem, _pool, _run_recall
 
+        monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", True)  # #3023
         hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7))
         service = MemoryService(db=AsyncMock())
         kwargs = {} if learning else {"learning": False}
@@ -442,3 +444,22 @@ class TestReadOnlyRecall:
         service._recall_record_access.assert_awaited_once()
         expected = {"client": "api"} if learning else {"client": "api", "promote": False}
         assert service._recall_record_access.await_args.kwargs == expected
+
+    @pytest.mark.asyncio
+    async def test_association_learning_is_off_unless_the_deployment_enables_it(self, monkeypatch):
+        """#3023: with ``RECALL_ASSOCIATION_LEARNING_ENABLED`` unset a learning
+        recall of several memories writes no association edge (the pass is not
+        started); promotion and the access counters still run."""
+        from config.settings import Settings, get_settings
+        from tests.services.test_supersede_fold import _mem, _pool, _run_recall
+
+        default = Settings.model_fields["recall_association_learning_enabled"].default
+        assert default is False
+        monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", default)
+        hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7), (_mem(2), 0.6))
+        service = MemoryService(db=AsyncMock())
+        await _run_recall(service, hits, memories, {}, neural_enabled=True)
+
+        service._recall_run_hebbian_learning.assert_not_awaited()
+        service._recall_record_access.assert_awaited_once()
+        assert service._recall_record_access.await_args.kwargs == {"client": "api"}

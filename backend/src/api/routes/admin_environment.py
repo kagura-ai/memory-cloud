@@ -52,6 +52,7 @@ ANSWERED_KEYS: frozenset[str] = frozenset(
         "LOG_LEVEL",
         "CORS_ORIGINS",
         "ENABLE_NEURAL_MEMORY",
+        "RECALL_ASSOCIATION_LEARNING_ENABLED",
         "TRACK_CO_ACTIVATION",
         "ENABLE_DECAY",
         "ENABLE_TRUST_MODULATION",

@@ -397,7 +397,8 @@ remember(
 -> Save returned memory_id as memory_id_2
 -> Verify: list_edges(context_id=..., memory_id=<memory_id_2>) returns an outgoing edge whose
    target_id == <memory_id> (the linked memory) with origin="declared", confidence=1.0 and
-   weight >= 1.0 (exactly 1.0 until a recall co-activates both ends — see the note)
+   weight >= 1.0 (exactly 1.0 until a recall co-activates both ends on a deployment with
+   RECALL_ASSOCIATION_LEARNING_ENABLED=true — see the note)
 -> Note (#741/#925): the linked_memory_ids declared link is stored as origin="declared" with
    edge_type="neural_association" — NOT a "declared_link" edge_type (that discriminator was removed
    in #741, which pivoted to the relation/origin two-axis model). MCP list_edges exposes the origin
