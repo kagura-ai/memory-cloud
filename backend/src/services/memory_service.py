@@ -6537,6 +6537,28 @@ class MemoryService:
         except Exception as exc:
             logger.warning("hebbian_update_failed", error=str(exc))
 
+    async def _recall_ensure_graph_row(self, user_id: str) -> None:
+        """Make the user's ``graph_memory`` row when the learning pass is off (#3023).
+
+        ``weight_decay_task`` and the legacy ``consolidation_task`` visit only
+        users with this row, and the learning pass used to be what made it on a
+        user's first learning recall. With ``RECALL_ASSOCIATION_LEARNING_ENABLED``
+        off the same recall makes it here instead, so the tasks reach the same
+        users whatever the switch says. Runs after the recall commit in its own
+        session and fails open like the pass.
+
+        Args:
+            user_id: Graph owner.
+        """
+        from repositories.graph import GraphRepository
+
+        try:
+            async with self._isolated_session() as graph_db:
+                await GraphRepository(graph_db).get_or_create(user_id)
+                await graph_db.commit()
+        except Exception as exc:
+            logger.warning("graph_row_ensure_failed", error=str(exc))
+
     async def _recall_learn_on_session(
         self,
         graph_db: AsyncSession,
@@ -7638,26 +7660,31 @@ class MemoryService:
         # Related candidates can transfer scores and ordering through folding.
         # Do not train the graph on its own derived evidence. Empty/failed
         # expansion keeps the ordinary learning path exactly as before.
-        # #3023: the pass itself is opt-in per deployment.
-        from config.settings import get_settings
-
         if (
             learning
             and neural_enabled
-            and get_settings().recall_association_learning_enabled
             and request.search_mode != "keyword"
             and not degradation.get("degraded")
             and baseline_pool is None
         ):
+            from config.settings import get_settings
+
             with timings.stage("post_commit"):
-                await self._recall_run_hebbian_learning(
-                    request,
-                    hebbian_pool,
-                    memories,
-                    user_id=user_id,
-                    current_context_id=current_context_id,
-                    effective_workspace_id=effective_workspace_id,
-                )
+                # #3023: the pass itself is opt-in per deployment. Off, the
+                # graph row the pass would have made is still made, so the
+                # switch does not change which users the periodic decay and
+                # consolidation visit (they enumerate graph_memory rows).
+                if get_settings().recall_association_learning_enabled:
+                    await self._recall_run_hebbian_learning(
+                        request,
+                        hebbian_pool,
+                        memories,
+                        user_id=user_id,
+                        current_context_id=current_context_id,
+                        effective_workspace_id=effective_workspace_id,
+                    )
+                else:
+                    await self._recall_ensure_graph_row(user_id)
 
         return await with_user_facts(
             await self._recall_finalize(

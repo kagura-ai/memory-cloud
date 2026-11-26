@@ -441,6 +441,8 @@ class TestReadOnlyRecall:
         await _run_recall(service, hits, memories, {}, neural_enabled=True, **kwargs)
 
         assert service._recall_run_hebbian_learning.await_count == (1 if learning else 0)
+        # The pass makes the graph row itself; nothing else is needed (#3023).
+        service._recall_ensure_graph_row.assert_not_awaited()
         service._recall_record_access.assert_awaited_once()
         expected = {"client": "api"} if learning else {"client": "api", "promote": False}
         assert service._recall_record_access.await_args.kwargs == expected
@@ -463,3 +465,71 @@ class TestReadOnlyRecall:
         service._recall_run_hebbian_learning.assert_not_awaited()
         service._recall_record_access.assert_awaited_once()
         assert service._recall_record_access.await_args.kwargs == {"client": "api"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("learning", [True, False])
+    async def test_switch_off_still_makes_the_graph_row_the_periodic_tasks_read(
+        self, learning, monkeypatch
+    ):
+        """#3023: the hourly decay and the legacy consolidation visit only users
+        with a ``graph_memory`` row, which the learning pass used to create. With
+        the pass off, the recall that would have run it still makes the row, so
+        the switch does not change which users those tasks reach."""
+        from config.settings import get_settings
+        from tests.services.test_supersede_fold import _mem, _pool, _run_recall
+
+        monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", False)
+        hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7))
+        service = MemoryService(db=AsyncMock())
+        kwargs = {} if learning else {"learning": False}
+        await _run_recall(service, hits, memories, {}, neural_enabled=True, **kwargs)
+
+        service._recall_run_hebbian_learning.assert_not_awaited()
+        if learning:
+            service._recall_ensure_graph_row.assert_awaited_once_with("u")
+        else:
+            service._recall_ensure_graph_row.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_neural_memory_off_makes_no_graph_row(self, monkeypatch):
+        from config.settings import get_settings
+        from tests.services.test_supersede_fold import _mem, _pool, _run_recall
+
+        monkeypatch.setattr(get_settings(), "recall_association_learning_enabled", False)
+        hits, memories = _pool((_mem(0), 0.8), (_mem(1), 0.7))
+        service = MemoryService(db=AsyncMock())
+        await _run_recall(service, hits, memories, {}, neural_enabled=False)
+
+        service._recall_ensure_graph_row.assert_not_awaited()
+        service._recall_run_hebbian_learning.assert_not_awaited()
+
+
+class TestEnsureGraphRow:
+    """#3023: ``_recall_ensure_graph_row`` makes the row in its own session,
+    commits it, and never fails the recall."""
+
+    @pytest.mark.asyncio
+    async def test_creates_the_row_and_commits(self, service):
+        session = _isolated(service)
+        repo = MagicMock()
+        repo.get_or_create = AsyncMock()
+        with patch("repositories.graph.GraphRepository", return_value=repo) as cls:
+            await MemoryService.__dict__["_recall_ensure_graph_row"](service, "u")
+
+        cls.assert_called_once_with(session)
+        repo.get_or_create.assert_awaited_once_with("u")
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_database_failure_is_logged_not_raised(self, service):
+        session = _isolated(service)
+        repo = MagicMock()
+        repo.get_or_create = AsyncMock(side_effect=OperationalError("stmt", {}, Exception("x")))
+        with (
+            patch("repositories.graph.GraphRepository", return_value=repo),
+            patch("services.memory_service.logger") as logger,
+        ):
+            await MemoryService.__dict__["_recall_ensure_graph_row"](service, "u")
+
+        session.commit.assert_not_awaited()
+        assert logger.warning.call_args.args[0] == "graph_row_ensure_failed"
