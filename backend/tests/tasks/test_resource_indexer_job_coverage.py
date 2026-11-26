@@ -1063,7 +1063,10 @@ class TestIntervalSkipNextTick:
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "queued"
         due = before + timedelta(seconds=wait) - RATE_LIMITED_RETRY_SLACK
-        assert due <= seeded_state.next_run_at <= due + timedelta(seconds=1)
+        # The counter's TTL comes back in whole milliseconds, so the wait can be
+        # a fraction of one shorter than the TTL that was set.
+        early = due - timedelta(milliseconds=1)
+        assert early <= seeded_state.next_run_at <= due + timedelta(seconds=1)
         # Rows other tests left queued may be picked too; only this one counts.
         mine = [e for e in logs if e.get("resource_id") == rid]
         assert [e["event"] for e in mine] == ["indexer_skipped"]

@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.184.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.184.0) — 2026-11-26
+
+What a user says about themselves is written as its own `fact` memory, and a context can return such facts with every recall. There is one migration (`f63`) and one new per-context switch, off by default.
+
+### Added
+- **User facts lane on recall** ([#3014](https://github.com/kagura-ai/memory-cloud/issues/3014)): a fact about the user that matters for an answer is often unrelated to the question in wording, so the search for the question ranks it low. With `user_facts_lane` on in a context's search config, a recall of that context also runs one fixed search over the context's `fact` memories and returns up to two that are not already in `results`, under `user_facts`.
+  - Where: the MCP `recall` tool and `POST /api/v1/memory/recall`. `bootstrap` and the other read tools do not run it.
+  - The switch: `update_search_config(user_facts_lane=true)`, `PUT /api/v1/contexts/{id}/search-config`, or the search settings in the Web UI. It takes the same role as the other search settings and is not part of the search purposes.
+  - The rows: the `results` row shape with their dates, and with content under the rule `full` sets for `results`. Superseded and folded versions stay hidden. The call's trust and source filters hold in the lane; its topic filters do not narrow it.
+  - When it does not run (no `user_facts` key): the switch is off, the call filters by `type`, uses `order='date'`, spans several contexts, or was served degraded.
+  - The lane writes nothing (no access counts, promotion, associations or supersede suggestions). An error or a timeout in it returns the recall without the key.
+  - The lane only finds memories written as `fact`; the context's usage guide is where its owner says what to store as `fact`. An earlier state stays visible unless the newer memory was written with `supersedes`.
+
+### Changed
+- **`remember` says how to store what a user states about themselves** ([#3013](https://github.com/kagura-ai/memory-cloud/issues/3013)): each such statement goes in its own `fact` memory (a liking: `preference`; something that happened: `event`). The remember skill and guide say the same.
+- **`recall` says what `order='date'` returns** ([#3015](https://github.com/kagura-ai/memory-cloud/issues/3015)): the matching memories oldest first, superseded ones included, to be read from one result instead of searching step by step. The recall skill and guide say the same.
+- The core tool list grew by about 400 characters for these two sentences; its ceiling is now 42,000.
+
+### Operators
+- Run `alembic upgrade head` before starting the new code. `f63_3014_user_facts_lane` adds one boolean column with a server default to the context search config (a brief lock on that table, no row rewrite).
+- No new setting. With the switch off a recall runs no extra statement and no extra embedding call.
+
 ## [v0.183.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.183.0) — 2026-11-25
 
 The profile's workspaces page lists the integration services in force for each workspace, and the resource indexer runs a held-back resource at the first tick its limit allows. There is no migration. One new setting, empty by default, gives integration services their display names.
