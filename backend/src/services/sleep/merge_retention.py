@@ -78,11 +78,11 @@ def restore_sleep_tombstone_stmt(memory_id: UUID, user_id: str, *, deleted_by: s
     pipeline's clock, ``embedding_attempted_at``, stamped (#2063): an
     embedding-model switch re-queues the rows embedded since its re-embed
     started, and that re-embed skipped this row while it was a tombstone.
-    ``updated_at`` stays as it is — Sleep dedup reads it as the fact's
-    currency, and a restore changes no content. A row in any other state keeps
-    its stamp (the claim fence, the stale-claim recovery and the retry backoff
-    read it), and the switch re-queues every row that is not ``success``
-    anyway. The ORM cannot evaluate the CASE, so it expires
+    ``updated_at`` stays as it is: it reads as "the fact changed" (``list``,
+    ``changes_since``), and a restore changes no content. A row in any other
+    state keeps its stamp (the claim fence, the stale-claim recovery and the
+    retry backoff read it), and the switch re-queues every row that is not
+    ``success`` anyway. The ORM cannot evaluate the CASE, so it expires
     ``embedding_attempted_at`` on an in-session row; the restore paths do not
     read it before they commit.
     """

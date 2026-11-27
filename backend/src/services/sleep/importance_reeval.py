@@ -73,8 +73,8 @@ STALENESS_DAYS = 7
 BATCH_SIZE = 10
 
 # #3019: re-evaluation keeps its own clock instead of stamping ``updated_at``
-# (which reads as "the fact changed": ``changes_since``, ``list`` order, dedup
-# newer-wins, the related index). One statement per batch whose judge call
+# (which reads as "the fact changed": ``changes_since``, ``list`` order, the
+# related index). One statement per batch whose judge call
 # answered marks every row of the batch as judged, whether or not its
 # importance changed; it runs before the per-row importance writes and locks
 # the rows in id order (like ``PROMOTE_STATEMENT``), so those writes touch

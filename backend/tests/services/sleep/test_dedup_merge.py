@@ -236,23 +236,78 @@ class TestRuleBasedJudge:
 
         assert decisions == [(newer.id, older.id)]
 
-    def test_equal_importance_edited_memory_wins(self):
-        """#1198 review: recency is max(created_at, updated_at) — an in-place
-        edited memory (old created_at, new updated_at) must beat a
+    @staticmethod
+    def _revision_log(phase, rows):
+        """Give a ``__new__``-built phase a session whose revision read
+        returns ``rows`` (``memory_id, version, writer, at, text,
+        restored_from``)."""
+        from types import SimpleNamespace
+
+        db = MagicMock()
+        db.begin_nested = MagicMock(return_value=AsyncMock())
+        result = MagicMock()
+        result.all.return_value = [SimpleNamespace(**row) for row in rows]
+        db.execute = AsyncMock(return_value=result)
+        phase.db = db
+        return db
+
+    @pytest.mark.asyncio
+    async def test_equal_importance_edited_memory_wins(self):
+        """#1198 review, #3019: an in-place text edit is the memory's recency
+        (old created_at, an edit recorded in the revision log), so it beats a
         later-created stale duplicate."""
         phase = DedupMergePhase.__new__(DedupMergePhase)
 
         edited = _make_memory(importance=0.5)
         edited.created_at = datetime(2026, 6, 1)
         edited.updated_at = datetime(2026, 7, 15)
+        edited.version = 2
         stale_dup = _make_memory(importance=0.5)
         stale_dup.created_at = datetime(2026, 7, 1)
         stale_dup.updated_at = datetime(2026, 7, 1)
+        stale_dup.version = 1
         pair_scores = {tuple(sorted([edited.id, stale_dup.id], key=str)): 0.99}
+        self._revision_log(
+            phase,
+            [
+                {
+                    "memory_id": edited.id,
+                    "version": 2,
+                    "writer": "api",
+                    "at": datetime(2026, 7, 15),
+                    "text": True,
+                    "restored_from": None,
+                }
+            ],
+        )
 
+        await phase._load_text_edit_times([edited, stale_dup])
         decisions = phase._rule_based_judge([edited, stale_dup], pair_scores)
 
         assert decisions == [(edited.id, stale_dup.id)]
+
+    @pytest.mark.asyncio
+    async def test_equal_importance_updated_at_alone_is_no_edit(self):
+        """#3019: an ``updated_at`` stamp without an edit (version 1: a Sleep
+        bookkeeping write) does not make the older memory newer."""
+        phase = DedupMergePhase.__new__(DedupMergePhase)
+
+        stamped = _make_memory(importance=0.5)
+        stamped.created_at = datetime(2026, 6, 1)
+        stamped.updated_at = datetime(2026, 7, 15)
+        stamped.version = 1
+        newer = _make_memory(importance=0.5)
+        newer.created_at = datetime(2026, 7, 1)
+        newer.updated_at = None
+        newer.version = 1
+        pair_scores = {tuple(sorted([stamped.id, newer.id], key=str)): 0.99}
+        db = self._revision_log(phase, [])
+
+        await phase._load_text_edit_times([stamped, newer])
+        decisions = phase._rule_based_judge([stamped, newer], pair_scores)
+
+        assert decisions == [(newer.id, stamped.id)]
+        db.execute.assert_not_called()
 
 
 class TestParseDedupResponse:

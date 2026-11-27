@@ -58,6 +58,12 @@ from repositories.neural_edge import NeuralEdgeRepository
 from services.deferred_point_deletes import PointDelete, queue_point_deletes
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
+from services.memory_versions import (
+    TextEditEvent,
+    last_text_edit_at,
+    text_edit_event,
+    text_edit_events_query,
+)
 from services.resource_indexer import unshared_point_id
 from services.sleep.coverage import (
     BUDGET,
@@ -176,6 +182,15 @@ def _fmt_minute(dt: datetime | None) -> str | None:
     the post-hoc verification honest.
     """
     return f"{dt:%Y-%m-%d %H:%M}" if dt else None
+
+
+def _edited_version(version: object) -> bool:
+    """A ``Memory.version`` above 1: an edit moved it at least once (#3019).
+
+    Anything that is not an int (a test double, a missing attribute) reads as
+    unedited, so no revision read is made for it.
+    """
+    return isinstance(version, int) and not isinstance(version, bool) and version > 1
 
 
 # Similarity threshold for auto-merge without LLM (LLM-off mode)
@@ -382,6 +397,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #1195/#1198: newer-wins override counter (init here so
         # ``_judge_cluster`` can be unit-tested without execute()).
         self._winner_overrides: int = 0
+        # #3019: when each judged member's text was last edited, read from the
+        # revision log once a run (``_load_text_edit_times``); None for a
+        # member the log names no edit for. Newer-wins compares this with
+        # ``created_at`` and never reads ``updated_at``.
+        self._text_edited_at: dict[UUID, datetime | None] = {}
         # #1209: per-reason override breakdown ("recency" | "source") and
         # per-decision audit metadata (merge_reason from the judge, override
         # info), keyed by the FINAL (winner_id, loser_id). Kept beside the
@@ -685,6 +705,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #1209: reset the per-reason breakdown + per-decision audit metadata.
         self._override_reasons = {}
         self._decision_meta = {}
+        # #3019: edit times are read again each run.
+        self._text_edited_at = {}
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
         # #475: reset embedding accumulators between sleep cycles.
@@ -856,6 +878,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     cluster_state[index] = "dropped"
                     continue
 
+                # #3019: the judge prompt, the winner rules and the audit all
+                # read the members' recency; their edit times come first.
+                await self._load_text_edit_times(cluster_memories)
                 self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
 
                 failures_before = self._llm_failures
@@ -1485,8 +1510,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # embedded instruction cannot steer the merge judgment. last_updated= is
         # trusted DB metadata and stays OUTSIDE the wrapper: the judge needs it
         # to pick the newer version of an updated fact as winner (#1195).
-        # Minute precision so same-day update pairs stay orderable; max of
-        # created_at/updated_at so in-place edits count as recency (#1198).
+        # Minute precision so same-day update pairs stay orderable. It is
+        # ``_recency_key``: creation, or the last text edit when there is one
+        # (#1198, #3019), the same value the winner rules and the audit use.
         # source= is trusted #887 server-stamped provenance (#1209): the judge
         # sees which side is human-authored ('manual') vs ingested, and the
         # deterministic source tie-break is verifiable against it post-hoc.
@@ -1628,27 +1654,62 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
         return decisions
 
-    @staticmethod
-    def _recency_key(mem: Memory) -> datetime | None:
-        """Last time this memory's content was current: max(created_at,
-        updated_at) over whichever are real datetimes, else None.
+    def _recency_key(self, mem: Memory) -> datetime | None:
+        """When this memory's text was last written: the later of
+        ``created_at`` and its last text edit, else None (#1198, #3019).
 
-        created_at alone is WRONG for recency (#1198 review): an in-place
-        edit preserves created_at and bumps updated_at, so the row holding
-        the current fact can carry the older created_at.
+        created_at alone misses an in-place edit (#1198 review): an edit keeps
+        created_at, so the row holding the current fact can carry the older
+        one. ``updated_at`` is not read (#3019): writes that change no text
+        stamp it too (a merge winner's tag union, the undo of a promotion, a
+        context-merge copy, and importance re-evaluation before it kept its own
+        clock), so a stamped old row would outrank a newer duplicate and the
+        newer fact would be the one retired. The edit time comes from the
+        revision log (``_load_text_edit_times``); a memory with no edit known
+        there is compared by its creation time.
         """
-        stamps = [
-            v
-            for v in (getattr(mem, "created_at", None), getattr(mem, "updated_at", None))
-            if isinstance(v, datetime)
-        ]
+        created = getattr(mem, "created_at", None)
+        edited = (getattr(self, "_text_edited_at", None) or {}).get(mem.id)
+        stamps = [v for v in (created, edited) if isinstance(v, datetime)]
         return max(stamps) if stamps else None
 
-    @classmethod
-    def _is_newer(cls, candidate: Memory, other: Memory) -> bool:
+    async def _load_text_edit_times(self, cluster_memories: list[Memory]) -> None:
+        """Read when each edited cluster member's text was last written (#3019).
+
+        A member at version 1 was never edited through a versioned path, so
+        its creation time is its recency and nothing is read; Sleep, the
+        context-merge copy and the other writes that stamp ``updated_at``
+        without an edit never move the version. The other members' ``updated``
+        revisions are read in one statement for the cluster and walked by
+        ``last_text_edit_at``. Each id is read once a run. A read that fails
+        is rolled back to its savepoint and leaves those members at their
+        creation time: the direction that never makes an old row look newer.
+        """
+        self._ensure_audit_state()
+        known = self._text_edited_at
+        ids = [
+            mem.id
+            for mem in cluster_memories
+            if _edited_version(getattr(mem, "version", None)) and mem.id not in known
+        ]
+        if not ids:
+            return
+        try:
+            async with self.db.begin_nested():
+                rows = (await self.db.execute(text_edit_events_query(ids))).all()
+        except Exception as e:
+            logger.warning("dedup_text_edit_times_unavailable", count=len(ids), error=str(e))
+            rows = []
+        events: dict[UUID, list[TextEditEvent]] = {}
+        for row in rows:
+            events.setdefault(row.memory_id, []).append(text_edit_event(row))
+        for memory_id in ids:
+            known[memory_id] = last_text_edit_at(events.get(memory_id, ()))
+
+    def _is_newer(self, candidate: Memory, other: Memory) -> bool:
         """True iff both carry a recency key and candidate's is strictly newer."""
-        c = cls._recency_key(candidate)
-        o = cls._recency_key(other)
+        c = self._recency_key(candidate)
+        o = self._recency_key(other)
         return c is not None and o is not None and c > o
 
     @staticmethod
@@ -1669,6 +1730,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
             self._override_reasons = {}
         if not hasattr(self, "_winner_overrides"):
             self._winner_overrides = 0
+        if not hasattr(self, "_text_edited_at"):
+            self._text_edited_at = {}
 
     def _record_override(
         self,
@@ -1690,8 +1753,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
             override_reason=reason,
         )
 
-    @classmethod
-    def _recency_minute(cls, mem: Memory) -> datetime | None:
+    def _recency_minute(self, mem: Memory) -> datetime | None:
         """Recency key truncated to the minute — the precision the judge saw.
 
         The prompt renders ``last_updated=`` at minute precision, so the
@@ -1699,7 +1761,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         are write-ordering noise, not a recency signal, and must neither
         trigger the newer-wins flip nor defeat the source tie-break (#1209).
         """
-        key = cls._recency_key(mem)
+        key = self._recency_key(mem)
         return key.replace(second=0, microsecond=0) if key else None
 
     def _enforce_winner_rules(
@@ -1709,11 +1771,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
     ) -> list[tuple[UUID, UUID]]:
         """Deterministic post-checks on LLM merge decisions (#1195/#1198/#1209).
 
-        The prompt asks for these rules but cannot guarantee them — the judge
-        picked the older memory in 10-18% of update pairs in the Day-5 eval.
-        The duplicate verdict is trusted; the direction is enforced, in order,
-        at MINUTE precision (matching the ``last_updated=`` signal the judge
-        was shown):
+        The prompt asks for these rules but cannot guarantee them: the judge
+        sometimes picks the older memory of an update pair. The duplicate
+        verdict is trusted; the direction is enforced, in order, at MINUTE
+        precision (matching the ``last_updated=`` signal the judge was shown).
+        Recency is ``_recency_key``: creation, or the last text edit the
+        revision log records (#3019), never ``updated_at``.
 
         1. **Newer wins** (#1198): a winner strictly older (by minute) than
            its loser is flipped ("recency" override).

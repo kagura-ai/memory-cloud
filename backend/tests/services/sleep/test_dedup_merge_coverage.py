@@ -481,36 +481,63 @@ class TestLLMJudge:
 
 
 class TestLLMJudgeRecency:
-    """#1195: the judge deleted the NEWER fact of an update pair in 10-18% of
-    judged pairs because it never saw timestamps and had no update-pair winner
-    rule. The prompt must carry created_at and an explicit newer-wins rule."""
+    """#1195: the judge sometimes deleted the NEWER fact of an update pair
+    because it never saw timestamps and had no update-pair winner rule. The
+    prompt must carry each memory's recency and an explicit newer-wins rule."""
 
     async def test_prompt_includes_last_updated(self, dedup_phase):
         # Summaries deliberately carry NO dates: the asserts below must be
         # satisfiable only by the trusted last_updated= metadata rendering
         # (PR #1198 review: a date in the summary would mask a dropped field).
-        # mem_b was edited in place (created_at preserved, updated_at bumped):
-        # the prompt must show max(created_at, updated_at), minute precision.
+        # mem_b's text was edited in place (created_at preserved, the edit in
+        # the revision log): the prompt shows the edit time, minute precision.
+        # mem_c was only stamped (updated_at moved, version 1): the prompt
+        # shows its creation time (#3019).
+        from types import SimpleNamespace
+
         mem_a = _make_memory(summary="deploy target is blue")
         mem_a.created_at = datetime(2026, 6, 1, 9, 0)
         mem_a.updated_at = datetime(2026, 6, 1, 9, 0)
+        mem_a.version = 1
         mem_b = _make_memory(summary="deploy target is green")
         mem_b.created_at = datetime(2026, 6, 15, 8, 0)
         mem_b.updated_at = datetime(2026, 7, 1, 15, 30)
+        mem_b.version = 2
+        mem_c = _make_memory(summary="deploy target is red")
+        mem_c.created_at = datetime(2026, 5, 2, 7, 0)
+        mem_c.updated_at = datetime(2026, 7, 20, 10, 45)
+        mem_c.version = 1
         scores = {tuple(sorted([mem_a.id, mem_b.id], key=str)): 0.96}
         dedup_phase.llm_service.complete_json = AsyncMock(
             return_value=_make_llm_response({"judgments": []})
         )
         dedup_phase._tokens_used = 0
         dedup_phase._llm_breakdown = None
+        revisions = MagicMock()
+        revisions.all.return_value = [
+            SimpleNamespace(
+                memory_id=mem_b.id,
+                version=2,
+                writer="api",
+                at=datetime(2026, 7, 1, 15, 30),
+                text=True,
+                restored_from=None,
+            )
+        ]
+        dedup_phase.db.begin_nested = MagicMock(return_value=AsyncMock())
+        dedup_phase.db.execute = AsyncMock(return_value=revisions)
 
+        await dedup_phase._load_text_edit_times([mem_a, mem_b, mem_c])
         await dedup_phase._llm_judge(
-            [mem_a, mem_b], scores, "u", "ctx", "ws", SleepBudget(), _make_config()
+            [mem_a, mem_b, mem_c], scores, "u", "ctx", "ws", SleepBudget(), _make_config()
         )
 
         prompt = dedup_phase.llm_service.complete_json.call_args.kwargs["prompt"]
         assert "last_updated=2026-06-01 09:00" in prompt
         assert "last_updated=2026-07-01 15:30" in prompt
+        assert "last_updated=2026-05-02 07:00" in prompt
+        assert "2026-07-20 10:45" not in prompt
+        assert dedup_phase.db.execute.await_count == 1
 
     def test_system_prompt_has_newer_wins_rule(self):
         from services.sleep.prompts import DEDUP_JUDGE_SYSTEM

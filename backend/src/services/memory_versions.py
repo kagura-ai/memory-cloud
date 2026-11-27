@@ -20,13 +20,14 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, or_, select, tuple_
+from sqlalchemy import ColumnElement, Select, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.util import AliasedClass
 
 from models.memory import (
     REVISION_KIND_UPDATED,
     REVISION_WRITER_API,
+    REVISION_WRITER_ROLLBACK,
     VERSIONED_FIELDS,
     MemoryRevision,
 )
@@ -583,6 +584,110 @@ def revision_changed_field(
     if scrubbed:
         arms.append(prior[PRIOR_SCRUBBED_KEY].has_key(field))
     return or_(*arms)
+
+
+# #3019: the fields whose edit makes a memory's text newer, for Sleep dedup's
+# newer-wins. An edit of ``context_summary``, ``details``, tags, importance or
+# type alone leaves the text as current as it was.
+TEXT_EDIT_FIELDS: tuple[str, ...] = ("summary", "content")
+
+
+@dataclass(frozen=True)
+class TextEditEvent:
+    """One ``updated`` event as ``last_text_edit_at`` reads it (#3019).
+
+    Attributes:
+        version: ``Memory.version`` right after the event.
+        writer: The event's writer (one of ``REVISION_WRITERS``).
+        at: The event's time.
+        text: The event changed one of ``TEXT_EDIT_FIELDS``.
+        restored_from: On a session rollback's restore of values, the lowest
+            version of the block of edits it reverted; None when the row names
+            none.
+    """
+
+    version: int
+    writer: str
+    at: datetime
+    text: bool
+    restored_from: int | None = None
+
+
+def last_text_edit_at(events: Iterable[TextEditEvent]) -> datetime | None:
+    """When an edit wrote the text a memory holds now, if one did (#3019).
+
+    Walks one memory's ``updated`` events in version order. An API edit that
+    changed the text is a candidate. A session rollback's restore of values
+    removes the candidates it reverted (those at or above its
+    ``restored_from``; all of them when it names none) and is no edit time of
+    its own: it puts older text back. An erasure's details revert and an edit
+    of other fields are skipped.
+
+    Returns:
+        The time of the last candidate left, or None when, as far as the log
+        tells, the text is the one the memory was created with.
+    """
+    live: list[tuple[int, datetime]] = []
+    for event in sorted(events, key=lambda e: e.version):
+        if event.writer == REVISION_WRITER_API:
+            if event.text:
+                live.append((event.version, event.at))
+        elif event.writer == REVISION_WRITER_ROLLBACK:
+            restored_from = event.restored_from
+            live = (
+                []
+                if restored_from is None
+                else [entry for entry in live if entry[0] < restored_from]
+            )
+    return live[-1][1] if live else None
+
+
+def text_edit_events_query(
+    memory_ids: Iterable[UUID],
+) -> Select[UUID, int, str, datetime, bool, str | None]:
+    """The ``updated`` events of ``memory_ids``, as ``text_edit_event`` reads them (#3019).
+
+    An index range read on ``idx_memory_revisions_memory`` per memory, in
+    version order. Of ``prior`` only key names are tested, plus a rollback's
+    ``restored_from``; no overwritten value is read.
+    """
+    return (
+        select(
+            MemoryRevision.memory_id,
+            MemoryRevision.version,
+            MemoryRevision.writer,
+            MemoryRevision.at,
+            or_(
+                *(revision_changed_field(MemoryRevision, field) for field in TEXT_EDIT_FIELDS)
+            ).label("text"),
+            MemoryRevision.prior[PRIOR_RESTORED_FROM_KEY].astext.label("restored_from"),
+        )
+        .where(
+            MemoryRevision.memory_id.in_(list(memory_ids)),
+            MemoryRevision.kind == REVISION_KIND_UPDATED,
+        )
+        .order_by(MemoryRevision.memory_id, MemoryRevision.version, MemoryRevision.id)
+    )
+
+
+def text_edit_event(row: Any) -> TextEditEvent:
+    """A ``text_edit_events_query`` row as a ``TextEditEvent``.
+
+    ``restored_from`` arrives as the text of a JSON number; one that does not
+    read as an int reads as None, so the walk drops every earlier edit (the
+    memory is then compared by its creation time).
+    """
+    try:
+        restored_from = int(row.restored_from) if row.restored_from is not None else None
+    except (TypeError, ValueError):
+        restored_from = None
+    return TextEditEvent(
+        version=row.version,
+        writer=row.writer,
+        at=row.at,
+        text=bool(row.text),
+        restored_from=restored_from,
+    )
 
 
 async def type_changes_above(
