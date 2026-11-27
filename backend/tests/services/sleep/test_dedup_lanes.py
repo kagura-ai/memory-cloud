@@ -27,6 +27,11 @@ from services.sleep.coverage import (
 from services.sleep.dedup_merge import DedupMergePhase
 from services.sleep.reporter import SleepBudget
 from utils.datetime import utcnow
+from utils.exceptions import (
+    ConfigurationError,
+    EmbeddingSpendCapExceeded,
+    FeatureNotAvailableError,
+)
 
 
 def _row(days_ago: float):
@@ -83,6 +88,12 @@ def _window(phase, changed, sweep, *, floor=None, exhausted=False):
         return [*changed, *sweep]
 
     phase._fetch_active_memories = fetch
+
+
+def _answered(outcome, *, from_cache: bool) -> None:
+    """Say where an embed's vector came from, as ``EmbeddingService`` does."""
+    if outcome is not None:
+        outcome["cache_hit"] = from_cache
 
 
 def _pairs(*clusters):
@@ -259,9 +270,10 @@ class TestOutcomes:
         phase = _phase()
         _window(phase, [lonely, broken], [])
 
-        async def embed(text, **kwargs):
+        async def embed(text, *, outcome=None, **kwargs):
             if text == broken.summary:
                 raise RuntimeError("too long for the provider")
+            _answered(outcome, from_cache=False)
             return ([1.0, 0.0], 1)
 
         phase.embedding_service.embed_with_usage = AsyncMock(side_effect=embed)
@@ -270,6 +282,115 @@ class TestOutcomes:
 
         assert result.details["message"] == "no_duplicate_candidates"
         assert phase.coverage_outcome.outcomes == {lonely.id: SETTLED, broken.id: PASSED}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["cache", "unknown"])
+    async def test_an_embed_the_provider_did_not_answer_is_no_evidence(self, source):
+        """A vector from the cache says nothing about the provider: on a night
+        it is down, the rows written in the last day are still searched from
+        the cache, and a failed embed must hold the lane all the same. An
+        embed that does not say where its vector came from counts the same."""
+        cached, broken = _row(2), _row(1)
+        phase = _phase()
+        _window(phase, [cached, broken], [])
+
+        async def embed(text, *, outcome=None, **kwargs):
+            if text == broken.summary:
+                raise RuntimeError("provider down")
+            if source == "cache":
+                _answered(outcome, from_cache=True)
+            return ([1.0, 0.0], 0)
+
+        phase.embedding_service.embed_with_usage = AsyncMock(side_effect=embed)
+        with patch("services.sleep.dedup_merge.search_memories_qdrant", AsyncMock(return_value=[])):
+            await _run(phase)
+
+        assert phase.coverage_outcome.outcomes == {cached.id: SETTLED, broken.id: FAILURE}
+
+    @pytest.mark.asyncio
+    async def test_a_failed_vector_search_passes_when_another_search_answered(self):
+        """The evidence is per step: a cached row's search proves the vector
+        store answered, so a search that raised for another row is its own."""
+        cached, broken = _row(2), _row(1)
+        phase = _phase()
+        _window(phase, [cached, broken], [])
+
+        async def embed(text, *, outcome=None, **kwargs):
+            _answered(outcome, from_cache=True)
+            return ([1.0, 0.0] if text == cached.summary else [0.0, 1.0], 0)
+
+        async def search(*, query_vector, **kwargs):
+            if query_vector == [0.0, 1.0]:
+                raise RuntimeError("search timed out")
+            return []
+
+        phase.embedding_service.embed_with_usage = AsyncMock(side_effect=embed)
+        with patch(
+            "services.sleep.dedup_merge.search_memories_qdrant", AsyncMock(side_effect=search)
+        ):
+            await _run(phase)
+
+        assert phase.coverage_outcome.outcomes == {cached.id: SETTLED, broken.id: PASSED}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "refusal",
+        [
+            EmbeddingSpendCapExceeded(period="daily", cap_usd=1.0, current_usd=1.0),
+            ConfigurationError("no key for the provider"),
+            FeatureNotAvailableError(),
+        ],
+        ids=["spend_cap", "configuration", "plan"],
+    )
+    async def test_a_refusal_that_is_never_one_rows_own_holds_the_lane(self, refusal):
+        """The spend cap reached partway through the window (or a provider key
+        or plan that went away) refuses every later row: those rows hold the
+        lane although the provider answered for earlier ones."""
+        answered, refused = _row(2), _row(1)
+        phase = _phase()
+        _window(phase, [answered, refused], [])
+
+        async def embed(text, *, outcome=None, **kwargs):
+            if text == refused.summary:
+                raise refusal
+            _answered(outcome, from_cache=False)
+            return ([1.0, 0.0], 1)
+
+        phase.embedding_service.embed_with_usage = AsyncMock(side_effect=embed)
+        with patch("services.sleep.dedup_merge.search_memories_qdrant", AsyncMock(return_value=[])):
+            result = await _run(phase)
+
+        assert phase.coverage_outcome.outcomes == {answered.id: SETTLED, refused.id: FAILURE}
+        assert result.details["no_action_reasons"]["search_failed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_provider_outage_moves_no_lane(self):
+        """End to end through the plan: the changed lane's rows embed from the
+        cache, every sweep row needs the provider and fails. The changed lane
+        moves; the sweep stalls instead of moving past rows it never searched."""
+        changed = [_row(0.5)]
+        sweep = [_row(30), _row(31)]
+        phase = _phase()
+        _window(phase, changed, sweep)
+
+        async def embed(text, *, outcome=None, **kwargs):
+            if text == changed[0].summary:
+                _answered(outcome, from_cache=True)
+                return ([1.0, 0.0], 0)
+            _answered(outcome, from_cache=False)
+            raise RuntimeError("provider down")
+
+        phase.embedding_service.embed_with_usage = AsyncMock(side_effect=embed)
+        with patch("services.sleep.dedup_merge.search_memories_qdrant", AsyncMock(return_value=[])):
+            await _run(phase)
+
+        lanes, report = advance_dedup(
+            DedupLanes(), phase.coverage_outcome, returned=True, now=utcnow()
+        )
+        assert lanes.changed.position == changed_key(changed[0])
+        assert lanes.sweep.position is None
+        assert lanes.sweep.stalls == 1
+        assert report["sweep"]["advanced"] == 0
 
     @pytest.mark.asyncio
     async def test_every_search_failing_is_a_failure(self):

@@ -84,6 +84,11 @@ from services.sleep.reporter import (
     phase_outcome,
 )
 from utils.datetime import utcnow
+from utils.exceptions import (
+    ConfigurationError,
+    EmbeddingSpendCapExceeded,
+    FeatureNotAvailableError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -102,6 +107,15 @@ MAX_CLUSTER_SIZE = 5
 # per statement and vector read when loading a cluster's outside members.
 ELIGIBILITY_CHECK_CHUNK = 1000
 MEMBER_LOAD_CHUNK = 100
+
+# #3019: embedding refusals that are never one row's own — the workspace's
+# embedding spend cap, a provider key or a plan that is not there. A row
+# refused this way holds its lane like an outage, whatever else answered.
+_REFUSALS_NOT_ROW_SPECIFIC: tuple[type[Exception], ...] = (
+    EmbeddingSpendCapExceeded,
+    ConfigurationError,
+    FeatureNotAvailableError,
+)
 
 
 def dedup_eligible(
@@ -326,6 +340,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
     # #3019: the window rows whose embed and search succeeded (None: the
     # search was stubbed, every row counts as searched).
     _searched_ok: set[UUID] | None = None
+    # #3019: the step each failed window row failed at ("embed", "search", or
+    # "refused" for a refusal that is never the row's own), and how many
+    # embeds the provider answered. A vector from the cache says nothing about
+    # the provider, so it is no evidence that a failed embed was the row's own.
+    _search_failures: dict[UUID, str] | None = None
+    _provider_embeds: int = 0
 
     def __init__(
         self,
@@ -676,6 +696,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
         self._rows_search_failed = 0
         self._hits_not_eligible = 0
         self._searched_ok = None
+        self._search_failures = None
+        self._provider_embeds = 0
         self.coverage_outcome = None
         calls_at_entry = max(0, budget.max_llm_calls - budget.llm_calls_used)
 
@@ -1046,13 +1068,22 @@ class DedupMergePhase(EmbeddingSpendTracker):
         oversize cluster it belongs to (the rest is judged next run). A failure
         of the row's own — its search, or its cluster's judge call — is
         ``passed`` when the same kind of work succeeded for another row in this
-        run, else ``failure`` (an outage holds the lane).
+        run, else ``failure`` (an outage holds the lane). For a failed search
+        the kind is the step that raised: an embed needs another embed the
+        provider answered (a vector from the cache proves nothing about the
+        provider), a vector search another search that answered. A refusal that
+        is never one row's own (the spend cap, a missing key or plan) is always
+        a ``failure``.
         """
         window = self.coverage_outcome
         if window is None:
             return
         searched = self._searched_ok
-        any_searched = searched is None or bool(searched)
+        failed_at = self._search_failures or {}
+        evidence = {
+            "embed": self._provider_embeds > 0,
+            "search": bool(searched),
+        }
         cluster_of = {mid: index for index, c in enumerate(processable or []) for mid in c}
         oversize_of = {mid: index for index, c in enumerate(oversize or []) for mid in c}
         states = cluster_state or {}
@@ -1060,7 +1091,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         for memory in memories:
             mid = memory.id
             if searched is not None and mid not in searched:
-                outcome = PASSED if any_searched else FAILURE
+                outcome = PASSED if evidence.get(failed_at.get(mid, ""), False) else FAILURE
             elif oversize_of.get(mid) in merged:
                 outcome = BUDGET
             elif mid in cluster_of:
@@ -1278,20 +1309,29 @@ class DedupMergePhase(EmbeddingSpendTracker):
         self._rows_search_failed = 0
         self._hits_not_eligible = 0
         self._searched_ok = set()
+        self._search_failures = {}
+        self._provider_embeds = 0
 
         for memory in memories:
             row_hits: list[tuple[UUID, float]] = []
+            # Where the vector came from, as the service reports it (#1989).
+            embedded: dict[str, Any] = {}
+            step = "embed"
             try:
                 vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
                     user_id=user_id,
                     context_id=context_id,
                     workspace_id=workspace_id,
+                    outcome=embedded,
                 )
+                if embedded.get("cache_hit") is False:
+                    self._provider_embeds += 1
                 self._embedding_calls_used += 1
                 self._embedding_tokens_used += tokens
                 self._summary_vectors[memory.id] = vector
 
+                step = "search"
                 results = await search_memories_qdrant(
                     user_id=user_id,
                     query_vector=vector,
@@ -1308,6 +1348,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     row_hits.append((hit_id, hit["score"]))
             except Exception as e:
                 self._rows_search_failed += 1
+                self._search_failures[memory.id] = (
+                    "refused" if isinstance(e, _REFUSALS_NOT_ROW_SPECIFIC) else step
+                )
                 logger.warning(
                     "dedup_search_failed",
                     memory_id=str(memory.id),
