@@ -288,8 +288,12 @@ class DedupCoverage:
     exhausted: bool
     outcomes: dict[UUID, str] = field(default_factory=dict)
 
-    def lane_rows(self, lane: str) -> list[tuple[Key, str]]:
+    def lane_rows(self, lane: str, *, returned: bool = True) -> list[tuple[Key, str]]:
+        """The lane's rows in lane order with their outcomes; every row is a
+        failure when the phase did not return (its savepoint rolled back)."""
         keys = self.changed if lane == LANE_CHANGED else self.sweep
+        if not returned:
+            return [(key, FAILURE) for key in keys]
         return [(key, self.outcomes.get(key[1], FAILURE)) for key in keys]
 
 
@@ -506,15 +510,23 @@ def advance_dedup(
     """Dedup's next lanes and the ``details["coverage"]`` report of the run.
 
     No window (the phase was skipped, or raised before its fetch): the lanes
-    are carried as they are. ``turn`` flips after every run in which the phase
-    returned.
+    are carried as they are. A phase that did not return moves no position:
+    every row of its window counts as a failure (the stall rule applies).
+    ``turn`` flips after every run in which the phase returned.
     """
     if coverage is None:
         return lanes, None
     changed = plan_changed(
-        lanes.changed, coverage.lane_rows(LANE_CHANGED), floor=coverage.floor, now=now
+        lanes.changed,
+        coverage.lane_rows(LANE_CHANGED, returned=returned),
+        floor=coverage.floor,
+        now=now,
     )
-    sweep = plan_sweep(lanes.sweep, coverage.lane_rows(LANE_SWEEP), exhausted=coverage.exhausted)
+    sweep = plan_sweep(
+        lanes.sweep,
+        coverage.lane_rows(LANE_SWEEP, returned=returned),
+        exhausted=coverage.exhausted,
+    )
     turn = lanes.turn
     if returned:
         turn = LANE_SWEEP if turn == LANE_CHANGED else LANE_CHANGED

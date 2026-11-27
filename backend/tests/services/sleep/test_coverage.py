@@ -287,6 +287,24 @@ class TestAdvanceDedup:
         lanes, _ = advance_dedup(lanes, coverage, returned=False, now=NOW)
         assert lanes.turn == "sweep"
 
+    def test_a_phase_that_did_not_return_moves_nothing(self):
+        """Invariant 1, held structurally: settled outcomes on the window of a
+        phase whose savepoint rolled back (it raised after deciding them) count
+        as failures — the lanes stall instead of moving past work that is gone."""
+        changed = _keys(1)
+        sweep = [(T0 - timedelta(days=5), uuid4())]
+        coverage = DedupCoverage(
+            changed=changed,
+            sweep=sweep,
+            floor=None,
+            exhausted=True,
+            outcomes={changed[0][1]: SETTLED, sweep[0][1]: SETTLED},
+        )
+        lanes, report = advance_dedup(DedupLanes(), coverage, returned=False, now=NOW)
+        assert lanes.changed == LaneEntry(stalls=1)
+        assert lanes.sweep == LaneEntry(stalls=1)
+        assert report["sweep"]["pass_completed"] is False
+
     def test_report(self):
         changed = _keys(2)
         sweep = [(T0 - timedelta(days=10 - i), uuid4()) for i in range(2)][::-1]
