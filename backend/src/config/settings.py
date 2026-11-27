@@ -1183,6 +1183,24 @@ class Settings(BaseSettings):
     # Free bounded only by the #708 drain-attack cap) so OSS / dev / self-host
     # deployments are unchanged; managed-SaaS flips this on once a dedicated
     # platform embedding credential is provisioned.
+    # #3034: background embedding tasks (one per written memory) that run at
+    # once per API process; the rest wait for a slot with their rows pending,
+    # and the sweep takes a row that waits past its 10 s threshold. Each run
+    # holds a pooled connection for its whole duration. Besides them a process
+    # holds: on the scheduler leader, the leader's own connection and, while
+    # the sweep runs, its session plus the run it does; anywhere, one run per
+    # session rollback in flight. At the defaults (pool 5 + overflow 10) that is at most
+    # 4 + 4 = 8 of 15 on the leader with one rollback in flight: request handlers may run on overflow
+    # connections there, and the overflow is their headroom. Raise
+    # DB_POOL_SIZE / DB_MAX_OVERFLOW together with this value.
+    embedding_task_concurrency: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "Background embedding tasks one API process runs at once (#3034); "
+            "more wait for a slot. Each run holds a pooled database connection."
+        ),
+    )
     embedding_platform_fallback_requires_managed_plan: bool = Field(
         default=False,
         description=(

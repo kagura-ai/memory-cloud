@@ -1259,3 +1259,56 @@ def test_similar_id_candidates_takes_no_limit():
     from services.memory_service import MemoryService
 
     assert "limit" not in inspect.signature(MemoryService.similar_id_candidates).parameters
+
+
+# ------------------------------------------------- #3033: not searchable yet
+
+
+@pytest.mark.parametrize("state", ["indexing", "retrying", "failed"])
+@pytest.mark.asyncio
+async def test_a_memory_that_is_not_searchable_says_so(state):
+    result = _response()
+    result.index_state = state
+    text, _ = await _call({}, service_result=result)
+    memory = _memory(text)
+    assert memory["search_index"] == {"searchable": False, "state": state}
+    # The only addition: everything else is the reply as before.
+    del memory["search_index"]
+    assert json.dumps(
+        {"status": "success", "memory": memory}, ensure_ascii=False, separators=(",", ":")
+    ) == _legacy_text(result)
+
+
+@pytest.mark.asyncio
+async def test_a_searchable_memory_has_no_search_index_key():
+    text, _ = await _call({}, service_result=_response())
+    assert "search_index" not in _memory(text)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"fields": ["content"]},
+        {"fields": []},
+        {"content_offset": 5},
+        {"details_offset": 0},
+        {"max_chars": REFERENCE_MIN_MAX_CHARS},
+    ],
+)
+@pytest.mark.asyncio
+async def test_search_index_survives_field_selection_and_paging(args):
+    result = _response(content=_big_text(30_000))
+    result.index_state = "indexing"
+    text, _ = await _call(args, service_result=result)
+    assert _memory(text)["search_index"] == {"searchable": False, "state": "indexing"}
+
+
+@pytest.mark.asyncio
+async def test_a_historical_read_has_no_search_index_key():
+    """A version=N read describes that version, not the row's index now."""
+    result = _response()
+    result.historical = True
+    result.current_version = 3
+    result.index_state = "indexing"
+    text, _ = await _call({"version": 1}, service_result=result)
+    assert "search_index" not in _memory(text)
