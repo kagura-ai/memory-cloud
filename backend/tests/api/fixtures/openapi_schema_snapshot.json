@@ -8530,6 +8530,28 @@
         ],
         "type": "object"
       },
+      "NeverDeliveredCountResponse": {
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "exempt_tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "older_than_days": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "exempt_tags",
+          "older_than_days"
+        ],
+        "type": "object"
+      },
       "NotificationSignal": {
         "properties": {
           "dedupe_key": {},
@@ -27195,6 +27217,60 @@
         ]
       }
     },
+    "/api/v1/contexts/{context_id}/never-delivered-count": {
+      "get": {
+        "operationId": "get_never_delivered_count_api_v1_contexts__context_id__never_delivered_count_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "context_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NeverDeliveredCountResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "contexts"
+        ]
+      }
+    },
     "/api/v1/contexts/{context_id}/search-config": {
       "get": {
         "operationId": "get_context_search_config_api_v1_contexts__context_id__search_config_get",
@@ -31128,6 +31204,15 @@
               "default": 0,
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "never_delivered",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
             }
           },
           {

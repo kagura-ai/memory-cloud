@@ -311,3 +311,60 @@ async def test_session_lane_counts_a_linked_identity_as_the_caller():
     # The owner override (user credential) is unchanged.
     _, lane = await _by_me_call({"session_id": "s1"}, ContextRole.OWNER, frozenset({"other"}))
     assert lane.await_args.kwargs["principal"] is None
+
+
+# --- #3022: never_delivered -------------------------------------------------
+
+
+async def _list_call(args: dict, *, private: bool = False) -> tuple[dict, object, object]:
+    import uuid
+    from collections.abc import AsyncIterator
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from mcp_server.tools import listing
+    from services.memory_listing import ListPage
+    from services.memory_listing import compile_memory_filters as real_compile
+
+    opened: list[object] = []
+    db = MagicMock()
+
+    async def get_db() -> AsyncIterator[object]:
+        opened.append(db)
+        yield db
+
+    lane = AsyncMock(return_value=ListPage(rows=[], total=7, has_more=False))
+    compiler = MagicMock(side_effect=real_compile)
+    context = MagicMock(id=uuid.UUID(CTX), is_private=private)
+    with (
+        patch("db.base.get_db", get_db),
+        patch.object(listing, "_resolve_context_for_read", AsyncMock(return_value=context)),
+        patch.object(listing, "_context_response_fields", lambda _c: {}),
+        patch.object(listing, "_log_tool_usage", AsyncMock()),
+        patch.object(listing, "compile_memory_filters", compiler),
+        patch.object(listing, "list_memories", lane),
+    ):
+        (block,) = await listing.handle_list({"context_id": CTX, **args}, "caller", None)
+    return json.loads(block.text), compiler, (lane, opened)
+
+
+@pytest.mark.asyncio
+async def test_list_hands_the_caller_to_the_filter_compiler():
+    payload, compiler, (lane, _) = await _list_call({"filters": {"never_delivered": True}})
+    assert compiler.call_args.kwargs == {"viewer_user_id": "caller"}
+    assert compiler.call_args.args == ({"never_delivered": True},)
+    sql = " ".join(str(p) for p in lane.await_args.kwargs["predicates"])
+    assert "first_delivered_at" in sql
+    # The reply keeps its shape; total under the filter is the count.
+    assert payload["status"] == "success"
+    assert payload["total"] == 7
+    assert set(payload) >= {"memories", "count", "total", "has_more", "next_cursor"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [False, "true", 1, None])
+async def test_list_refuses_a_never_delivered_value_other_than_true(value):
+    payload, _, (lane, opened) = await _list_call({"filters": {"never_delivered": value}})
+    assert payload["status"] == "error" and payload["error"] == "validation_error"
+    assert payload["message"] == "never_delivered accepts true only"
+    assert opened == []  # no session was opened
+    lane.assert_not_awaited()

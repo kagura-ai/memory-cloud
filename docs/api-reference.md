@@ -942,6 +942,32 @@ A context member row the member already holds but whose list does not reach the 
 
 ---
 
+### GET /api/v1/contexts/{context_id}/never-delivered-count
+
+How many of the caller's own memories in the context were never delivered ([#3022](https://github.com/kagura-ai/memory-cloud/issues/3022)): memories of the caller and of accounts linked to the caller, created more than 180 days ago, whose content no recall returned and no `reference` read, with no earlier use (access count, reference count and last use all empty). Pinned memories, time memories, tool guardrails, memories indexed from a connected source, memories carrying an exempt tag, every memory of a public context and a memory that superseded an older one are not counted. This is the number on the context's Overview tab. Session only.
+
+**Response:**
+
+```json
+{
+  "count": 12,
+  "older_than_days": 180,
+  "exempt_tags": ["status:open"]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `count` | Never-delivered memories of the caller in this context; `0` in a public context |
+| `older_than_days` | The age threshold applied (a fixed server default) |
+| `exempt_tags` | Tags that keep a memory out of the count (exact match, sorted): the API service's `SLEEP_ARCHIVE_EXEMPT_TAGS` |
+
+The count is computed on every request (nothing caches it) and is served while the workspace is over its capacity, like the memory list. Errors: `401` without a session; `403` for any bearer credential (API key, workspace-scoped or agent-bound key, connector key, OAuth access token); the uniform `404` `Context not found` for a context the caller may not read.
+
+**Programmatic equivalent:** `GET /api/v1/memory/list?context_id=<id>&never_delivered=true&limit=1` returns the same number as `total` (and the memories themselves without `limit=1`), and so does the MCP `list` tool with `filters={"never_delivered": true}`. `never_delivered=true` needs `context_id` (`422` `never_delivered needs context_id` without it) and ANDs with `q`, `tags`, `type` and `scope`; under it a shared context lists the caller's own memories only.
+
+---
+
 ## Workspace Member APIs
 
 A member's **context access list** (`allowed_context_ids`) decides which contexts a member or viewer reaches ([concepts](concepts.md#workspace)):

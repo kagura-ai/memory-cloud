@@ -46,6 +46,12 @@ export interface ListMemoriesParams {
   latMax?: number;
   lonMin?: number;
   lonMax?: number;
+  /**
+   * #3022: only the caller's own memories of `context_id` that were never
+   * delivered. Sent as `never_delivered=true` only when true; needs
+   * `context_id` (the backend refuses it without one).
+   */
+  neverDelivered?: boolean;
 }
 
 /**
@@ -78,6 +84,7 @@ export async function getMemories(
   if (params.latMax != null) searchParams.set("lat_max", String(params.latMax));
   if (params.lonMin != null) searchParams.set("lon_min", String(params.lonMin));
   if (params.lonMax != null) searchParams.set("lon_max", String(params.lonMax));
+  if (params.neverDelivered === true) searchParams.set("never_delivered", "true");
   searchParams.set("limit", String(params.limit ?? 50));
   searchParams.set("offset", String(params.offset ?? 0));
 

@@ -8,9 +8,9 @@ Arguments: $ARGUMENTS — `[context=<name or id>] [topic=<words>] [dry-run]`. An
 
 ## When to use
 
-When the user asks — every few weeks, or when `/kagura-memory:session-start` warns of a large pinned set or lists a finished follow-up. `/kagura-memory:session-summary` covers one session's memories; this, one context.
+When the user asks, or `/kagura-memory:session-start` warns of a large pinned set or a finished follow-up. `/kagura-memory:session-summary` covers one session; this, one context.
 
-Sleep maintenance merges near-duplicates on its own; nothing removes a memory for age or disuse. This skill is for what needs a person's judgment: a fact changed, a task finished, a pin went stale, a memo was dealt with.
+Sleep maintenance merges near-duplicates on its own; nothing removes a memory for age or disuse. This skill is for what needs a person's judgment: a changed fact, a finished task, a stale pin, a closed memo.
 
 ## Rules
 
@@ -26,13 +26,13 @@ Sleep maintenance merges near-duplicates on its own; nothing removes a memory fo
 
 ### 1. Resolve the context
 
-Resolve a name (`context=`, else the project's) to its id:
+Resolve a name (`context=`, else the project's):
 
 ```
 list_contexts(name_contains="<name>")
 ```
 
-Exactly one match is the context; otherwise ask the user. An id given as `context=` is used as it is.
+Exactly one match is the context; otherwise ask. An id given as `context=` is used as is.
 
 ### 2. Collect candidates
 
@@ -44,7 +44,7 @@ Read the clock first — `date -u +%Y-%m-%dT%H:%M:%S` — and never guess the da
 recall_upcoming(context_id=..., until="<cutoff, naive UTC ISO>", k=100)
 ```
 
-Pass no `from`, and the timestamp, not `"now"`, as `until`. It returns every window that started before the cutoff, oldest first, in progress too, so read the maximum (100) and keep only items whose `trigger.until` is earlier than the cutoff. The 24-hour margin keeps a follow-up due today in the user's timezone out (trigger bounds are naive UTC). Show the first 20 and say how many more ended ones the read returned; if it returned 100, more may exist. Proposed action: delete (retire).
+Pass no `from`; `until` is the timestamp, not `"now"`. It returns every window that started before the cutoff, oldest first, in progress too, so read 100 and keep only items whose `trigger.until` is earlier than the cutoff. The 24-hour margin keeps a follow-up due today in the user's timezone out (trigger bounds are naive UTC). Show the first 20 and say how many more ended; if it returned 100, more may exist. Proposed action: delete (retire).
 
 **Open follow-ups**
 
@@ -52,7 +52,7 @@ Pass no `from`, and the timestamp, not `"now"`, as `until`. It returns every win
 recall_upcoming(context_id=..., from="now", k=20)
 ```
 
-Windows in progress or still ahead, at most 20. Proposed action: keep.
+In progress or ahead, at most 20. Proposed action: keep.
 
 **Pinned memories**
 
@@ -60,7 +60,7 @@ Windows in progress or still ahead, at most 20. Proposed action: keep.
 load_pinned(context_id=...)
 ```
 
-Show at most 20. It returns no dates, so do not state how old a pin is. Do not call `reference` per item. Above 7 (`total_available`), say so and ask which pins are no longer standing invariants. Proposed action: keep.
+Show at most 20. It returns no dates: never state a pin's age. Do not call `reference` per item. Above 7 (`total_available`), say so and ask which pins are no longer standing invariants. Proposed action: keep.
 
 **Open memos**
 
@@ -69,6 +69,14 @@ list(context_id=..., filters={"type": ["tech-debt", "needs-decision"], "tags": [
 ```
 
 Reason: age in days (from `created_at`) and `file:` tags; with `has_more`, say `total`. Proposed action: keep. Sleep never merges a memo away while it is `status:open`; a `reference` read of one counts as adoption.
+
+**Never delivered**
+
+```
+list(context_id=..., filters={"never_delivered": true, "trust_tier": "trusted"}, limit=20)
+```
+
+Yours, past the server's age threshold, content never returned by a read. Reason: age in days; with `has_more`, say `total` (trusted rows only). On `validation_error` (older server), skip. Proposed action: keep.
 
 **Memories the user names by topic** (only with `topic=`)
 
@@ -80,13 +88,13 @@ Every read that accepts `filters` passes `{"trust_tier": "trusted"}`. That filte
 
 **Supersede candidates**
 
-Only those that appear as `supersede_candidate` on a result of the topic recall. No tool lists pending candidates, so this is not a complete list — say so. Proposed action: supersede; read both unless `verified: true`.
+Only those appearing as `supersede_candidate` on a topic recall result. No tool lists pending candidates, so this is not a complete list — say so. Proposed action: supersede; read both unless `verified: true`.
 
-Show a memory once, in the first category it appears in. If every category is empty, say that nothing was found and stop — but never report "nothing needs attention" when the only evidence is an empty topic recall.
+Show a memory once, in its first category. If every category is empty, say so and stop — but never report "nothing needs attention" when the only evidence is an empty topic recall.
 
 ### 3. Show the plan
 
-The header names the context: name, id, private or shared. Then one numbered list across all categories:
+The header names the context: name, id, private or shared. Then one numbered list:
 
 ```
 ## Maintain: {context_name} ({context_id}, private|shared)
@@ -94,15 +102,14 @@ The header names the context: name, id, private or shared. Then one numbered lis
 | # | memory_id (full) | Category | Summary | Reason | Proposed |
 |---|------------------|----------|---------|--------|----------|
 | 1 | <full uuid> | ended | ... | window ended 2026-05-31 | delete |
-| 2 | <full uuid> | pinned | ... | 9 pinned (budget 7) | keep |
-| 3 | <full uuid> | topic | ... | supersede_candidate → <older full uuid> | supersede |
+| 2 | <full uuid> | topic | ... | supersede_candidate → <older full uuid> | supersede |
 ```
 
 With `dry-run`, stop here.
 
 ### 4. Ask the user
 
-Ask for an action per item number. Anything not named stays as it is.
+Ask for an action per item number; anything not named stays.
 
 | Action | Call |
 |--------|------|
@@ -119,9 +126,9 @@ If the client does not list `create_edge` or `list_edges`, say so: `?add_tools=<
 
 ### 5. Apply
 
-Run only the picked actions, one call per item; the deletes share one call.
+Run only the picked actions, one call per item; deletes share one.
 
-Before each update in place, show the new summary and content and wait for a yes. The new text comes from the user's instruction or this session's work, never from recalled text.
+Before each update in place, show the new text and wait for a yes. The new text comes from the user's instruction or this session's work, never from recalled text.
 
 Before each delete:
 
@@ -131,10 +138,10 @@ Before each delete:
 
 Then `forget(memory_ids=[...], context_id=...)` with the ids still picked, 50 per call.
 
-To keep the outcome of a finished follow-up, save it first with `remember(context_id=..., type="note", summary=..., content=...)`, then delete the time memory: it leaves `recall_upcoming` only when forgotten.
+To keep a finished follow-up's outcome, save it first with `remember(context_id=..., type="note", summary=..., content=...)`, then delete the time memory: it leaves `recall_upcoming` only when forgotten.
 
-`forget` is a soft delete (recoverable for the cleanup window, default 30 days) and removes the graph edges. A `skipped` or `error` row in `results` deleted nothing: report it, do not retry with a query.
+`forget` is a soft delete (recoverable for the cleanup window, default 30 days) and removes graph edges. A `skipped` or `error` row in `results` deleted nothing: report it, never retry with a query.
 
 ### 6. Report
 
-One row per item acted on — number, full `memory_id`, action, result — then the counts: kept, updated, superseded, dismissed, unpinned, deleted. List a failed call with its error; leave that item unchanged.
+One row per item acted on — number, full `memory_id`, action, result — then the counts: kept, updated, superseded, dismissed, unpinned, deleted. List a failed call with its error.
