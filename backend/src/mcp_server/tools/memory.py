@@ -2747,6 +2747,13 @@ async def handle_reference(
                 view = _ReferenceView(
                     view.fields - {"links"}, view.page_field, view.offset, view.max_chars
                 )
+            else:
+                # #3033: present only while the current version is not
+                # searchable yet (never on an earlier version's read). A light
+                # key, so field selection and paging keep it.
+                index_state = getattr(result, "index_state", None)
+                if isinstance(index_state, str):
+                    reference_data["search_index"] = {"searchable": False, "state": index_state}
 
             # #1685: only the selected / paged / bounded projection is
             # serialized, never the full one. A default call whose full

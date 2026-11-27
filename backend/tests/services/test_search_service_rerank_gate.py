@@ -110,7 +110,9 @@ _SEMANTIC = [
 ]
 
 
-async def _search(service, *, use_rerank, config, plan_allows=True, workspace_id=_WS):
+async def _search(
+    service, *, use_rerank, config, plan_allows=True, workspace_id=_WS, semantic=_SEMANTIC
+):
     service._get_search_config = AsyncMock(return_value=config)
     ctx_svc = MagicMock()
     ctx_svc.is_context_shared = AsyncMock(return_value=False)
@@ -120,7 +122,7 @@ async def _search(service, *, use_rerank, config, plan_allows=True, workspace_id
     )
     with (
         patch(
-            "services.search_service.search_memories_qdrant", new=AsyncMock(return_value=_SEMANTIC)
+            "services.search_service.search_memories_qdrant", new=AsyncMock(return_value=semantic)
         ),
         patch("services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])),
         patch("services.context_service.ContextService", return_value=ctx_svc),
@@ -275,6 +277,36 @@ class TestFailOpen:
         (event,) = [e for e in logs if e["event"] == "rerank_failed_open"]
         assert event["error_class"] == "RuntimeError"
         assert "error" not in event
+
+
+class TestResourceIndexedCandidates:
+    async def test_pool_with_a_resource_row_is_reranked_without_failing_open(
+        self, service, settings
+    ):
+        """#3031: a resource-indexed point (no ``summary`` in its payload) in
+        the pool reaches the provider instead of failing open for every row."""
+        provider = MagicMock()
+        provider.provider_name = "self_hosted"
+        provider.rerank = AsyncMock(
+            return_value=[
+                {"index": 1, "relevance_score": 0.9},
+                {"index": 0, "relevance_score": 0.1},
+            ]
+        )
+        service.reranker_service = RerankerService(MagicMock())
+        service.reranker_service.get_active_provider = AsyncMock(return_value=provider)
+        pool = [
+            {"id": "m1", "score": 0.9, "payload": {"summary": "a"}},
+            {"id": "r1", "score": 0.8, "payload": {"content": "title: Q3 plan"}},
+        ]
+        with structlog.testing.capture_logs() as logs:
+            results = await _search(service, use_rerank=None, config=_config(True), semantic=pool)
+
+        assert not [e for e in logs if e["event"] == "rerank_failed_open"]
+        provider.rerank.assert_awaited_once()
+        documents = provider.rerank.await_args.args[1]
+        assert len(documents) == 2 and all(d.strip() for d in documents)
+        assert [r["id"] for r in results] == ["r1", "m1"]
 
 
 class TestSelfHostedDefaultEndToEnd:

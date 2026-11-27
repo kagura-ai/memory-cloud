@@ -852,6 +852,30 @@ class TestRerankerServiceRerank:
         assert documents[0] == "first summary ctx-a"
         assert documents[1] == "second summary "  # missing context_summary -> ''
 
+    async def test_pool_with_a_resource_indexed_candidate_is_scored(self, service, monkeypatch):
+        """#3031: a resource-indexed point has no ``summary``; the pool is still
+        sent to the provider, one non-empty document per candidate."""
+        fake_provider = MagicMock()
+        fake_provider.provider_name = "voyage"
+        fake_provider.rerank = AsyncMock(
+            return_value=[
+                {"index": 1, "relevance_score": 0.9},
+                {"index": 0, "relevance_score": 0.2},
+            ]
+        )
+        monkeypatch.setattr(service, "get_active_provider", AsyncMock(return_value=fake_provider))
+        resource = {"payload": {"content": "title: Q3 plan\nowner: ops", "context_summary": "c"}}
+        candidates = [self._candidate("ordinary summary"), resource]
+        outcome: dict = {}
+
+        out = await service.rerank("query", candidates, "u", 2, outcome=outcome)
+
+        assert outcome["scored"] is True
+        documents = fake_provider.rerank.await_args.args[1]
+        assert documents == ["ordinary summary ", "title: Q3 plan\nowner: ops c"]
+        assert all(d.strip() for d in documents)
+        assert out[0] is resource
+
 
 # ---------------------------------------------------------------------------
 # Module constants

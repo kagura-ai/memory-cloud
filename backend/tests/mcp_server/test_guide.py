@@ -174,6 +174,16 @@ def test_update_memory_modes_carries_the_partial_edit_rules():
         assert phrase in text, phrase
 
 
+def test_persistence_and_reference_returns_name_the_search_index_key():
+    """#3033: the reply key that says a memory is not searchable yet."""
+    for topic in ("persistence", "reference.returns"):
+        text = GUIDE_TOPICS[topic]
+        assert "search_index" in text, topic
+    persistence = GUIDE_TOPICS["persistence"]
+    for state in ("'indexing'", "'retrying'", "'failed'"):
+        assert state in persistence, state
+
+
 def test_dedupe_off_permanence_comes_first():
     """#2024: the first sentence about 'off' says it is permanent for that
     memory, before the long paragraph about 'check'."""
