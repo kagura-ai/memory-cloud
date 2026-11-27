@@ -193,6 +193,27 @@ async def test_statements_get_a_naive_utc_bound_and_both_ids(serving) -> None:
     assert db.sql().count(str(stats._READ_ONLY)) == 2
 
 
+async def test_both_sections_take_search_from_one_definition(serving) -> None:
+    """The document scan and the day counts agree on which tool is a search.
+
+    The document statement binds the tool from ``_SEARCH_TOOL`` (no literal
+    tool name in its text), and the day counts classify searches with the
+    same constant.
+    """
+    assert "'recall'" not in str(stats.TOP_DOCUMENTS)
+    assert ":search_tool" in str(stats.TOP_DOCUMENTS)
+    clock = _Clock()
+    db = _Session(clock)
+    await _read(db, clock)
+    [params] = [p for s, p in db.executed if s is stats.TOP_DOCUMENTS]
+    assert params is not None
+    assert params["search_tool"] == stats._SEARCH_TOOL
+    _, totals = assemble_days(
+        [(date(2026, 11, 27), stats._SEARCH_TOOL, "success", 2)], date(2026, 11, 27), 1
+    )
+    assert totals.searches == 2
+
+
 async def test_no_document_statement_once_the_budget_is_spent(serving) -> None:
     clock = _Clock()
     db = _Session(clock)

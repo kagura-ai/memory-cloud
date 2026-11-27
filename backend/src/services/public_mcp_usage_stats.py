@@ -56,7 +56,8 @@ USAGE_STATS_STATEMENT_TIMEOUT_MS = 5_000
 USAGE_STATS_BUDGET_SECONDS = 6.0
 USAGE_STATS_RATE_LIMIT_PER_MINUTE = 30
 
-# The search tool: a call with this tool is a search.
+# The search tool: a call with this tool is a search. Both sections use it:
+# the day counts classify rows with it, the document scan binds it.
 _SEARCH_TOOL = "recall"
 
 _LIVE_ENDPOINT = text(
@@ -76,7 +77,7 @@ TOP_DOCUMENTS = text(
     "WITH recent AS ("
     " SELECT documents FROM public_mcp_usage_events"
     " WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id"
-    " AND kind = 'tool_call' AND tool = 'recall' AND outcome IN ('success', 'degraded')"
+    " AND kind = 'tool_call' AND tool = :search_tool AND outcome IN ('success', 'degraded')"
     " AND occurred_at >= :first_day_start"
     " AND documents IS NOT NULL AND jsonb_typeof(documents) = 'array'"
     " ORDER BY occurred_at DESC"
@@ -326,6 +327,7 @@ async def read_usage_stats(
                     TOP_DOCUMENTS,
                     {
                         **scope,
+                        "search_tool": _SEARCH_TOOL,
                         "scan_limit": USAGE_STATS_DOCUMENT_SCAN_LIMIT,
                         "top": USAGE_STATS_TOP_DOCUMENTS,
                     },
