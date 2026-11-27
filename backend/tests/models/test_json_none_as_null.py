@@ -85,6 +85,7 @@ def test_the_inventory_is_the_expected_one() -> None:
         "secret_access_log.req_meta",
         "sleep_actions.details",
         "sleep_reports.consolidation_result",
+        "sleep_reports.coverage_state",
         "sleep_reports.dedup_result",
         "sleep_reports.edge_discovery_result",
         "sleep_reports.importance_result",

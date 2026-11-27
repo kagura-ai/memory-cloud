@@ -354,6 +354,12 @@ class Memory(Base):
     # written before the column existed starts NULL). No index.
     first_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #3019: when Sleep's importance re-evaluation last judged this row (set
+    # for every row of a batch whose judge call answered, whether or not the
+    # importance changed). Re-evaluation does not write ``updated_at``; its
+    # seven-day cadence reads this column. NULL = never judged since the
+    # column exists. Not exported (``DERIVED_ONLY_FIELD_NAMES``). No index.
+    importance_reevaluated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     accessed_by_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     # ``access_count`` counts *surfacing*: every recall top-k return + explore
     # spreading-activation hit + reference(). It is the signal Sleep

@@ -178,6 +178,13 @@ class SleepReport(Base):
     importance_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
     consolidation_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
     reindex_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
+    # #3019: the positions of the phases that work through the partition in a
+    # stable order (dedup's two lanes, the consolidation judge), as this run
+    # left them (``services.sleep.coverage``). NULL when the run produced no
+    # outcome for either phase; the current state of a partition is that of
+    # its latest report (by ``started_at``) that has one. Memory ids and
+    # timestamps only, no text; not returned by any route or tool.
+    coverage_state: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     # Cost tracking — legacy roll-up totals (#101).
     # Issue #471 split per-(phase, provider, model) LLM usage into the
