@@ -536,15 +536,18 @@ def advance_dedup(
 
     No window (the phase was skipped, or raised before its fetch): the lanes
     are carried as they are. A phase that did not return moves no position:
-    every row of its window counts as a failure (the stall rule applies).
-    ``turn`` flips after every run in which the phase returned.
+    every row of its window counts as a failure (the stall rule applies), and
+    a changed-lane backlog is not handed to the sweep (the position does not
+    jump to its floor; the next run finds the same backlog). ``turn`` flips
+    after every run in which the phase returned.
     """
     if coverage is None:
         return lanes, None
+    floor = coverage.floor if returned else None
     changed = plan_changed(
         lanes.changed,
         coverage.lane_rows(LANE_CHANGED, returned=returned),
-        floor=coverage.floor,
+        floor=floor,
         now=now,
     )
     sweep = plan_sweep(
@@ -559,7 +562,7 @@ def advance_dedup(
         LANE_CHANGED: {
             "taken": changed.taken,
             "advanced": changed.advanced,
-            "backlog_left_to_sweep": coverage.floor is not None,
+            "backlog_left_to_sweep": floor is not None,
             "passed_with_failure": changed.passed_with_failure,
         },
         LANE_SWEEP: {

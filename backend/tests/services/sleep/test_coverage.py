@@ -305,6 +305,42 @@ class TestAdvanceDedup:
         assert lanes.sweep == LaneEntry(stalls=1)
         assert report["sweep"]["pass_completed"] is False
 
+    @pytest.mark.parametrize("old", [None, (T0 - timedelta(days=30), UUID(int=7))])
+    def test_a_phase_that_did_not_return_hands_no_backlog_to_the_sweep(self, old):
+        """The first run after the upgrade (or a bulk import) leaves a changed
+        lane backlog; when the phase raises after its read, the changed
+        position stays where it was instead of jumping to the backlog's floor.
+        The next run reads the same newest rows and finds the same backlog."""
+        changed = _keys(2, start=T0)
+        floor = (T0 - timedelta(days=1), uuid4())
+        coverage = DedupCoverage(
+            changed=changed,
+            sweep=[],
+            floor=floor,
+            exhausted=False,
+            outcomes=dict.fromkeys((key[1] for key in changed), SETTLED),
+        )
+        lanes, report = advance_dedup(
+            DedupLanes(changed=_entry(old)), coverage, returned=False, now=NOW
+        )
+        assert lanes.changed == _entry(old, stalls=1)
+        assert report["changed"]["advanced"] == 0
+        assert report["changed"]["backlog_left_to_sweep"] is False
+
+    def test_a_phase_that_returned_hands_its_backlog_to_the_sweep(self):
+        changed = _keys(2, start=T0)
+        floor = (T0 - timedelta(days=1), uuid4())
+        coverage = DedupCoverage(
+            changed=changed,
+            sweep=[],
+            floor=floor,
+            exhausted=False,
+            outcomes=dict.fromkeys((key[1] for key in changed), BUDGET),
+        )
+        lanes, report = advance_dedup(DedupLanes(), coverage, returned=True, now=NOW)
+        assert lanes.changed.position == floor
+        assert report["changed"]["backlog_left_to_sweep"] is True
+
     def test_report(self):
         changed = _keys(2)
         sweep = [(T0 - timedelta(days=10 - i), uuid4()) for i in range(2)][::-1]
