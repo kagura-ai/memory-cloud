@@ -588,3 +588,48 @@ class TestDedupOutcome:
         dedup_phase.llm_service.complete_json = AsyncMock(side_effect=respond)
         result = await dedup_phase.execute(_dedup_config(), "u", None, None, SleepBudget())
         assert _outcome(result.details) == phase_outcome(5, {"judge_failed": 1, "unverifiable": 1})
+
+
+# ---------------------------------------------------------------------------
+# reindex
+# ---------------------------------------------------------------------------
+
+
+class TestReindexOutcome:
+    @pytest.fixture
+    def reindex_phase(self):
+        from services.sleep.reindex import ReindexPhase
+
+        with patch("services.sleep.reindex.EmbeddingService"):
+            phase = ReindexPhase(AsyncMock())
+        phase.embedding_service = AsyncMock()
+        return phase
+
+    @pytest.mark.asyncio
+    async def test_nothing_changed(self, reindex_phase):
+        result = await reindex_phase.execute(changed_memory_ids=set(), user_id="u")
+        assert result.details == {"message": "no_memories_to_reindex", **phase_outcome(0)}
+
+    @pytest.mark.asyncio
+    async def test_gone_and_failed_ids_are_counted(self, reindex_phase):
+        kept, failing = _memory(), _memory()
+        gone = uuid4()
+        fetched = MagicMock()
+        fetched.scalars.return_value.all.return_value = [kept, failing]
+        reindex_phase.db.execute = AsyncMock(return_value=fetched)
+
+        async def write(db, memory, **kwargs):
+            if memory is failing:
+                raise RuntimeError("vector store down")
+            return None
+
+        reindex_phase._store_keyword_lengths = AsyncMock()
+        with patch("services.memory_service.write_memory_point", side_effect=write):
+            result = await reindex_phase.execute(
+                changed_memory_ids={kept.id, failing.id, gone}, user_id="u"
+            )
+
+        assert result.details["reindexed"] == 1
+        assert _outcome(result.details) == phase_outcome(
+            3, {"gone_since_change": 1, "write_failed": 1}
+        )
