@@ -268,7 +268,8 @@ holds its receipt lock so recovery cannot steal it. A lost wakeup after a prior
 batch commit is reasserted. The indexer refuses foreign/independently edited
 Memory rows before vector changes, and skips obsolete upserts superseded by a
 new canonical version/deletion. A guard lock held by another transaction (a
-status poll holds the target rows), or a held row of the version an upsert
+worker request, its run status poll included, holds the target's Resource and
+Context rows until it ends), or a held row of the version an upsert
 retires, ends the batch before that event instead of failing it: the event
 stays pending and the next scheduled run applies it. Deletions address only explicitly owned versions
 which can remain visible, so accumulated retired history does not make a valid
@@ -304,9 +305,25 @@ moves only the last-run time, so the 10-minute interval counts from the
 drain's end. The stored `applied_upserts`, `applied_deletes` and `errors` of
 `indexer-status` add up the batches of that tick. During a drain each batch holds the target's locks until its commit
 and releases them before the next one, with a one-second pause in between
-(`DRAIN_YIELD_SECONDS`), so a status poll or feed transition waiting on them
-gets its turn; a batch that meets a lock such a request holds stops there
+(`DRAIN_YIELD_SECONDS`), so a worker request or feed transition gets its
+turn between batches. Neither side waits on these rows: a worker request that meets the
+rows a batch holds is refused (503 `temporarily_unavailable`) and retried,
+and a batch that meets a lock such a request holds stops there
 (see below).
+
+Which requests take those locks: every worker request (`/schema`, run
+creation, chunk upload, prepare, commit, abort, resume candidates, the diff
+pages and the run status `GET .../runs/{run}`) holds the target's Resource and Context rows, taken
+without waiting, for the length of its transaction; so do the human
+`/records` and `/runs/{run}/diff` reads, the feed configuration writes and
+the diff approval.
+The member's feed configuration reads (`/activity/feeds`,
+`/activity/feeds/{feed}`) hold the Resource row, and the feed management
+transitions hold the Context row and the target's management lock. The
+member's other activity reads, the run read `GET .../activity/runs/{run}`
+included, take none of them: they lock the caller's user, membership and
+installation rows and share the workspace row, and they read the index state
+without a lock, so polling them never stops a batch.
 
 A process stop during a drain (a deploy, a restart) leaves the target
 `running`. Its last batch commit refreshed `last_run_at`, so once that is older
@@ -340,15 +357,20 @@ Each drain logs one `indexer_completed` line with `batches`, `events`,
 `duration_ms` and `stop` (`drained`, `held_back`, `lock_busy`,
 `event_failures`, `not_committed`, `target_budget`, `tick_budget`, ...).
 
-Progress is readable at two places. The worker's run status carries
-`index_progress`: `total` is the number of index events the run committed
+Progress is readable at three places. The worker's run status carries
+`index_progress`, and the member's run read
+(`GET /api/v1/workspaces/{wid}/sync-installations/{iid}/activity/runs/{run}`,
+see [activity](sync-activity.md)) carries the same object next to its
+`search.state` (the worker's `index_status`); the run list does not evaluate
+index state and has no `index_progress`. In both reads `total` is the number of index events the run committed
 (its outbox receipt) and `indexed` how many of them the indexer's cursor has
 passed. They are equal once the cursor passed the run, which `complete`
 requires; an event the indexer recorded as failed is passed too, so
 `index_status` stays the verdict. A run without index events (not committed,
 or a commit that changed nothing) reads `0` of `0`, and its `index_status` can
 still be `pending` while the feed's earlier events wait: `indexed == total` is
-not a completion signal, `index_status` is.
+not a completion signal, `index_status` (`search.state` in the member's
+read) is.
 The owner's `GET /api/v1/resources/{resource_id}/indexer-status` carries
 `pending_events`: the resource's events after the target's cursor (all of
 them before the first run), `0` once the indexer has caught up.

@@ -30,7 +30,7 @@ client bindings still prevent inspection. Every response/error is no-store.
 | `GET /feeds` | None | At most 20 opaque feed observations (ID, kind, config hash/version, canonical revision) with the current generation, schema hash/version and UTC `as_of`; see [conditional updates](staged-feed-sync.md#current-configuration-and-conditional-updates) |
 | `GET /feeds/{feed_id}` | None | The same snapshot for one feed of this installation |
 | `GET /runs` | `limit` 1–100 (default 50), optional UUID `cursor` | Receipt metadata, next cursor and UTC `as_of`; search state is explicitly `not_evaluated` on a list |
-| `GET /runs/{run_id}` | None | One run's admission/state/counts/times, received chunk/record counts and current search evidence |
+| `GET /runs/{run_id}` | None | One run's admission/state/counts/times, received chunk/record counts, current search evidence and `index_progress` (`{indexed, total}`, as in the worker's run status; see [search reflection pace](staged-feed-sync.md#search-reflection-pace)) |
 | `GET /events` | `limit` 1–100 (default 50), optional positive integer `before_id` | Protocol-v1 audit references, next marker, retention window and UTC `as_of` |
 | `POST /requests` | `{ "operation_id": "<UUID>" }` | HTTP 201; idempotent authenticated `request_id`, original deadline and installation generation |
 
