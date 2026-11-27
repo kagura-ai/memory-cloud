@@ -275,7 +275,43 @@ def _judge_picks(phase: DedupMergePhase, winner_label: str) -> None:
     _judge_answers(phase, [{"pair": ["A", "B"], "verdict": "merge", "winner": winner_label}])
 
 
+def _judge_merges(phase: DedupMergePhase, merges: list[tuple[MagicMock, MagicMock]]) -> None:
+    """A judge that answers ``merge`` for each (winner, loser), finding the
+    labels by summary: ``execute`` lists a cluster's members in set order."""
+
+    def label_of(prompt: str, memory: MagicMock) -> str:
+        heads = sorted(
+            (prompt.index(f"[{label}] type="), label)
+            for label in "ABCDE"
+            if f"[{label}] type=" in prompt
+        )
+        ends = [start for start, _ in heads[1:]] + [len(prompt)]
+        return next(
+            label
+            for (start, label), end in zip(heads, ends, strict=True)
+            if memory.summary in prompt[start:end]
+        )
+
+    async def answer(*, prompt: str, **_: Any) -> MagicMock:
+        return _judge_response(
+            [
+                {
+                    "pair": [label_of(prompt, w), label_of(prompt, lo)],
+                    "verdict": "merge",
+                    "winner": label_of(prompt, w),
+                }
+                for w, lo in merges
+            ]
+        )
+
+    phase.llm_service.complete_json = AsyncMock(side_effect=answer)
+
+
 def _judge_answers(phase: DedupMergePhase, judgments: list[dict[str, Any]]) -> None:
+    phase.llm_service.complete_json = AsyncMock(return_value=_judge_response(judgments))
+
+
+def _judge_response(judgments: list[dict[str, Any]]) -> MagicMock:
     response = MagicMock()
     response.parsed = {"judgments": judgments}
     response.total_tokens = 10
@@ -286,7 +322,7 @@ def _judge_answers(phase: DedupMergePhase, judgments: list[dict[str, Any]]) -> N
     response.provider = "openai"
     response.model = "m"
     response.tokenizer_version = "v1"
-    phase.llm_service.complete_json = AsyncMock(return_value=response)
+    return response
 
 
 def _key(a: MagicMock, b: MagicMock) -> tuple[UUID, UUID]:
@@ -922,21 +958,15 @@ class TestKeepBothInARun:
     async def test_a_cluster_with_a_pair_that_can_merge_is_judged(self) -> None:
         """The judge picks the kept row's pair and a mergeable one; only the
         mergeable one runs, and the cluster is not counted as kept-both."""
-        w = _mem(created=_days_ago(100))
-        loser = _mem(created=_days_ago(180), updated=_days_ago(7))
-        older = _mem(created=_days_ago(150))
+        w = _mem(created=_days_ago(100), summary=f"w {uuid4()}")
+        loser = _mem(created=_days_ago(180), updated=_days_ago(7), summary=f"l {uuid4()}")
+        older = _mem(created=_days_ago(150), summary=f"o {uuid4()}")
         phase = self._phase(
             [w, loser, older],
             [(w.id, loser.id, 0.96), (w.id, older.id, 0.96)],
             log_row=None,
         )
-        _judge_answers(
-            phase,
-            [
-                {"pair": ["A", "B"], "verdict": "merge", "winner": "A"},
-                {"pair": ["A", "C"], "verdict": "merge", "winner": "A"},
-            ],
-        )
+        _judge_merges(phase, [(w, loser), (w, older)])
 
         result = await phase.execute(_run_config(), "u", "ws", "ctx", SleepBudget())
 
