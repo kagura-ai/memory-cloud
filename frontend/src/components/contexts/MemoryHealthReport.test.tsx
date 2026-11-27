@@ -104,6 +104,28 @@ describe("MemoryHealthReport", () => {
     expect(document.body.textContent).not.toMatch(/#\d{3,}/);
   });
 
+  it("renders a flat map metric as one line per entry, not as JSON", async () => {
+    mockGet.mockResolvedValueOnce({
+      ...DETAIL,
+      sections: {
+        ...DETAIL.sections,
+        graph: {
+          status: "ok",
+          metrics: { edges_by_origin: { declared: 30, hebbian: 781 }, nested: { a: { b: 1 } } },
+          notes: [],
+        },
+      },
+    });
+    render(<MemoryHealthReport scope={CTX_ID} />);
+
+    const section = await screen.findByTestId("health-section-graph");
+    expect(section.textContent).toContain("declared: 30");
+    expect(section.textContent).toContain("hebbian: 781");
+    expect(section.textContent).not.toContain('{"declared"');
+    // A nested value still shows, as compact JSON.
+    expect(section.textContent).toContain('{"a":{"b":1}}');
+  });
+
   it("requests the unattributed sentinel as given", async () => {
     mockGet.mockResolvedValueOnce({ ...DETAIL, context_id: null, context_name: null });
     render(<MemoryHealthReport scope="unattributed" />);
