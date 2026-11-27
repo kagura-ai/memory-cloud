@@ -1,8 +1,8 @@
 # Public MCP usage events
 
-A resource published as an anonymous, read-only MCP endpoint (`/mcp/public/<public_id>`, see [Resource Tokens Guide › Publishing a resource as a public MCP endpoint](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint)) records one **usage event** per completed `tools/call` ([#2678](https://github.com/kagura-ai/memory-cloud/issues/2678)). The events tell the workspace owner — or a self-hosted dashboard reading the stream — which public tools were used, how they went, how long they took and which documents were returned, without storing anything a visitor typed or anything that identifies a visitor.
+A resource published as an anonymous, read-only MCP endpoint (`/mcp/public/<public_id>`, see [Resource Tokens Guide › Publishing a resource as a public MCP endpoint](resource-tokens-guide.md#publishing-a-resource-as-a-public-mcp-endpoint)) records one **usage event** per completed `tools/call` ([#2678](https://github.com/kagura-ai/memory-cloud/issues/2678)). The events tell the workspace owner — or a self-hosted dashboard reading the stream — which public tools were used, how they went, how long they took and which documents were returned. Usage events never carry anything a visitor typed or anything that identifies a visitor; everything else a public call leaves on the server is listed in [What a public call leaves on the server](#what-a-public-call-leaves-on-the-server).
 
-Operator settings: [Deployment › Public MCP usage events](deployment.md#public-mcp-usage-events--issue-2678). Owner health route: [API Reference › Public MCP endpoint publication](api-reference.md#public-mcp-endpoint-publication).
+Operator settings: [Deployment › Public MCP usage events](deployment.md#public-mcp-usage-events--issue-2678). Owner health and statistics routes: [API Reference › Public MCP endpoint publication](api-reference.md#public-mcp-endpoint-publication).
 
 ## What is recorded
 
@@ -83,3 +83,63 @@ A page envelope: `{schema_version, deployment_id, as_of, events, next_cursor, ha
 ## Health
 
 `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` (workspace owner) returns the live endpoint's events of the last 24 hours by outcome, the deployment's gap rows in that window, and the writer state of the API process that answered (`writer.process_local: true`: with several API processes, each has its own queue). The gap rows are the persistent view of loss; the writer numbers are a snapshot of one process.
+
+## Statistics for the owner
+
+`GET /api/v1/resources/{resource_id}/public-mcp/usage-stats?days=7` ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) gives the workspace owner the numbers of the resource's **live** public endpoint, read from these events. It accepts what the other publication routes accept: a web session, the owner's workspace API key, an agent-bound key of the owner (within its binding), an OAuth token with the read scope. Admins, members, viewers, connector keys and public-bound keys are refused (403). An unknown slug, a resource without a live endpoint, and a context the credential cannot read are all the same `404`.
+
+`days` is 1–90 (default 7, `422` otherwise); the window is at most the event retention (`window_days`), ends today and is counted in UTC calendar days.
+
+```json
+{
+  "resource_id": "catalog", "endpoint_id": "…", "window_days": 7,
+  "first_day": "2026-11-21", "last_day": "2026-11-27", "retention_days": 90, "recording_enabled": true,
+  "totals": {"calls": 42, "searches": 30, "search_outcomes": {"success": 25, "degraded": 3, "denied": 0, "rate_limited": 2, "invalid_request": 0, "error": 0, "cancelled": 0}},
+  "days": [{"date": "2026-11-21", "calls": 5, "searches": 4, "search_outcomes": {"success": 4, …}}, …],
+  "documents": {"status": "ok", "publication_serving": true, "searches_scanned": 28, "scan_limit": 20000,
+                "items": [{"doc_key": "…", "searches": 12, "best_rank": 1, "title": "Trail shoe", "source_url": "https://example.com/p/1"}]},
+  "generated_at": "2026-11-27T10:00:00Z"
+}
+```
+
+- The numbers are **calls to the resource's public MCP endpoint**. Searches through the REST public search (`/api/v1/public/{context_id}/search`) write no usage event and are not included; they are in the context's "Public API Usage" numbers.
+- A **call** is one `tool_call` event of the endpoint: any tool, any outcome, refusals included. A **search** is a call of `recall`; `search_outcomes` has every outcome as a key, per day and in `totals`.
+- `days` has exactly `window_days` entries, oldest first, zero-filled. A zero can also mean that recording was off (`recording_enabled` says whether it is on now) or that the events were already deleted under a shorter retention.
+- **Calls, not visitors.** One visitor can make many calls; the route does not report visitors.
+- **Cached answers are not counted.** A cache in front of the endpoint that answers a call itself leaves no event.
+- **Undercount.** Calls the server could not record are missing (see the gap rows above); the [health route](#health) shows them.
+- `documents.items`: at most 10 documents returned by `recall` calls that ended `success` or `degraded`; `searches` = how many of those calls returned the document, `best_rank` its best position; ordered by `searches`, then `best_rank`. They are computed from the newest `scan_limit` such calls of the window; `searches_scanned` equal to `scan_limit` means older searches were not read.
+- `title` and `source_url` are what the public endpoint itself shows for the document (for an unedited feed record its title or question and URL), and only **while the endpoint serves right now**; otherwise `publication_serving` is `false` and every title and URL is `null`. While serving, a document that was deleted or is no longer public has `title: null`. No document id or memory id is ever returned.
+- `documents.status` is `unavailable` (no items) when that part could not be read in time; the counts are still returned.
+- Bounds: one read has a time budget of about six seconds, each statement a timeout of at most five seconds; a workspace can read its statistics 30 times per minute (`429` `RATE-001` with `Retry-After: 60`). When the day counts cannot be read the answer is `503` `usage_stats_unavailable` with `Retry-After: 60`. The route writes nothing.
+
+Statistics exist for the live endpoint only: publishing again creates a new endpoint that starts at zero.
+
+## What a public call leaves on the server
+
+This is what the application keeps. A reverse proxy or load balancer in front of it keeps its own access log, whose retention is the operator's.
+
+For a call to the public MCP endpoint:
+
+1. **One usage event** per completed `tools/call`: tool (one of the five names or `other`), outcome, error code, protocol era and version, duration, result count, continuation flag and opaque document keys — never query text, arguments or result text. Kept `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` (default 90). For the owner's statistics and health, and the export stream.
+2. With `MCP_PUBLIC_TELEMETRY_SESSION_DETAILS_ENABLED` (off by default): a per-day session HMAC and the reduced declared client name on session-era events, kept as long as the events ([Session details](#session-details-off-by-default)). For counting sessions in the export.
+3. **The client's declared name** (`clientInfo.name`, cut to 200 characters): in the session's memory for the life of the session; stored only as in item 2.
+4. **The map from a document key to the resource's own document id**: kept while the resource exists and has, or recently had, a live public endpoint; deleted with the resource, and by the daily retention job once the resource has had no live endpoint since before the cutoff. For resolving a key to a title for the owner.
+5. **Application log lines**: one per call with the endpoint's identity, the requested tool name as sent (cut to 64 characters), the outcome and the timing — no query text, memory id, session id, document id or client address. A refusal logs the tool name; ignored URL parameters are logged by name. Kept as long as the operator keeps application logs. For operations.
+6. **For a search**: the query is sent to the embedding provider the workspace uses; its embedding vector is cached for 24 hours under a hash of the query text (no caller identity: the same text from anyone hits the same entry), for speed and cost. One cost row (model, tokens, cost; no text) is written for the owner's cost report; the application sets no time limit on these rows.
+7. With the log level at `debug` (not the default): the first 50 characters of a search query in the application log.
+8. **Per-minute counters** keyed by the endpoint and, in a session, by the server-minted session id (60 seconds); the session itself for its lifetime. No IP address. For the rate limits.
+9. With `MCP_PUBLIC_USAGE_BUDGET_ENABLED` on: the workspace's count of admitted calls for the current seven-day period; no caller data. For the [usage budget](public-usage-budget.md).
+
+For a request to the REST public search:
+
+10. **No usage event.** One `usage_stats` row per request: the path (it contains the context id), method, status, response time and, for a key bound to the context, the key's owner and key id; the application sets no time limit on these rows. For the "Public API Usage" numbers and per-key attribution.
+11. A log line with the query's length and a keyed hash of the query, not the text; the per-minute counters; the usage budget charge for an anonymous search of a published context; with a bound key that asks for reranking, the query and the candidate texts are sent to the reranking provider. Items 6 and 7 apply to its search as well.
+
+For either:
+
+12. A request that carries a valid web sign-in cookie of the same deployment is also recorded as that signed-in user's request (path, method, status, response time), like any request of a signed-in user; the public endpoint itself does not read the cookie.
+13. **The application server's access log** (uvicorn's, on by default): one line per HTTP request with a client address and the request line — method, path with the endpoint's address, and query string. Kept as long as the operator keeps application logs; uvicorn's `--no-access-log` turns it off. For operations. The address is the TCP peer's, unless that peer is a trusted proxy:
+    - with nothing in front of the server, the visitor's address;
+    - behind a reverse proxy that uvicorn does not trust, the proxy's address;
+    - behind a trusted proxy, the visitor's address as the proxy forwards it (`X-Forwarded-For`). uvicorn trusts the addresses in `FORWARDED_ALLOW_IPS` (or `--forwarded-allow-ips`), by default `127.0.0.1` and `::1`, so a proxy that forwards over the loopback interface is trusted without any setting.

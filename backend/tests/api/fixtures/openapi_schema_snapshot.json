@@ -6404,6 +6404,23 @@
         ],
         "type": "object"
       },
+      "IndexProgress": {
+        "properties": {
+          "indexed": {
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "indexed",
+          "total"
+        ],
+        "type": "object"
+      },
       "IndexerLastRunV1": {
         "additionalProperties": false,
         "properties": {
@@ -10638,6 +10655,94 @@
         ],
         "type": "object"
       },
+      "PublicMcpUsageStatsCounts": {
+        "properties": {
+          "calls": {},
+          "search_outcomes": {},
+          "searches": {}
+        },
+        "required": [
+          "calls",
+          "search_outcomes",
+          "searches"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageStatsDay": {
+        "properties": {
+          "calls": {},
+          "date": {},
+          "search_outcomes": {},
+          "searches": {}
+        },
+        "required": [
+          "calls",
+          "date",
+          "search_outcomes",
+          "searches"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageStatsDocument": {
+        "properties": {
+          "best_rank": {},
+          "doc_key": {},
+          "searches": {},
+          "source_url": {},
+          "title": {}
+        },
+        "required": [
+          "doc_key",
+          "searches"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageStatsDocuments": {
+        "properties": {
+          "items": {},
+          "publication_serving": {},
+          "scan_limit": {},
+          "searches_scanned": {},
+          "status": {}
+        },
+        "required": [
+          "items",
+          "publication_serving",
+          "scan_limit",
+          "searches_scanned",
+          "status"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageStatsResponse": {
+        "properties": {
+          "days": {},
+          "documents": {},
+          "endpoint_id": {},
+          "first_day": {},
+          "generated_at": {},
+          "last_day": {},
+          "recording_enabled": {},
+          "resource_id": {},
+          "retention_days": {},
+          "totals": {},
+          "window_days": {}
+        },
+        "required": [
+          "days",
+          "documents",
+          "endpoint_id",
+          "first_day",
+          "generated_at",
+          "last_day",
+          "recording_enabled",
+          "resource_id",
+          "retention_days",
+          "totals",
+          "window_days"
+        ],
+        "type": "object"
+      },
       "PublicMcpUsageWriterState": {
         "properties": {
           "dropped_since_start": {},
@@ -12601,6 +12706,7 @@
           "declared_records": {},
           "expires_at": {},
           "feed_id": {},
+          "index_progress": {},
           "manual_request_id": {},
           "operation_id": {},
           "origin": {},
@@ -35033,6 +35139,73 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PublicMcpUsageHealthResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "resources"
+        ]
+      }
+    },
+    "/api/v1/resources/{resource_id}/public-mcp/usage-stats": {
+      "get": {
+        "operationId": "get_public_mcp_usage_stats_api_v1_resources__resource_id__public_mcp_usage_stats_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "pattern": "^[a-z0-9_-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMcpUsageStatsResponse"
                 }
               }
             }

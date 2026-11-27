@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from dataclasses import fields
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
@@ -446,7 +447,9 @@ def _n(summary: str, edge_type: str = "co_activation") -> tools._Neighbour:
 
 async def test_explore_projection_and_hops(session, monkeypatch) -> None:
     seed_id = uuid4()
-    session.queue.append([SimpleNamespace(id=seed_id, resource_doc_id="doc-seed", summary="seed")])
+    session.queue.append(
+        [SimpleNamespace(id=seed_id, resource_doc_id="doc-seed", summary="seed", feed_content=None)]
+    )
     a, b, c = _n("a"), _n("b", "semantic_similarity"), _n("c")
     calls: list[tuple[list[UUID], list[UUID], int]] = []
 
@@ -478,7 +481,9 @@ async def test_explore_projection_and_hops(session, monkeypatch) -> None:
 
 async def test_explore_depth_one_does_not_walk_further(session, monkeypatch) -> None:
     seed_id = uuid4()
-    session.queue.append([SimpleNamespace(id=seed_id, resource_doc_id=None, summary="seed")])
+    session.queue.append(
+        [SimpleNamespace(id=seed_id, resource_doc_id=None, summary="seed", feed_content=None)]
+    )
     hop = AsyncMock(return_value=[_n(str(i)) for i in range(4)])
     monkeypatch.setattr(tools, "_neighbours", hop)
     body = _body(await tools.public_explore(ENDPOINT, {"memory_id": str(seed_id), "limit": 3}))
@@ -613,3 +618,208 @@ async def test_get_context_info_omits_empty_text() -> None:
     bare = replace(ENDPOINT, public_description=None, public_usage_guide=None)
     body = _body(await tools.public_get_context_info(bare, {}))
     assert set(body["endpoint"]) == {"public_id", "name"}
+
+
+# ----------------------------------------------------------------------------
+# Feed records (#3032): title or question, URL and kind of an unedited record
+# ----------------------------------------------------------------------------
+
+FEED_LABEL = "[catalog] sync:0f3a v1"
+PRODUCT_RECORD = {
+    "record_type": "product",
+    "external_id": "sku-9",
+    "title": "Trail\nshoe",
+    "url": "https://example.com/p/9",
+    "description": "A light shoe.",
+}
+FAQ_RECORD = {
+    "record_type": "faq",
+    "external_id": "faq-1",
+    "question": "How do I return a shoe?",
+    "answer": "Within 30 days.",
+    "url": "https://example.com/faq/returns",
+}
+
+
+def _feed_row(record: dict[str, Any], *, version: int = 1, source: str = "resource_ingest", **over):
+    m = _memory(
+        summary=over.pop("summary", FEED_LABEL),
+        content=json.dumps(record, ensure_ascii=False),
+        source_uri=over.pop("source_uri", None),
+        **over,
+    )
+    m.type = "resource_data"
+    m.source = source
+    m.version = version
+    return m
+
+
+async def test_recall_projects_feed_records_and_leaves_other_rows(session, search) -> None:
+    product = _feed_row(PRODUCT_RECORD, doc_id="sku-9")
+    faq = _feed_row(FAQ_RECORD, doc_id="faq-1", tags=[])
+    edited = _feed_row(PRODUCT_RECORD, version=2, doc_id="sku-9e")
+    hand = _feed_row(PRODUCT_RECORD, source="remember", doc_id="sku-9h")
+    plain = _memory(doc_id="doc-plain")
+    rows = [product, faq, edited, hand, plain]
+    search.return_value = [{"id": str(m.id), "score": 0.9 - i / 10} for i, m in enumerate(rows)]
+    session.queue.append(rows)
+    body = _body(await tools.public_recall(ENDPOINT, {"query": "shoe"}))
+    first, second, third, fourth, fifth = body["results"]
+    assert set(first) == RECALL_ITEM_KEYS
+    assert list(first) == list(tools._project(plain, 0.5))  # key order unchanged
+    assert (first["summary"], first["type"], first["source_url"]) == (
+        "Trail shoe",
+        "product",
+        "https://example.com/p/9",
+    )
+    assert (second["summary"], second["type"], second["source_url"]) == (
+        "How do I return a shoe?",
+        "faq",
+        "https://example.com/faq/returns",
+    )
+    # Edited and hand-written rows, and a plain row: exactly today's output.
+    for item, row in ((third, edited), (fourth, hand), (fifth, plain)):
+        assert item["summary"] == row.summary
+        assert item["type"] == row.type
+        assert item.get("source_url") == tools._source_url(row.source_uri)
+    assert (third["summary"], third["type"]) == (FEED_LABEL, "resource_data")
+    assert "source_url" not in third
+    assert fifth == {
+        "memory_id": str(plain.id),
+        "doc_id": "doc-plain",
+        "summary": "A product",
+        "score": 0.5,
+        "type": "fact",
+        "tags": ["shoes"],
+        "source_url": "https://example.test/p/1",
+        "created_at": "2026-11-01T12:00:00Z",
+        "updated_at": "2026-11-02T12:00:00Z",
+    }
+
+
+async def test_recall_feed_record_without_its_own_url_keeps_the_row_url(session, search) -> None:
+    record = {k: v for k, v in FAQ_RECORD.items() if k != "url"}
+    with_uri = _feed_row(record, source_uri="https://example.com/source")
+    without = _feed_row(record)
+    search.return_value = [
+        {"id": str(with_uri.id), "score": 0.9},
+        {"id": str(without.id), "score": 0.8},
+    ]
+    session.queue.append([with_uri, without])
+    first, second = _body(await tools.public_recall(ENDPOINT, {"query": "q"}))["results"]
+    assert first["source_url"] == "https://example.com/source"
+    assert "source_url" not in second
+    assert first["type"] == second["type"] == "faq"
+
+
+async def test_recall_feed_label_is_cut_and_fits_from_the_projection(session, search) -> None:
+    long_title = "word " * 300
+    rows = [
+        _feed_row({**PRODUCT_RECORD, "title": long_title}, summary="s" * 4_000, doc_id=f"sku-{i}")
+        for i in range(5)
+    ]
+    search.return_value = [{"id": str(m.id), "score": 0.9 - i / 10} for i, m in enumerate(rows)]
+    session.queue.append(rows)
+    body = _body(await tools.public_recall(ENDPOINT, {"query": "q", "max_chars": 10_000}))
+    # The stored summaries would not fit (see test_recall_cuts_at_max_chars); the
+    # projected, cut labels do.
+    assert body["count"] == 5
+    assert "truncated" not in body
+    summary = body["results"][0]["summary"]
+    assert len(summary) <= 500
+    assert summary.endswith("\u2026")
+    assert "\n" not in summary
+
+
+async def test_reference_head_carries_the_record_and_content_is_stored(session) -> None:
+    row = _feed_row(PRODUCT_RECORD)
+    session.queue.append([row])
+    memory = _body(await tools.public_reference(ENDPOINT, {"memory_id": str(row.id)}))["memory"]
+    assert (memory["summary"], memory["type"], memory["source_url"]) == (
+        "Trail shoe",
+        "product",
+        "https://example.com/p/9",
+    )
+    assert memory["content"] == row.content
+    assert json.loads(memory["content"]) == PRODUCT_RECORD
+    assert memory["content_truncated"] is False
+
+
+async def test_explore_seed_and_neighbours_carry_the_label(session, monkeypatch) -> None:
+    seed_id = uuid4()
+    session.queue.append(
+        [
+            SimpleNamespace(
+                id=seed_id,
+                resource_doc_id="faq-1",
+                summary=FEED_LABEL,
+                feed_content=json.dumps(FAQ_RECORD),
+            )
+        ]
+    )
+    rows = [
+        SimpleNamespace(
+            id=uuid4(),
+            resource_doc_id="sku-9",
+            summary=FEED_LABEL,
+            edge_type="co_activation",
+            feed_content=json.dumps(PRODUCT_RECORD),
+        ),
+        SimpleNamespace(
+            id=uuid4(),
+            resource_doc_id="doc-plain",
+            summary="plain summary",
+            edge_type="co_activation",
+            feed_content="not a record",
+        ),
+        SimpleNamespace(
+            id=uuid4(),
+            resource_doc_id="doc-null",
+            summary="edited summary",
+            edge_type="co_activation",
+            feed_content=None,
+        ),
+    ]
+    session.queue.append(rows)
+    body = _body(await tools.public_explore(ENDPOINT, {"memory_id": str(seed_id)}))
+    exploration = body["exploration"]
+    assert exploration["seed"] == {
+        "memory_id": str(seed_id),
+        "doc_id": "faq-1",
+        "summary": "How do I return a shoe?",
+    }
+    assert [r["summary"] for r in exploration["related"]] == [
+        "Trail shoe",
+        "plain summary",
+        "edited summary",
+    ]
+    assert [set(r) for r in exploration["related"]] == [
+        {"memory_id", "doc_id", "summary", "hop", "edge_type"}
+    ] * 3
+    seed_sql = _sql(session.statements[0])
+    assert "CASE WHEN" in seed_sql and "octet_length(memories.content)" in seed_sql
+    _assert_predicate(session.statements[0])
+
+
+async def test_neighbour_query_reads_the_gated_feed_content() -> None:
+    captured: list[Any] = []
+
+    class _Db:
+        async def execute(self, stmt):
+            captured.append(stmt)
+            return _Result([])
+
+    await tools._neighbours(_Db(), ENDPOINT, [UUID(int=1)], [UUID(int=1)], 5)
+    sql = _sql(captured[0])
+    _assert_predicate(captured[0])
+    assert "CASE WHEN (memories.source = " in sql
+    assert "memories.version = " in sql
+    assert "octet_length(memories.content) <= " in sql
+    assert "THEN memories.content END AS feed_content" in sql
+    # The neighbour keeps four fields; the summary is resolved where it is read.
+    assert [f.name for f in fields(tools._Neighbour)] == [
+        "memory_id",
+        "doc_id",
+        "summary",
+        "edge_type",
+    ]

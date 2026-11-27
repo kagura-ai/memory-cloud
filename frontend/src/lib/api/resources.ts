@@ -222,3 +222,68 @@ export async function listResourceEvents(
     }`,
   );
 }
+
+// ============================================================================
+// Issue #3035 — Owner statistics of the public MCP endpoint
+// ============================================================================
+//
+// Hand-mirrored against `PublicMcpUsageStatsResponse` in
+// `backend/src/api/routes/public_mcp_usage.py` (OpenAPI snapshot pinned).
+
+/** Calls, searches and searches by outcome (every outcome is a key). */
+export interface PublicMcpUsageCounts {
+  calls: number;
+  searches: number;
+  search_outcomes: Record<string, number>;
+}
+
+/** One UTC calendar day (`YYYY-MM-DD`). */
+export interface PublicMcpUsageDay extends PublicMcpUsageCounts {
+  date: string;
+}
+
+/** A document the endpoint's searches returned. */
+export interface PublicMcpUsageDocument {
+  doc_key: string;
+  searches: number;
+  best_rank: number | null;
+  /** Null when the endpoint does not serve it right now. */
+  title: string | null;
+  source_url: string | null;
+}
+
+export interface PublicMcpUsageDocuments {
+  status: "ok" | "unavailable";
+  publication_serving: boolean;
+  searches_scanned: number;
+  scan_limit: number;
+  items: PublicMcpUsageDocument[];
+}
+
+/** Response from `GET /api/v1/resources/{id}/public-mcp/usage-stats`. */
+export interface PublicMcpUsageStatsResponse {
+  resource_id: string;
+  endpoint_id: string;
+  window_days: number;
+  first_day: string;
+  last_day: string;
+  retention_days: number;
+  recording_enabled: boolean;
+  totals: PublicMcpUsageCounts;
+  days: PublicMcpUsageDay[];
+  documents: PublicMcpUsageDocuments;
+  generated_at: string;
+}
+
+/**
+ * Usage statistics of the resource's live public MCP endpoint (owner only).
+ * 404 when the resource has no live endpoint; 429 when read too often.
+ */
+export async function getPublicMcpUsageStats(
+  resourceId: string,
+  days: number,
+): Promise<PublicMcpUsageStatsResponse> {
+  return apiClient.get<PublicMcpUsageStatsResponse>(
+    `/api/v1/resources/${encodeURIComponent(resourceId)}/public-mcp/usage-stats?days=${days}`,
+  );
+}

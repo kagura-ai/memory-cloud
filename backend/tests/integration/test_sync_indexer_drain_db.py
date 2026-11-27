@@ -19,7 +19,8 @@ from services import resource_indexer
 from services.resource_indexer import get_indexer_status_for_context
 from tasks import resource_indexer_job as job
 from tests.integration import sync_feed_fixtures as fixtures
-from tests.integration.sync_feed_fixtures import committed, product, service
+from tests.integration.sync_feed_fixtures import committed, human, product, service
+from tests.integration.test_sync_activity_db import activity  # noqa: F401  (fixture)
 from tests.integration.test_sync_index_lock_busy_db import indexing  # noqa: F401  (fixture)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -72,6 +73,14 @@ async def _progress(feeds, run_id: str) -> tuple[str, dict]:
     assert result.status_code == 200, result.text
     body = result.json()
     return body["index_status"], body["index_progress"]
+
+
+async def _member_read(feeds, run_id: str) -> tuple[str, dict]:
+    """The signed-in member's run read: its search state and index progress."""
+    result = await human(feeds, "GET", f"activity/runs/{run_id}")
+    assert result.status_code == 200, result.text
+    body = result.json()
+    return body["search"]["state"], body["index_progress"]
 
 
 async def _owner(feeds) -> dict:
@@ -177,3 +186,54 @@ async def test_a_run_without_index_events_reports_zero_of_zero(feeds, ticks):
     await ticks()
 
     assert await _progress(feeds, resent["run_id"]) == ("unchanged", {"indexed": 0, "total": 0})
+
+
+async def test_the_members_run_read_reports_the_workers_progress_at_every_step(
+    activity,  # noqa: F811
+    ticks,
+    monkeypatch,
+):
+    """#3038: the owner's run read carries the same ``index_progress`` as the
+    worker's run status, next to its ``search.state`` (the worker's
+    ``index_status``), before, during and after a drain over several ticks."""
+    monkeypatch.setattr(job, "DRAIN_TARGET_BUDGET_SECONDS", 0)
+    run = await committed(activity, [product(f"sku-{n}") for n in range(5)])
+
+    steps = [await _member_read(activity, run["run_id"])]
+    assert steps[0] == await _progress(activity, run["run_id"])
+    for _tick in range(3):
+        await ticks()
+        member = await _member_read(activity, run["run_id"])
+        assert member == await _progress(activity, run["run_id"])
+        steps.append(member)
+
+    assert steps == [
+        ("pending", {"indexed": 0, "total": 5}),
+        ("pending", {"indexed": 2, "total": 5}),
+        ("pending", {"indexed": 4, "total": 5}),
+        ("complete", {"indexed": 5, "total": 5}),
+    ]
+
+
+async def test_the_members_read_of_a_run_without_index_events_reads_zero_of_zero(
+    activity,  # noqa: F811
+    ticks,
+):
+    await committed(activity, [product("sku-0")])
+    resent = await committed(activity, [product("sku-0")])
+
+    assert await _member_read(activity, resent["run_id"]) == (
+        "pending",
+        {"indexed": 0, "total": 0},
+    )
+
+    await ticks()
+
+    assert await _member_read(activity, resent["run_id"]) == (
+        "unchanged",
+        {"indexed": 0, "total": 0},
+    )
+    # The run list does not evaluate index evidence and carries no progress.
+    page = await human(activity, "GET", "activity/runs")
+    assert page.status_code == 200, page.text
+    assert all("index_progress" not in item for item in page.json()["items"])

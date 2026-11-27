@@ -1,19 +1,24 @@
-"""Owner health of a public MCP endpoint's usage events (#2678).
+"""Owner views of a public MCP endpoint's usage events (#2678, #3035).
 
 ``GET /api/v1/resources/{resource_id}/public-mcp/usage-health`` tells the
 workspace owner whether usage of the resource's public endpoint is being
 recorded: the last 24 hours of events by outcome, the deployment's gap rows
 (events the server could not record), and this process's writer queue. The
 writer numbers are process-local; the gap rows are the persistent view.
+
+``GET /api/v1/resources/{resource_id}/public-mcp/usage-stats`` gives the
+owner the live endpoint's calls, searches and search outcomes per UTC day and
+the documents its searches returned most often, with their public title and
+URL while the endpoint serves (``services.public_mcp_usage_stats``).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
 from pydantic import Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,8 +31,19 @@ from models.api_base import TZAwareBaseModel
 from models.public_mcp import PublicMcpEndpoint
 from services.permission_service import PermissionService
 from services.public_mcp_usage_events import usage_health_counts
+from services.public_mcp_usage_stats import (
+    USAGE_STATS_DEFAULT_DAYS,
+    USAGE_STATS_MAX_DAYS,
+    UsageStats,
+    check_usage_stats_rate_limit,
+    read_usage_stats,
+    resolve_stats_endpoint,
+)
 from services.public_mcp_usage_writer import get_usage_writer
 from utils.datetime import utcnow
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/resources", tags=["resources"])
 
@@ -138,3 +154,169 @@ async def get_public_mcp_usage_health(
         writer=writer_state,
         retention_days=settings.mcp_public_telemetry_retention_days,
     )
+
+
+class PublicMcpUsageStatsCounts(TZAwareBaseModel):
+    """Calls to the public MCP endpoint, searches and search outcomes."""
+
+    calls: int = Field(..., description="Tool calls of the endpoint, any tool and outcome")
+    searches: int = Field(..., description="Calls of the `recall` tool")
+    search_outcomes: dict[str, int] = Field(
+        ..., description="Searches by outcome; every outcome is a key (zero-filled)"
+    )
+
+
+class PublicMcpUsageStatsDay(TZAwareBaseModel):
+    """One UTC calendar day."""
+
+    date: date
+    calls: int
+    searches: int
+    search_outcomes: dict[str, int]
+
+
+class PublicMcpUsageStatsDocument(TZAwareBaseModel):
+    """A document the endpoint's searches returned."""
+
+    doc_key: str = Field(..., description="Opaque document key of the usage events")
+    searches: int = Field(..., description="Searches that returned the document")
+    best_rank: int | None = Field(None, description="Its best (lowest) rank in those searches")
+    title: str | None = Field(
+        None, description="What the public endpoint shows as its title; null when not shown now"
+    )
+    source_url: str | None = None
+
+
+class PublicMcpUsageStatsDocuments(TZAwareBaseModel):
+    """The documents searches returned most often."""
+
+    status: Literal["ok", "unavailable"] = Field(
+        ..., description="`unavailable`: this section could not be read; the counts still are"
+    )
+    publication_serving: bool = Field(
+        ..., description="Titles and URLs are given only while the endpoint serves right now"
+    )
+    searches_scanned: int = Field(..., description="Searches read for this list (newest first)")
+    scan_limit: int = Field(..., description="At most this many searches are read")
+    items: list[PublicMcpUsageStatsDocument]
+
+
+class PublicMcpUsageStatsResponse(TZAwareBaseModel):
+    """Usage statistics of the resource's live public MCP endpoint.
+
+    Calls to the public MCP endpoint only: searches through the REST public
+    search are not included. Answers a cache in front of the endpoint served
+    are not counted. These are calls, not visitors.
+    """
+
+    resource_id: str
+    endpoint_id: UUID = Field(..., description="The live public endpoint's id")
+    window_days: int = Field(..., description="Days covered: the requested days, at most retention")
+    first_day: date = Field(..., description="First UTC day of the window")
+    last_day: date = Field(..., description="Last UTC day of the window (today, partial)")
+    retention_days: int = Field(..., description="How long usage events are kept")
+    recording_enabled: bool = Field(..., description="Usage events are being recorded")
+    totals: PublicMcpUsageStatsCounts
+    days: list[PublicMcpUsageStatsDay] = Field(
+        ..., description="Every day of the window, oldest first"
+    )
+    documents: PublicMcpUsageStatsDocuments
+    generated_at: datetime
+
+
+def _stats_response(
+    resource_id: str, endpoint_id: UUID, stats: UsageStats
+) -> PublicMcpUsageStatsResponse:
+    return PublicMcpUsageStatsResponse(
+        resource_id=resource_id,
+        endpoint_id=endpoint_id,
+        window_days=stats.window_days,
+        first_day=stats.first_day,
+        last_day=stats.last_day,
+        retention_days=stats.retention_days,
+        recording_enabled=stats.recording_enabled,
+        totals=PublicMcpUsageStatsCounts(
+            calls=stats.totals.calls,
+            searches=stats.totals.searches,
+            search_outcomes=stats.totals.search_outcomes,
+        ),
+        days=[
+            PublicMcpUsageStatsDay(
+                date=day,
+                calls=counts.calls,
+                searches=counts.searches,
+                search_outcomes=counts.search_outcomes,
+            )
+            for day, counts in stats.days
+        ],
+        documents=PublicMcpUsageStatsDocuments(
+            status=stats.documents.status,
+            publication_serving=stats.documents.publication_serving,
+            searches_scanned=stats.documents.searches_scanned,
+            scan_limit=stats.documents.scan_limit,
+            items=[
+                PublicMcpUsageStatsDocument(
+                    doc_key=item.doc_key,
+                    searches=item.searches,
+                    best_rank=item.best_rank,
+                    title=item.title,
+                    source_url=item.source_url,
+                )
+                for item in stats.documents.items
+            ],
+        ),
+        generated_at=utcnow(),
+    )
+
+
+@router.get(
+    "/{resource_id}/public-mcp/usage-stats",
+    response_model=PublicMcpUsageStatsResponse,
+)
+async def get_public_mcp_usage_stats(
+    owner: WorkspaceOwner,
+    resource_id: str = Path(
+        ...,
+        min_length=1,
+        max_length=RESOURCE_ID_MAX_LENGTH,
+        pattern=RESOURCE_ID_PATTERN,
+        description="Resource slug (`setup_resource`'s resource_id).",
+    ),
+    days: int = Query(
+        USAGE_STATS_DEFAULT_DAYS,
+        ge=1,
+        le=USAGE_STATS_MAX_DAYS,
+        description="UTC days to cover, ending today (at most the event retention)",
+    ),
+    db: AsyncSession = Depends(get_db),
+) -> PublicMcpUsageStatsResponse:
+    """Calls, searches and the most returned documents of the live public endpoint.
+
+    Workspace owner only. An unknown slug, a resource without a live
+    endpoint, or a context the credential cannot read are one 404. 429 when
+    the workspace read its statistics too often this minute; 503 when the day
+    counts could not be read (``Retry-After``).
+    """
+    user_id, workspace_id = owner
+    endpoint = await resolve_stats_endpoint(
+        db, user_id=user_id, workspace_id=workspace_id, resource_id=resource_id
+    )
+    await check_usage_stats_rate_limit(workspace_id)
+    settings = get_settings()
+    stats = await read_usage_stats(
+        db,
+        endpoint=endpoint,
+        workspace_id=workspace_id,
+        days=days,
+        retention_days=settings.mcp_public_telemetry_retention_days,
+        recording_enabled=bool(settings.mcp_public_telemetry_enabled),
+    )
+    logger.info(
+        "public_mcp_usage_stats_read",
+        endpoint_id=str(endpoint.id),
+        window_days=stats.window_days,
+        calls=stats.totals.calls,
+        documents=len(stats.documents.items),
+        documents_status=stats.documents.status,
+    )
+    return _stats_response(resource_id, endpoint.id, stats)

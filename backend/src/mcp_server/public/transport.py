@@ -90,12 +90,14 @@ logger = get_logger(__name__)
 PUBLIC_SERVER_INFO = {"name": "kagura-memory-cloud-public", "version": APP_VERSION}
 
 PUBLIC_INSTRUCTIONS_NAME_CAP = 40
-# The whole text, name and counts included (worst case 323, #2995).
-PUBLIC_INSTRUCTIONS_MAX = 330
+# The whole text, name and counts included (worst case 378, #2995, #3035).
+PUBLIC_INSTRUCTIONS_MAX = 380
+# The last sentence says what a call leaves on the server; "24 hours" is
+# ``embedding_service.EMBEDDING_CACHE_TTL_SECONDS`` (a test pins the two).
 _PUBLIC_INSTRUCTIONS = (
     "Read-only public data of {name}{facts}. Call get_context_info first for the owner's "
     "description and usage guide. recall searches it{by}; list_tags lists categories. "
-    "Nothing you send is stored."
+    "Calls are counted without query text; a search's embedding is cached for 24 hours."
 )
 
 NOT_PUBLISHED_BODY = {

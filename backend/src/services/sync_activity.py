@@ -28,7 +28,7 @@ from services.sync_feed_authority import (
     lock_membership,
     locked,
 )
-from services.sync_feed_index import index_status
+from services.sync_feed_index import index_progress, index_status
 from services.workspace_locks import lock_workspace_nowait, retry_nowait
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException
@@ -310,6 +310,7 @@ async def run_detail(
             "state": state,
             "reason": {"failed": "index_not_current", "pending": "index_pending"}.get(state),
         }
+        result["index_progress"] = await index_progress(db, row)
         counts = (
             await db.execute(
                 select(func.count(), func.coalesce(func.sum(SyncChunk.record_count), 0)).where(

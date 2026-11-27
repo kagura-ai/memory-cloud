@@ -2098,6 +2098,30 @@ class ObservabilityRateLimitError(RateLimitError):
         self.response_headers = {"Retry-After": "60"}
 
 
+class PublicMcpUsageStatsRateLimitError(RateLimitError):
+    """A workspace read its public endpoint statistics too often (429, ``Retry-After: 60``)."""
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__("Usage statistics rate limit exceeded", retry_after=60)
+        self.response_headers = {"Retry-After": "60"}
+
+
+class PublicMcpUsageStatsUnavailableError(MemoryCloudException):
+    """The day counts of the public endpoint statistics could not be read (503)."""
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Usage statistics are briefly unavailable. Try again shortly.",
+            status_code=503,
+            error_code="usage_stats_unavailable",
+        )
+        self.response_headers = {"Retry-After": "60"}
+
+
 class UnsupportedSchemaVersionError(BadRequestError):
     """The requested ``schema_version`` is not served (400); ``supported`` lists those that are."""
 
