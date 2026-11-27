@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
+import services.memory_service as memory_service_module
 from models.auth import Context, IdentityLink, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import Memory
 from models.schemas import RememberRequest
@@ -774,6 +775,8 @@ async def test_a_cancellation_in_a_post_commit_step_reports_the_committed_batch(
         )
     responses = info.value.responses
     assert len(responses) == 3 and len({r.memory_id for r in responses}) == 3
+    # The pipeline starts inside each background task once it has a slot (#3034).
+    await asyncio.gather(*list(memory_service_module._embedding_tasks))
     assert embed.call_count == 3  # every committed row becomes searchable
     assert links.await_count == 2  # nothing more is awaited once the cancellation arrived
     quiet_write.release_memories_per_day.assert_not_awaited()  # the rows exist: still charged
