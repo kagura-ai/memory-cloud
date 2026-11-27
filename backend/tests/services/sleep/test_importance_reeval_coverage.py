@@ -32,7 +32,7 @@ from services.sleep.importance_reeval import (
     STALENESS_DAYS,
     ImportanceReevalPhase,
 )
-from services.sleep.reporter import SleepBudget
+from services.sleep.reporter import SleepBudget, phase_outcome
 from utils.datetime import utcnow
 
 # ---------------------------------------------------------------------------
@@ -398,7 +398,7 @@ class TestExecuteIntegration:
         """No stale memories → details.message == no_stale_memories."""
         phase = ImportanceReevalPhase(db_session, AsyncMock())
         result = await phase.execute(_make_config(), f"u-{uuid4()}", None, None, SleepBudget())
-        assert result.details == {"message": "no_stale_memories"}
+        assert result.details == {"message": "no_stale_memories", **phase_outcome(0)}
         assert result.memories_processed == 0
 
     async def test_happy_path_updates_importance_and_qdrant(self, db_session):

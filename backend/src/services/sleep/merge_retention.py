@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 from models.auth import Context
 from models.memory import SLEEP_TOMBSTONE_DELETED_BY, Memory
-from services.sleep.reporter import PhaseResult
+from services.sleep.reporter import PhaseResult, phase_outcome
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -197,6 +197,7 @@ async def purge_tombstones(
             "purged": 0,
             "retention_days": retention_days,
             "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+            **phase_outcome(0),  # #3019
         }
         return result
 
@@ -226,6 +227,8 @@ async def purge_tombstones(
         "purged": len(ids),
         "retention_days": retention_days,
         "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+        # #3019: the tombstones past the cutoff.
+        **phase_outcome(len(ids)),
     }
 
     # Batch-summary audit action (deliberately NOT per-row): the purge is

@@ -18,7 +18,7 @@ from sqlalchemy.orm import aliased
 
 from models.memory import Memory, NeuralMemoryEdge
 from models.sleep import SleepRelatedIndex
-from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter
+from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter, phase_outcome
 from utils.datetime import utcnow
 
 MAX_SEEDS = 2
@@ -187,7 +187,12 @@ class RelatedIndexPhase:
             indexed_ids.update((source.id, target.id))
         # Charged to this phase's budget: only the memories this run indexed.
         result.memories_processed = len(indexed_ids)
-        result.details = {"candidates": len(edges), "indexed": written}
+        result.details = {
+            "candidates": len(edges),
+            "indexed": written,
+            # #3019: an edge whose endpoint is gone, moved or a self-loop.
+            **phase_outcome(len(edges), {"endpoint_unavailable": len(edges) - written}),
+        }
         return result
 
 

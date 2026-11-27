@@ -56,6 +56,7 @@ from services.sleep.reporter import (
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
+    phase_outcome,
 )
 from utils.logger import get_logger
 
@@ -202,6 +203,9 @@ class BatchStats:
     accepted: int = 0
     rejected: int = 0
     failures: int = 0
+    # #3019: pairs of the batch the call left out because one side is not a
+    # sampled row (the judge prompt shows sampled rows only).
+    pairs_outside_sample: int = 0
     confidence_imputed: int = 0
     confidence_imputed_rejected: int = 0
     edge_type_counts: dict[str, int] = field(default_factory=dict)
@@ -382,6 +386,18 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
         # a call, tokens=0 — see ``embed_with_usage`` docstring).
         self._embedding_calls_used: int = 0
         self._embedding_tokens_used: int = 0
+        # #3019: the counters behind ``details.no_action_reasons`` that the
+        # helpers set (init here so they can be called in isolation).
+        self._rows_without_neighbour: int = 0
+        self._rows_search_failed: int = 0
+        self._edge_write_failures: int = 0
+
+    def _search_reasons(self) -> dict[str, int]:
+        """The per-memory reasons ``_find_candidates`` recorded (#3019)."""
+        return {
+            "no_neighbour_in_range": self._rows_without_neighbour,
+            "search_failed": self._rows_search_failed,
+        }
 
     async def execute(
         self,
@@ -404,6 +420,9 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
         self._llm_breakdown = None
         self._embedding_calls_used = 0
         self._embedding_tokens_used = 0
+        self._rows_without_neighbour = 0
+        self._rows_search_failed = 0
+        self._edge_write_failures = 0
 
         if not config.sleep_edge_discovery_enabled:
             result.skipped = True
@@ -433,6 +452,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                 "filtered": 0,
                 "edges_created": 0,
                 **_empty_metrics(config),
+                **phase_outcome(0),
             }
             return result
 
@@ -446,6 +466,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                 "filtered": 0,
                 "edges_created": 0,
                 **_empty_metrics(config),
+                **phase_outcome(len(sampled), self._search_reasons()),
             }
             # #2060: the candidate search above already billed its embeddings.
             self.record_spend(result)
@@ -461,6 +482,10 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                 "filtered": 0,
                 "edges_created": 0,
                 **_empty_metrics(config),
+                **phase_outcome(
+                    len(sampled),
+                    {**self._search_reasons(), "already_connected": len(candidates)},
+                ),
             }
             self.record_spend(result)  # #2060: embeddings already billed
             return result
@@ -470,10 +495,14 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
         memory_map = {m.id: m for m in sampled}
         agg = BatchStats()
         auto_accepted = 0
+        # #3019: pairs of failed judge calls, and pairs left when the calls ran out.
+        failed_pairs = 0
+        unjudged_pairs = 0
 
         # Process in batches
         for batch_start in range(0, len(filtered), BATCH_SIZE):
             if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
+                unjudged_pairs = len(filtered) - batch_start
                 break
 
             batch = filtered[batch_start : batch_start + BATCH_SIZE]
@@ -491,6 +520,9 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                 agg.accepted += batch_stats.accepted
                 agg.rejected += batch_stats.rejected
                 agg.failures += batch_stats.failures
+                agg.pairs_outside_sample += batch_stats.pairs_outside_sample
+                if batch_stats.failures:
+                    failed_pairs += len(batch) - batch_stats.pairs_outside_sample
                 agg.confidence_imputed += batch_stats.confidence_imputed
                 agg.confidence_imputed_rejected += batch_stats.confidence_imputed_rejected
                 for k, v in batch_stats.edge_type_counts.items():
@@ -538,6 +570,19 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                 rejected_confidence_summary,
                 rejected_confidence_histogram,
                 config,
+            ),
+            **phase_outcome(
+                len(sampled),
+                {
+                    **self._search_reasons(),
+                    "already_connected": len(candidates) - len(filtered),
+                    "other_side_outside_sample": agg.pairs_outside_sample,
+                    "judge_rejected": agg.rejected,
+                    "judge_failed": failed_pairs,
+                    "not_judged_budget": unjudged_pairs,
+                    "write_failed": self._edge_write_failures,
+                },
+                budget_cut=unjudged_pairs > 0,
             ),
         }
 
@@ -650,6 +695,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                         },
                     )
             except Exception as e:
+                self._edge_write_failures += 1  # #3019
                 logger.warning(
                     "edge_creation_failed",
                     src=str(edge.src_id),
@@ -700,6 +746,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
         seen: set[tuple[UUID, UUID]] = set()
 
         for memory in memories:
+            in_range = False
             try:
                 vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
@@ -727,6 +774,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                     hit_id = UUID(str(hit["id"]))
                     if hit_id == memory.id:
                         continue
+                    in_range = True
 
                     a, b = sorted([memory.id, hit_id], key=str)
                     pair_key = (a, b)
@@ -736,11 +784,15 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                     candidates.append((memory.id, hit_id, score))
 
             except Exception as e:
+                self._rows_search_failed += 1  # #3019
                 logger.warning(
                     "edge_discovery_search_failed",
                     memory_id=str(memory.id),
                     error=str(e),
                 )
+                continue
+            if not in_range:
+                self._rows_without_neighbour += 1  # #3019
 
         return candidates
 
@@ -807,6 +859,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
                 all_ids.add(dst)
 
         if not all_ids:
+            stats.pairs_outside_sample = len(batch)  # #3019
             return [], stats
 
         # Assign short labels deterministically. `all_ids` is a set, so
@@ -865,6 +918,7 @@ class EdgeDiscoveryPhase(EmbeddingSpendTracker):
         requested_ordered_pairs: set[tuple[str, str]] = set()
         for src, dst, score in batch:
             if src not in id_to_label or dst not in id_to_label:
+                stats.pairs_outside_sample += 1  # #3019
                 continue
             src_label, dst_label = id_to_label[src], id_to_label[dst]
             pair_lines.append(f"  ({src_label}, {dst_label}): similarity={score:.3f}")

@@ -69,6 +69,7 @@ from services.sleep.reporter import (
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
+    phase_outcome,
 )
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -265,6 +266,13 @@ class _MergeTally:
 class DedupMergePhase(EmbeddingSpendTracker):
     """Detect and merge duplicate memories."""
 
+    # #3019: what ``_find_similar_pairs`` saw per window row, read by
+    # ``execute`` for ``details.no_action_reasons``. Class defaults so a
+    # stubbed search (many tests) reads zeros.
+    _rows_without_neighbour: int = 0
+    _rows_search_failed: int = 0
+    _hits_outside_window: int = 0
+
     def __init__(
         self,
         db: AsyncSession,
@@ -311,6 +319,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #2565: the merge losers' points, queued in the phase's savepoint;
         # the orchestrator deletes them after its caller commits.
         self.pending_point_deletes: list[PointDelete] = []
+
+    def _search_reasons(self) -> dict[str, int]:
+        """The per-row reasons the candidate search recorded (#3019)."""
+        return {
+            "no_similar_neighbour": self._rows_without_neighbour,
+            "search_failed": self._rows_search_failed,
+            "neighbour_outside_window": self._hits_outside_window,
+        }
 
     def _backfill_cluster_scores(
         self,
@@ -592,6 +608,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
         self._embedding_tokens_used = 0
         # #1232: reset the settled-pair record between sleep cycles.
         self._settled_pair_keys = set()
+        # #3019: reset the search's per-row counters (a stubbed search leaves them).
+        self._rows_without_neighbour = 0
+        self._rows_search_failed = 0
+        self._hits_outside_window = 0
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -608,7 +628,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
             user_id, workspace_id, context_id, config.sleep_max_memories_per_run
         )
         if len(memories) < 2:
-            result.details = {"message": "not_enough_memories", "count": len(memories)}
+            result.details = {
+                "message": "not_enough_memories",
+                "count": len(memories),
+                **phase_outcome(len(memories)),
+            }
             return result
 
         # Step 2: Find similar pairs via Qdrant. #1523: pinned rows are not
@@ -624,7 +648,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
             extra_neighbors=pinned_in_scope,
         )
         if not pairs:
-            result.details = {"message": "no_duplicate_candidates"}
+            result.details = {
+                "message": "no_duplicate_candidates",
+                **phase_outcome(len(memories), self._search_reasons()),
+            }
             # #2060: the candidate search above already billed its embeddings.
             self.record_spend(result)
             return result
@@ -642,6 +669,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 result.details = {
                     "message": "all_candidates_already_superseded",
                     "settled_pairs_skipped": settled_pairs_skipped,
+                    **phase_outcome(
+                        len(memories),
+                        {**self._search_reasons(), "already_superseded": settled_pairs_skipped},
+                    ),
                 }
                 self.record_spend(result)  # #2060: embeddings already billed
                 return result
@@ -689,9 +720,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # rather than candidate discovery — merges on these are "rescues"
         # the top-10 candidate cap would previously have vetoed.
         backfilled_keys: set[tuple[UUID, UUID]] = set()
+        # #3019: clusters judged with no merge, whose judge call failed, and
+        # left unjudged when the calls ran out.
+        kept_both = 0
+        failed_clusters = 0
+        unjudged_clusters = 0
 
-        for cluster in processable:
+        for index, cluster in enumerate(processable):
             if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
+                unjudged_clusters = len(processable) - index
                 break
 
             cluster_memories = [memory_map[mid] for mid in cluster if mid in memory_map]
@@ -700,6 +737,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
             self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
 
+            failures_before = self._llm_failures
             merge_decisions = await self._judge_cluster(
                 cluster_memories,
                 pair_scores,
@@ -710,6 +748,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 budget,
                 config,
             )
+            if self._llm_failures > failures_before:
+                failed_clusters += 1
+            elif not merge_decisions:
+                kept_both += 1
 
             shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
 
@@ -790,6 +832,24 @@ class DedupMergePhase(EmbeddingSpendTracker):
             "winner_overrides": self._winner_overrides,
             # #1209: per-rule breakdown ("recency" | "source") of the above.
             "winner_override_reasons": dict(self._override_reasons),
+            **phase_outcome(
+                len(memories),
+                {
+                    **self._search_reasons(),
+                    "already_superseded": settled_pairs_skipped,
+                    "deferred_oversize": deferred_pairs,
+                    "judge_kept_both": kept_both,
+                    "judge_failed": failed_clusters,
+                    "not_judged_budget": unjudged_clusters,
+                    "below_threshold": tally.guarded,
+                    "unverifiable": tally.unverifiable,
+                    "already_settled": tally.settled_skipped,
+                    "exempt_tag": tally.skipped_exempt,
+                    "changed_since_fetch": tally.skipped_pinned,
+                    "resource_owned": tally.skipped_resource_owned,
+                },
+                budget_cut=unjudged_clusters > 0,
+            ),
         }
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -927,8 +987,13 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # on-demand direct check. Reset here (not in execute()) so the
         # cache's lifecycle matches the candidate search that fills it.
         self._summary_vectors = {}
+        # #3019: per-row reasons for ``details.no_action_reasons``.
+        self._rows_without_neighbour = 0
+        self._rows_search_failed = 0
+        self._hits_outside_window = 0
 
         for memory in memories:
+            has_neighbour = False
             try:
                 vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
@@ -953,7 +1018,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     hit_id = UUID(str(hit["id"]))
                     if hit_id == memory.id:
                         continue
+                    has_neighbour = True
                     if hit_id not in memory_ids:
+                        self._hits_outside_window += 1
                         continue
                     # Canonical pair key (order-independent)
                     a, b = sorted([memory.id, hit_id], key=str)
@@ -963,11 +1030,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     seen.add(pair_key)
                     pairs.append((memory.id, hit_id, hit["score"]))
             except Exception as e:
+                self._rows_search_failed += 1
                 logger.warning(
                     "dedup_search_failed",
                     memory_id=str(memory.id),
                     error=str(e),
                 )
+                continue
+            if not has_neighbour:
+                self._rows_without_neighbour += 1
 
         return pairs
 

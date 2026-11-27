@@ -26,7 +26,7 @@ from services.sleep.dedup_merge import (
     DedupMergePhase,
     UnionFind,
 )
-from services.sleep.reporter import SleepBudget
+from services.sleep.reporter import SleepBudget, phase_outcome
 from utils.datetime import utcnow
 
 # ---------------------------------------------------------------------------
@@ -1207,7 +1207,11 @@ class TestExecuteEarlyReturns:
         config = _make_config()
         dedup_phase._fetch_active_memories = AsyncMock(return_value=[_make_memory()])
         result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
-        assert result.details == {"message": "not_enough_memories", "count": 1}
+        assert result.details == {
+            "message": "not_enough_memories",
+            "count": 1,
+            **phase_outcome(1),
+        }
 
     async def test_no_candidate_pairs_returns_message(self, dedup_phase):
         config = _make_config()
@@ -1216,7 +1220,7 @@ class TestExecuteEarlyReturns:
         )
         dedup_phase._find_similar_pairs = AsyncMock(return_value=[])
         result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
-        assert result.details == {"message": "no_duplicate_candidates"}
+        assert result.details == {"message": "no_duplicate_candidates", **phase_outcome(2)}
 
     async def test_no_candidate_pairs_still_reports_the_embedding_spend(self, dedup_phase):
         """#2060: the candidate search embeds before finding no pairs; that
@@ -1237,7 +1241,7 @@ class TestExecuteEarlyReturns:
 
         result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
 
-        assert result.details == {"message": "no_duplicate_candidates"}
+        assert result.details == {"message": "no_duplicate_candidates", **phase_outcome(2)}
         assert result.embedding_calls_used == 2
         assert result.embedding_tokens == 300
         assert result.embedding_model == "text-embedding-3-small"

@@ -49,6 +49,7 @@ from services.sleep.reporter import (
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
+    phase_outcome,
 )
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -131,21 +132,31 @@ class ImportanceReevalPhase(LLMSpendTracker):
         # Fetch stale memories with mid-range importance
         candidates = await self._fetch_candidates(user_id, workspace_id, context_id)
         if not candidates:
-            result.details = {"message": "no_stale_memories"}
+            result.details = {"message": "no_stale_memories", **phase_outcome(0)}
             return result
 
         updated_count = 0
+        # #3019: why a fetched memory kept its importance (all in memories).
+        reasons = dict.fromkeys(
+            ("no_score_returned", "changed_since_fetch", "judge_failed", "not_judged_budget"), 0
+        )
 
         # Process in batches
         for batch_start in range(0, len(candidates), BATCH_SIZE):
             if not budget.can_afford(llm_calls=1):
+                reasons["not_judged_budget"] = len(candidates) - batch_start
                 break
 
             batch = candidates[batch_start : batch_start + BATCH_SIZE]
 
+            failures_before = self._llm_failures
             scores = await self._evaluate_batch(
                 batch, user_id, context_id, workspace_id, budget, config
             )
+            if self._llm_failures > failures_before:
+                reasons["judge_failed"] += len(batch)
+            else:
+                reasons["no_score_returned"] += sum(1 for m in batch if m.id not in scores)
 
             for memory_id, new_score in scores.items():
                 old_memory = next((m for m in batch if m.id == memory_id), None)
@@ -182,6 +193,7 @@ class ImportanceReevalPhase(LLMSpendTracker):
                 )
                 if cast(CursorResult[Any], written).rowcount == 0:
                     logger.info("importance_reeval_skipped_since_fetch", memory_id=str(memory_id))
+                    reasons["changed_since_fetch"] += 1
                     continue
 
                 # Update Qdrant payload. The row's point is under its id: a row
@@ -225,6 +237,7 @@ class ImportanceReevalPhase(LLMSpendTracker):
             "updated": updated_count,
             "alpha": alpha,
             "llm_call_failures": self._llm_failures,  # #1183
+            **phase_outcome(len(candidates), reasons, budget_cut=reasons["not_judged_budget"] > 0),
         }
 
         logger.info(

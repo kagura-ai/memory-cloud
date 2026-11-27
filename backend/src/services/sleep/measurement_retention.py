@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from services.sleep.reporter import SleepBudget, SleepReporter
 
 from models.measurement import Measurement
-from services.sleep.reporter import PhaseResult
+from services.sleep.reporter import PhaseResult, phase_outcome
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -92,11 +92,13 @@ class MeasurementRetentionPhase:
         # merge/forget retention: a first-enable backlog purge must not
         # starve the live-memory phases). ``cutoff`` mirrors the
         # merge/forget details shape for report parity.
-        result.details = {
+        summary = {
             "purged": purged,
             "retention_days": retention_days,
             "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
         }
+        # #3019: the observations past the cutoff.
+        result.details = {**summary, **phase_outcome(purged)}
 
         if purged and reporter is not None and report_id is not None:
             # One batch-summary action — ids/counts only, never metric
@@ -105,7 +107,7 @@ class MeasurementRetentionPhase:
                 report_id=report_id,
                 phase="measurement_retention",
                 action_type="purge",
-                details=dict(result.details),
+                details=summary,
             )
         # Unconditional: an ENABLED run that purged 0 must be
         # distinguishable from a disabled/dead phase without a report

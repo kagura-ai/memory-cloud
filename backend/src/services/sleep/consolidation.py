@@ -55,6 +55,7 @@ from services.sleep.reporter import (
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
+    phase_outcome,
 )
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -103,6 +104,10 @@ class _ConsolidationTally:
     # #3019: borderline memories the judge never saw because the phase's LLM
     # calls ran out (0 when the pass finished or did not run).
     llm_unjudged: int = 0
+    # #3019: borderline memories in a batch the judge answered without
+    # promoting them, and in a batch whose call failed.
+    llm_kept: int = 0
+    llm_failed: int = 0
 
 
 class ConsolidationPhase(LLMSpendTracker):
@@ -122,6 +127,9 @@ class ConsolidationPhase(LLMSpendTracker):
         # dedup phase established the pattern in #475).
         self._tokens_used: int = 0
         self._llm_breakdown: LLMCallBreakdown | None = None
+        # #3019: promotions the statement skipped (a row promoted, forgotten
+        # or pinned since the fetch; see _promote_and_record).
+        self._promotion_skipped: int = 0
 
     @staticmethod
     def _should_promote(
@@ -225,6 +233,7 @@ class ConsolidationPhase(LLMSpendTracker):
         if not to_promote:
             return 0
         promoted = await self.memory_repo.bulk_promote_to_persistent(list(to_promote))
+        self._promotion_skipped += len(to_promote) - len(promoted)  # #3019
         for memory_id in promoted:
             memory, age_days = to_promote[memory_id]
             result.changed_memory_ids.add(memory_id)
@@ -272,9 +281,14 @@ class ConsolidationPhase(LLMSpendTracker):
                 break
 
             batch = borderline[batch_start : batch_start + BATCH_SIZE]
+            failures_before = self._llm_failures
             decisions = await self._llm_judge_batch(
                 batch, user_id, context_id, workspace_id, budget, config
             )
+            if self._llm_failures > failures_before:
+                tally.llm_failed += len(batch)
+            else:
+                tally.llm_kept += sum(1 for m in batch if decisions.get(m.id) != "promote")
 
             batch_map = {m.id: m for m in batch}
             to_promote: dict[UUID, tuple[Memory, int]] = {}
@@ -313,11 +327,12 @@ class ConsolidationPhase(LLMSpendTracker):
         self._llm_failures = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
+        self._promotion_skipped = 0
 
         # Fetch working memories
         working = await self._fetch_working_memories(user_id, workspace_id, context_id)
         if not working:
-            result.details = {"message": "no_working_memories"}
+            result.details = {"message": "no_working_memories", **phase_outcome(0)}
             return result
 
         # Get neural metrics
@@ -382,6 +397,17 @@ class ConsolidationPhase(LLMSpendTracker):
             "llm_archived": 0,
             "llm_archive_guarded": 0,
             "llm_call_failures": self._llm_failures,  # #1183
+            **phase_outcome(
+                len(working),
+                {
+                    "judge_off": 0 if llm_enabled else len(borderline),
+                    "kept_by_judge": tally.llm_kept,
+                    "judge_failed": tally.llm_failed,
+                    "not_judged_budget": tally.llm_unjudged,
+                    "changed_since_fetch": self._promotion_skipped,
+                },
+                budget_cut=tally.llm_unjudged > 0,
+            ),
         }
 
         logger.info(

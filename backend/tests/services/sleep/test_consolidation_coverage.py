@@ -27,7 +27,7 @@ from services.sleep.consolidation import (
     BATCH_SIZE,
     ConsolidationPhase,
 )
-from services.sleep.reporter import LLMCallBreakdown, SleepBudget
+from services.sleep.reporter import LLMCallBreakdown, SleepBudget, phase_outcome
 from utils.datetime import utcnow
 
 
@@ -681,5 +681,5 @@ class TestFetchWorkingMemories:
         result = await phase.execute(
             _make_config(provider=""), f"empty-{uuid4()}", None, None, SleepBudget()
         )
-        assert result.details == {"message": "no_working_memories"}
+        assert result.details == {"message": "no_working_memories", **phase_outcome(0)}
         assert result.memories_processed == 0
