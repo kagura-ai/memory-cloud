@@ -22,6 +22,12 @@
  * shadowed memories with `superseded_by`). Mode and switch are local state:
  * a shared link never runs a recall by itself.
  *
+ * #3022: `?never_delivered=1` narrows the text list to the viewer's own
+ * memories that were never delivered (the Overview card links here). Opening
+ * a memory reads it with `reference`, which records a delivery, so a dialog
+ * that closes under the chip fetches the list again; "Delete by filter"
+ * cannot express this set and is hidden while the chip is on.
+ *
  * Create is still deferred — needs an MCP-shape form rewrite.
  */
 
@@ -78,6 +84,8 @@ const SEARCH_PARAM = "q";
 // #830: repeatable param for the multi-tag AND drill-down (?tags=a&tags=b).
 // Supersedes #618's single `?tag=`.
 const TAGS_PARAM = "tags";
+// #3022: only the value "1" turns the never-delivered filter on.
+const NEVER_DELIVERED_PARAM = "never_delivered";
 const DEBOUNCE_MS = 300;
 // The API returns top-k, not offset pages. Increasing k replaces the ranking.
 const RECALL_K = 20;
@@ -93,6 +101,7 @@ type SearchMode = "text" | "recall";
 export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = false }: MemoriesTabPanelProps) {
   const t = useTranslations("contextDetail.memoriesPanel");
   const tRecall = useTranslations("contextDetail.memoriesPanel.recall");
+  const tNever = useTranslations("neverDelivered");
   const { toast } = useToast();
   const router = useRouter();
   const pathname = usePathname();
@@ -177,6 +186,24 @@ export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = fal
       ),
     [tagsParamKey],
   );
+
+  // #3022: URL-driven, text mode only (recall ignores it and hides the chip).
+  const neverDeliveredParam = searchParams.get(NEVER_DELIVERED_PARAM) === "1";
+  const neverDelivered = neverDeliveredParam && searchMode === "text";
+  // Toggling the filter starts again at page 1 (state reset during render).
+  const [prevNeverDelivered, setPrevNeverDelivered] = useState(neverDeliveredParam);
+  if (prevNeverDelivered !== neverDeliveredParam) {
+    setPrevNeverDelivered(neverDeliveredParam);
+    setPage(1);
+  }
+
+  const removeNeverDelivered = useCallback(() => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete(NEVER_DELIVERED_PARAM);
+    const qs = params.toString();
+    setPage(1);
+    router.replace(`${pathname}${qs ? `?${qs}` : ""}`);
+  }, [searchParams, pathname, router]);
 
   // Focus targets for the a11y focus-management contract (#830) + the live
   // region that announces facet changes to screen readers.
@@ -287,24 +314,29 @@ export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = fal
       q: debouncedQuery.trim() || undefined,
       tags: selectedTags.length ? selectedTags : undefined,
       tagsMatch: selectedTags.length ? "all" as const : undefined,
+      neverDelivered: neverDelivered || undefined,
     },
-  }), [contextId, page, debouncedQuery, selectedTags, searchMode]);
+  }), [contextId, page, debouncedQuery, selectedTags, searchMode, neverDelivered]);
 
-  const fetchMemories = useCallback(() => {
+  // Resolves to the number of rows the page received (undefined when the
+  // response was dropped as stale or the fetch failed).
+  const fetchMemories = useCallback((): Promise<number | undefined> | undefined => {
     // #2132: recall mode never renders the list; switching back to text
     // mode changes this callback's identity, so the effect below refetches.
     if (!listParams.enabled) return;
     const requestId = ++requestIdRef.current;
     return getMemories(listParams.query).then((response) => {
-      if (requestId !== requestIdRef.current) return;
+      if (requestId !== requestIdRef.current) return undefined;
       setItems(response.memories);
       setTotal(response.total);
       setListError(null);
       setSettledListRequest(listParams);
+      return response.memories.length;
     }, (err: unknown) => {
       if (requestId !== requestIdRef.current) return;
       setListError(err instanceof Error ? err.message : t("loadFailed"));
       setSettledListRequest(listParams);
+      return undefined;
     });
   }, [listParams, t]);
   const loading = settledListRequest !== listParams;
@@ -502,7 +534,32 @@ export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = fal
     void fetchMemories();
   }, [fetchMemories, refreshRecall]);
 
+  // #3022: under the never-delivered chip an opened memory leaves the list
+  // (the dialog's read is a recorded delivery), so when the last dialog
+  // closes the page is fetched again — once per close; an emptied page past
+  // the first steps back one page. A delete refetches on its own.
+  const anyDialogOpen = dialog.detailOpen || dialog.deleteOpen || dialog.editOpen;
+  const dialogWasOpenRef = useRef(anyDialogOpen);
+  const deleteRefetchedRef = useRef(false);
+  useEffect(() => {
+    const wasOpen = dialogWasOpenRef.current;
+    dialogWasOpenRef.current = anyDialogOpen;
+    if (!wasOpen || anyDialogOpen) return;
+    if (deleteRefetchedRef.current) {
+      deleteRefetchedRef.current = false;
+      return;
+    }
+    if (!neverDelivered) return;
+    void fetchMemories()?.then((received) => {
+      if (received === 0) setPage((p) => (p > 1 ? p - 1 : p));
+    });
+    // Only the close transition triggers this; the filter and the fetch
+    // callback are read at that moment.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyDialogOpen]);
+
   const handleDeleteSuccess = useCallback(() => {
+    deleteRefetchedRef.current = true;
     dialog.applyDeleteSuccess();
     toast({ title: t("deleteSuccess") });
     requestCapacityRefresh();
@@ -542,7 +599,9 @@ export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = fal
           ))}
         </ToggleGroup>}
         <ContextualHelp topic="search" />
-        {!recallOnly && !readOnly && <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
+        {/* #3022: hidden under the never-delivered chip — its filters cannot
+            express that set. */}
+        {!recallOnly && !readOnly && !neverDelivered && <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
           {tBulk("open")}
         </Button>}
       </div>
@@ -599,6 +658,26 @@ export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = fal
               </p>
             </div>
           </div>
+        </div>
+      )}
+      {neverDelivered && (
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="secondary" className="gap-1">
+              {tNever("chip")}
+              <button
+                type="button"
+                onClick={removeNeverDelivered}
+                aria-label={tNever("chipRemove")}
+                className="ml-0.5 rounded hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </Badge>
+          </div>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {tNever("chipHint")}
+          </p>
         </div>
       )}
       {/*
@@ -772,6 +851,20 @@ export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = fal
   // Any active filter (text search OR ≥1 selected tag) — distinguishes "no
   // memories at all" from "no matches for the current filter".
   const hasFilter = hasQuery || selectedTags.length > 0;
+
+  // #3022: the never-delivered filter alone matched nothing.
+  if (!loading && items.length === 0 && neverDelivered && !hasFilter && !memoryIdParam) {
+    return (
+      <div className="space-y-4">
+        {filterControls}
+        <EmptyState
+          icon={FileText}
+          title={tNever("emptyTitle")}
+          description={tNever("emptyDesc")}
+        />
+      </div>
+    );
+  }
 
   // No memories at all in this context — keep the existing landing copy.
   if (!loading && items.length === 0 && !hasFilter && !memoryIdParam) {
