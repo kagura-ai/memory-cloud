@@ -105,7 +105,7 @@ Re-embeds and upserts memories whose text or metadata was changed by earlier pha
 - **Algorithm**: collect `changed_memory_ids` from phases 1–4 → batch fetch from PostgreSQL → regenerate embeddings via `EmbeddingService` → upsert Qdrant vectors and payloads.
 - **LLM**: no.
 - **Always runs** when there are changes, regardless of which earlier phases ran.
-- **Failures** (#3036): a memory that cannot be re-indexed is counted under `failed` (its id in `failed_ids`) and the others go on. When some failed, the run is `degraded` with `reindex_partial_failure: N of M reindex operations failed`; when all failed, the phase fails and the run is `degraded` with `phase_failure: reindex`. A failed memory is re-indexed by the next run that changes it.
+- **Failures** (#3036): a memory that cannot be re-indexed is counted under `failed` (its id in `failed_ids`) and the others go on. When some failed, the phase still counts as succeeded (no `error` on it; its `failed` count says how many) and the run is `degraded` with `reindex_partial_failure: N of M reindex operations failed`; when all failed, the phase fails and the run is `degraded` with `phase_failure: reindex`. A failed memory is re-indexed by the next run that changes it.
 
 ### Phase 6 — Report
 

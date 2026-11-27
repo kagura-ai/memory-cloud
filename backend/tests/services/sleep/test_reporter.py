@@ -431,11 +431,7 @@ class TestPartialPhaseFailureGrading:
         report.error_message = None
         results = [
             PhaseResult(phase_name="importance_reeval"),
-            PhaseResult(
-                phase_name="reindex",
-                operation_failures=2,
-                error="2 of 5 reindex operations failed",
-            ),
+            PhaseResult(phase_name="reindex", operation_failures=2, memories_processed=5),
         ]
 
         await reporter.complete_report(report, results)
@@ -450,9 +446,7 @@ class TestPartialPhaseFailureGrading:
         report.error_message = None
         results = [
             PhaseResult(phase_name="dedup_merge", success=False, error="boom"),
-            PhaseResult(
-                phase_name="reindex", operation_failures=1, error="1 of 3 reindex operations failed"
-            ),
+            PhaseResult(phase_name="reindex", operation_failures=1, memories_processed=3),
         ]
 
         await reporter.complete_report(report, results)
@@ -484,7 +478,7 @@ class TestPartialPhaseFailureGrading:
         report.id = uuid4()
         results = [
             PhaseResult(phase_name="edge_discovery", llm_calls_used=2, llm_call_failures=2),
-            PhaseResult(phase_name="reindex", operation_failures=1, error="1 of 2 failed"),
+            PhaseResult(phase_name="reindex", operation_failures=1, memories_processed=2),
         ]
 
         await reporter.complete_report(report, results)

@@ -158,9 +158,12 @@ class TestReindexPhase:
         assert result.success is True  # Partial success
         assert result.details["reindexed"] == 1
         assert result.details["failed"] == 1
-        # #3036: the run is graded 'degraded' from these.
+        # #3036: the run is graded 'degraded' from these; the phase itself
+        # succeeded, so it carries no error (the run page draws a phase with
+        # an error as failed).
         assert result.operation_failures == 1
-        assert result.error == "1 of 2 reindex operations failed"
+        assert result.memories_processed == 2
+        assert result.error is None
 
     @pytest.mark.asyncio
     @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)

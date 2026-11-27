@@ -219,9 +219,10 @@ class ReindexPhase:
             result.error = f"All {failed} reindex operations failed"
         elif failed > 0:
             # #3036: a partly failed reindex grades the run 'degraded'
-            # (``SleepReporter.complete_report``); the phase itself succeeded.
+            # (``SleepReporter.complete_report`` writes the count). The phase
+            # itself succeeded, so ``error`` stays None: a phase with an error
+            # reads as failed on the run page.
             result.operation_failures = failed
-            result.error = f"{failed} of {reindexed + failed} reindex operations failed"
 
         logger.info(
             "reindex_phase_completed",

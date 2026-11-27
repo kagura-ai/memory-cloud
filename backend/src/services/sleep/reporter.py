@@ -181,8 +181,10 @@ class PhaseResult:
     # tokens are added with ``count_call=False``, #2038).
     llm_call_failures: int = 0
     # #3036: items of a phase that failed while the phase itself succeeded
-    # (the reindex's failed memories when some were reindexed). Grades the
-    # run 'degraded'; a phase whose every item failed reports success=False.
+    # (the reindex's failed memories when some were reindexed), out of
+    # ``memories_processed``. Grades the run 'degraded' and leaves ``error``
+    # None (a phase with an error reads as failed); a phase whose every item
+    # failed reports success=False.
     operation_failures: int = 0
     # #471: cost-grade fields.
     llm_breakdown: list[LLMCallBreakdown] = field(default_factory=list)
@@ -446,7 +448,11 @@ class SleepReporter:
             causes = []
             if failed_phases:
                 causes.append(f"phase_failure: {', '.join(failed_phases)}")
-            causes.extend(f"{r.phase_name}_partial_failure: {r.error}" for r in partial_phases)
+            causes.extend(
+                f"{r.phase_name}_partial_failure: {r.operation_failures} of "
+                f"{r.memories_processed} {r.phase_name} operations failed"
+                for r in partial_phases
+            )
             if causes and not report.error_message:
                 report.error_message = "; ".join(causes)
         else:
