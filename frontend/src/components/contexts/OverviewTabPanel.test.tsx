@@ -1,6 +1,9 @@
 /**
  * OverviewTabPanel × NeverDeliveredCard (#3022): the card gets the Memories
  * tab's role check as `canOpenMemories`, and Refresh re-reads its count.
+ * Refresh bumps ONE key that both self-loading cards receive (the owner's
+ * public endpoint card of #3035 included; its own suite is
+ * OverviewTabPanel.publicEndpoint.test.tsx).
  */
 
 import { forwardRef, useImperativeHandle } from "react";
@@ -14,6 +17,24 @@ const { cardProps, workspaceRole } = vi.hoisted(() => ({
   cardProps: [] as Array<{ contextId: string; canOpenMemories: boolean; refreshKey: number }>,
   workspaceRole: { current: "admin" as string },
 }));
+
+vi.mock(
+  "@/components/dashboard/PublicEndpointUsage",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("@/components/dashboard/PublicEndpointUsage")
+    >()),
+    PublicEndpointUsage: (props: {
+      resourceId: string;
+      refreshKey: number;
+    }) => (
+      <div
+        data-testid="endpoint-card"
+        data-refresh={String(props.refreshKey)}
+      />
+    ),
+  }),
+);
 
 vi.mock("@/components/contexts/NeverDeliveredCard", () => ({
   NeverDeliveredCard: (props: {
@@ -93,6 +114,28 @@ describe("OverviewTabPanel never-delivered card", () => {
     fireEvent.click(screen.getByRole("button", { name: "refresh" }));
     await waitFor(() =>
       expect(screen.getByTestId("nd-card").dataset.refresh).not.toBe(before),
+    );
+  });
+
+  it("passes one refresh key to both cards and bumps it for both", async () => {
+    workspaceRole.current = "owner";
+    const live = {
+      id: "ctx-1",
+      is_public: true,
+      public_mcp_endpoint_live: true,
+      resource_id: "catalog",
+    } as unknown as Context;
+    render(<OverviewTabPanel contextId="ctx-1" context={live} />);
+    const nd = await screen.findByTestId("nd-card");
+    const endpoint = screen.getByTestId("endpoint-card");
+    expect(endpoint.dataset.refresh).toBe(nd.dataset.refresh);
+    const before = nd.dataset.refresh;
+    fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("nd-card").dataset.refresh).not.toBe(before),
+    );
+    expect(screen.getByTestId("endpoint-card").dataset.refresh).toBe(
+      screen.getByTestId("nd-card").dataset.refresh,
     );
   });
 });

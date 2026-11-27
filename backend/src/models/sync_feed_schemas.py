@@ -32,6 +32,10 @@ PRODUCT = {
     "condition",
 }
 FAQ = {"question", "answer", "url"}
+PRODUCT_REQUIRED = {"title", "url"}
+FAQ_REQUIRED = {"question", "answer"}
+# A record's JSON (``public_payload``) is at most this many UTF-8 bytes.
+MAX_RECORD_BYTES = 32_768
 FIELDS = PRODUCT | FAQ | {"record_type", "external_id"}
 DEFINITIONS = [
     {
@@ -126,7 +130,7 @@ class FeedRecord(StrictBody):
     def public_payload(self, kind: str) -> dict[str, str]:
         """Validate kind-specific fields and values before they enter staging."""
         allowed = PRODUCT if kind == "product" else FAQ
-        required = {"title", "url"} if kind == "product" else {"question", "answer"}
+        required = PRODUCT_REQUIRED if kind == "product" else FAQ_REQUIRED
         if not required.issubset(self.fields) or not set(self.fields).issubset(allowed):
             raise ValueError("invalid_fields")
         for name, value in self.fields.items():
@@ -162,7 +166,7 @@ class FeedRecord(StrictBody):
             if name in self.fields and self.fields[name] not in choices:
                 raise ValueError("invalid_enum")
         payload = {"record_type": kind, "external_id": self.external_id, **self.fields}
-        if len(json.dumps(payload, ensure_ascii=False).encode()) > 32768:
+        if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_RECORD_BYTES:
             raise ValueError("record_too_large")
         return payload
 

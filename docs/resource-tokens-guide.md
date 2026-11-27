@@ -220,7 +220,7 @@ curl -X DELETE "$KAGURA/api/v1/resources/products/public-mcp" -H "Authorization:
 
 **Usage budget:** when the operator enables it (`MCP_PUBLIC_USAGE_BUDGET_ENABLED`), all public endpoints of your workspace share one budget of anonymous tool calls per seven-day period (default 25,000), together with anonymous REST searches of a published context. The publish, read and update responses (POST, GET and PATCH) carry it as `usage_budget` (`state`, `limit`, `used`, `remaining`, `resets_at`, …); the numbers are the workspace's, the same on every endpoint. When it is used up, tool calls are refused until the period ends — the data, the addresses and the listing methods stay — and anyone can spend it, since the endpoint is anonymous; calling your own public URL is counted too. Contract: [Public usage budget](public-usage-budget.md).
 
-**What is public:** the rows ingested for this resource (`details.resource_id` equals the slug) that are not deleted. A note a member writes by hand into the same context is not served — unless that member sets `details.resource_id` to the slug themselves, which anyone who can write to the context can do. Each row shows its `memory_id`, `doc_id` (your document id), summary, content (through `reference`), type, tags, `source_url` (only an `http(s)` URL), and timestamps. **Not public:** `details`, versions and history, importance, links, the context's summary / usage guide / guardrails / search configuration / statistics, and anything about the workspace. The five tools and their exact response fields: [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).
+**What is public:** the rows ingested for this resource (`details.resource_id` equals the slug) that are not deleted. A note a member writes by hand into the same context is not served — unless that member sets `details.resource_id` to the slug themselves, which anyone who can write to the context can do. Each row shows its `memory_id`, `doc_id` (your document id), summary, content (through `reference`), type, tags, `source_url` (only an `http(s)` URL), and timestamps. A row of a product or FAQ feed that nobody edited shows the record's title or question as its summary, its kind (`product`, `faq`) as its type and the record's URL as `source_url`. **Not public:** `details`, versions and history, importance, links, the context's summary / usage guide / guardrails / search configuration / statistics, and anything about the workspace. The five tools and their exact response fields: [MCP Tools › Public endpoint tools](mcp-tools.md#public-endpoint-tools).
 
 **Usage of your endpoint:** each completed tool call is recorded as a usage event — tool, outcome, duration and opaque document keys; never the visitor's query, session id or address ([Public MCP usage events](public-mcp-usage-events.md)). `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` (owner) shows the live endpoint's calls of the last 24 hours by outcome, the gap rows that report events the server could not record, and the event writer's queue:
 
@@ -230,6 +230,17 @@ curl "$KAGURA/api/v1/resources/products/public-mcp/usage-health" -H "Authorizati
 #    "outcomes": {"success": 40, "rate_limited": 2}, "gaps": {"count": 0, "dropped_events": 0, "last_gap_at": null},
 #    "writer": {"enabled": true, "queue_depth": 0, …, "process_local": true}, "retention_days": 90}
 ```
+
+`GET /api/v1/resources/{resource_id}/public-mcp/usage-stats?days=7` (owner, [#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) gives the live endpoint's calls, searches and search outcomes per UTC day and the documents its searches returned most often, with their public title and URL while the endpoint serves. These are calls to the public MCP endpoint only (not REST public searches), not visitors, and answers a cache in front of the endpoint served are not counted. The context's overview page shows the same numbers to the workspace owner.
+
+```bash
+curl "$KAGURA/api/v1/resources/products/public-mcp/usage-stats?days=30" -H "Authorization: Bearer kagura_{owner_key}"
+# → {"resource_id": "products", "window_days": 30, "totals": {"calls": 42, "searches": 30, "search_outcomes": {…}},
+#    "days": [{"date": "2026-10-29", "calls": 0, …}, …], "documents": {"status": "ok", "publication_serving": true,
+#    "items": [{"doc_key": "…", "searches": 12, "best_rank": 1, "title": "Trail shoe", "source_url": "https://example.com/p/1"}], …}, …}
+```
+
+Details and limits: [Statistics for the owner](public-mcp-usage-events.md#statistics-for-the-owner).
 
 **Your own domain** ([#2809](https://github.com/kagura-ai/memory-cloud/issues/2809)): when the operator switches custom domains on (`MCP_PUBLIC_DOMAINS_ENABLED`; `GET /api/v1/system/info` then reports `features.public_mcp_domains: true`), the published endpoint can also answer at `https://<your host>/mcp`, for example `https://mcp.example.org/mcp`. The alias serves the same endpoint as the fixed address: same tools, limits and usage budget. Adding and verifying a domain needs the workspace's canonical owner (the owner the workspace belongs to); on a deployment that sells it, the workspace also needs the custom-domain right. One domain per published endpoint, a few per workspace (default 3).
 

@@ -4572,6 +4572,8 @@ Each completed `tools/call` on a public MCP endpoint is also stored as a privacy
 | `MCP_PUBLIC_TELEMETRY_SESSION_DETAILS_ENABLED` | `false` | Also store a daily session HMAC (keyed with `AUDIT_HMAC_KEY`) and the client's self-declared, **unverified** family on session-era events. Session counts are connections, not people. |
 | `DEPLOYMENT_ID` | `default` | This deployment's name in export envelopes (`[a-z0-9][a-z0-9._-]{0,63}`); not stored per event. |
 
+The owner's statistics route (`GET /api/v1/resources/{resource_id}/public-mcp/usage-stats`, [#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) reads these events with no setting of its own: each read has a time budget of about six seconds, reads at most the newest 20,000 searches for its document list, and a workspace can read it 30 times per minute ([Statistics for the owner](public-mcp-usage-events.md#statistics-for-the-owner)).
+
 Search never waits on the event writer: a slow or unavailable database loses telemetry (recorded as gap rows), not availability. A long-running write transaction anywhere on the database server delays the publication of events through the export cursor until it ends; events are late, never skipped. The owner route `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` shows the last 24 hours, the gap rows and the answering process's queue.
 
 ## Observability API — Issue #2679
