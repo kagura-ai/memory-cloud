@@ -154,6 +154,7 @@ gh api -X POST repos/{owner}/{repo}/pulls/<N>/requested_reviewers -f 'reviewers[
 - Address every Copilot finding (fix or reply with the reason). Push fixes as new commits — do not amend and force-push right before merging.
 - Wait for CI: `gh pr checks <N> --watch`.
 - Confirm the PR head is the commit you pushed last: `gh pr view <N> --json headRefOid` equals `git rev-parse HEAD`. (A squash merge issued right after a push can merge the previous head.)
+- Confirm `main` did not move since the PR's CI ran: `gh pr view <N> --json baseRefOid --jq .baseRefOid` equals `git ls-remote origin refs/heads/main | cut -f1`. A tag push starts no CI run (#3027), so the PR's run is the only one that checks the tree being released. If `main` moved, merge it into the release branch (`git merge origin/main`), push, and wait for that run before merging.
 
 ```bash
 gh pr merge <N> --squash --delete-branch
