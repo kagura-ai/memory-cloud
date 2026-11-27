@@ -1,8 +1,8 @@
 name: CI
 
+# No run for a tag push (#3027): a release tag is put on the squash commit of
+# the release pull request, which this workflow checked just before.
 on:
-  push:
-    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
 permissions:
   contents: read
 
-# One group per PR (a new push cancels its older run); any other event is its own run_id group.
+# One group per PR (a new push cancels its older run); a manual run is its own run_id group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -342,12 +342,24 @@ jobs:
 
   # Integration tests + the all-routes smoke test — both require a live
   # DB and Redis. Gated by detect-changes path filter, `force-integration`
-  # label, workflow_dispatch, or tag push.
+  # label or workflow_dispatch.
+  #
+  # Four parallel jobs (#3027), each with its own service containers and an
+  # empty database: `db` runs the backend-unit suite again against Postgres;
+  # `1`..`3` run the integration selection, split by test file
+  # (.github/scripts/pytest_shard.py: every file lands in exactly one shard;
+  # tests/ci/test_pytest_shard.py). It starts with backend-unit, not after it.
   backend-integration:
+    name: backend-integration (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    needs: [detect-changes, backend-unit]
+    needs: [detect-changes]
+    strategy:
+      # One shard's failure must not hide another's.
+      fail-fast: false
+      matrix:
+        shard: ["db", "1", "2", "3"]
     # The label-contains check is guarded by event-name so non-PR events
-    # (workflow_dispatch / tag push) don't depend on PR-only context — GHA
+    # (workflow_dispatch) don't depend on PR-only context — GHA
     # treats undefined `pull_request` as null-coercible to an empty list, so
     # the bare contains() is safe in practice, but the explicit guard makes
     # the intent unambiguous to future readers.
@@ -355,8 +367,7 @@ jobs:
       needs.detect-changes.outputs.backend-integration == 'true' ||
       (github.event_name == 'pull_request' &&
         contains(github.event.pull_request.labels.*.name, 'force-integration')) ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push'
+      github.event_name == 'workflow_dispatch'
     services:
       postgres:
         # Literal pin (not a YAML anchor) in all three service blocks, and
@@ -468,7 +479,7 @@ jobs:
       # matches backend-unit except tests/cli, which the integration step runs
       # (tests/ci/test_db_backed_tests_in_ci.py).
       - name: Run DB-backed tests outside tests/integration
-        id: db-tests
+        if: ${{ matrix.shard == 'db' }}
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           # The app's own engine (get_db, isolated sessions) reads DATABASE_URL;
@@ -483,41 +494,10 @@ jobs:
           --ignore=tests/smoke/test_all_routes.py
           --timeout=300 --maxfail=5
 
-      # Hand the integration step the empty stores it had before #2297: the
-      # step above commits rows and Qdrant points, and its conftest teardown
-      # does not run if the process is killed. Recreate the test database and
-      # drop every Qdrant collection.
-      - name: Reset the test database and Qdrant
-        if: ${{ !cancelled() && (steps.db-tests.outcome == 'success' || steps.db-tests.outcome == 'failure') }}
-        run: |
-          cd backend && python - <<'EOF'
-          import asyncio
-
-          import asyncpg
-          import httpx
-
-
-          async def main() -> None:
-              conn = await asyncpg.connect(
-                  "postgresql://kagura:kagura_dev_password@localhost:5432/postgres"
-              )
-              await conn.execute("DROP DATABASE IF EXISTS kagura_test WITH (FORCE)")
-              await conn.execute("CREATE DATABASE kagura_test")
-              await conn.close()
-
-
-          asyncio.run(main())
-          qdrant = "http://localhost:6333"
-          names = [c["name"] for c in httpx.get(f"{qdrant}/collections").json()["result"]["collections"]]
-          for name in names:
-              httpx.delete(f"{qdrant}/collections/{name}").raise_for_status()
-          print(f"test database recreated, {len(names)} Qdrant collection(s) dropped")
-          EOF
-
       - name: Run integration tests
-        # Still runs when the DB-backed step failed, so one run reports both;
-        # not when an earlier step (install, a service) never let it start.
-        if: ${{ !cancelled() && (steps.db-tests.outcome == 'success' || steps.db-tests.outcome == 'failure') }}
+        # One of INTEGRATION_SHARDS shards; the shard list is printed first so
+        # a log shows which files this job ran.
+        if: ${{ matrix.shard != 'db' }}
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           # Hard-fail rather than let every db_session test silently skip: the
@@ -532,8 +512,14 @@ jobs:
           MINIO_TEST_ACCESS_KEY: minioadmin
           MINIO_TEST_SECRET_KEY: minioadmin
           MINIO_TEST_BUCKET: kagura-files-test
+          SHARD: ${{ matrix.shard }}
+          INTEGRATION_SHARDS: "3"
         run: >-
-          cd backend && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py
+          cd backend &&
+          python ../.github/scripts/pytest_shard.py --shard "$SHARD" --total "$INTEGRATION_SHARDS"
+          tests/integration/ tests/cli/ tests/smoke/test_all_routes.py > "$RUNNER_TEMP/shard-files.txt" &&
+          cat "$RUNNER_TEMP/shard-files.txt" &&
+          xargs -a "$RUNNER_TEMP/shard-files.txt" pytest
           -v --timeout=120 --maxfail=3
 
   # Authenticated a11y (color-contrast) lane (#840). Unlike the hermetic
@@ -559,8 +545,7 @@ jobs:
       needs.detect-changes.outputs.frontend-a11y-authed == 'true' ||
       (github.event_name == 'pull_request' &&
         contains(github.event.pull_request.labels.*.name, 'force-integration')) ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push'
+      github.event_name == 'workflow_dispatch'
     env:
       # cd backend (cwd → resolves `src.api.main`) + PYTHONPATH=src (resolves the
       # bare `config`/`api` imports) mirrors how pytest (pythonpath=src) and the
@@ -716,8 +701,7 @@ jobs:
       needs.detect-changes.outputs.frontend-a11y-authed == 'true' ||
       (github.event_name == 'pull_request' &&
         contains(github.event.pull_request.labels.*.name, 'force-integration')) ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push'
+      github.event_name == 'workflow_dispatch'
     env:
       PYTHONPATH: src
       DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
@@ -864,16 +848,16 @@ jobs:
   # backend/tests/ci/test_image_contents.py reads the Dockerfiles; this job runs
   # the built images, so a base image or a dependency that brings in a compiler,
   # the dev extra or a package manager fails here as well. Gated like
-  # backend-integration: a change to what goes into the images, tag pushes and
-  # workflow_dispatch. Nothing is pushed: publishing happens outside this
+  # backend-integration: a change to what goes into the images, and
+  # workflow_dispatch (a release pull request changes the lock files, so it
+  # runs there). Nothing is pushed: publishing happens outside this
   # repository.
   images:
     runs-on: ubuntu-latest
     needs: [detect-changes]
     if: |
       needs.detect-changes.outputs.images == 'true' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push'
+      github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

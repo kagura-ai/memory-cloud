@@ -182,7 +182,7 @@ paths that differ, rather than by the raw fixture diff.
 
 ## Continuous Integration
 
-CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag pushes (`v*`), and via manual `workflow_dispatch`.
+CI runs via `.github/workflows/ci.yml` on pull requests against `main` and via manual `workflow_dispatch`. A tag push starts no CI run: a release tag is put on the squash commit of the release pull request, which CI checked just before.
 
 ### Jobs
 
@@ -193,10 +193,10 @@ CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag p
 | `frontend` | All triggers | none |
 | `frontend-a11y` | All triggers (`needs: [frontend]`) | none (hermetic `next dev`) |
 | `detect-changes` | All triggers | none |
-| `backend-integration` | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis + qdrant |
-| `frontend-a11y-authed` | `detect-changes` (frontend/backend paths) match **or** `force-integration` label **or** `workflow_dispatch` **or** tag push | postgres + redis |
+| `backend-integration` (four parallel jobs: `db`, `1`, `2`, `3`) | `detect-changes` match **or** `force-integration` label **or** `workflow_dispatch` | postgres + redis + qdrant |
+| `frontend-a11y-authed` | `detect-changes` (frontend/backend paths) match **or** `force-integration` label **or** `workflow_dispatch` | postgres + redis |
 
-`backend-integration` declares `needs: [detect-changes, backend-unit]`, so unit-failing PRs never pay the integration-suite cost. It first runs the backend-unit suite again against Postgres, because the DB-backed tests outside `tests/integration/` (everything that takes the `db_session` fixture) skip in `backend-unit`, then the integration suite (#2297). `frontend-a11y-authed` runs the authenticated color-contrast specs against a full stack (migrated DB + seeded admin + API). See `.github/workflows/ci.yml` for exact commands.
+`backend-integration` starts together with `backend-unit` and runs as four parallel jobs, each with its own service containers. The `db` job runs the backend-unit suite again against Postgres, because the DB-backed tests outside `tests/integration/` (everything that takes the `db_session` fixture) skip in `backend-unit` (#2297). Jobs `1` to `3` run the integration suite split by test file: `.github/scripts/pytest_shard.py` puts every test file in exactly one shard (to run one shard locally: `cd backend && python ../.github/scripts/pytest_shard.py --shard 1 --total 3 tests/integration/ tests/cli/ tests/smoke/test_all_routes.py | xargs pytest`). `frontend-a11y-authed` runs the authenticated color-contrast specs against a full stack (migrated DB + seeded admin + API). See `.github/workflows/ci.yml` for exact commands.
 
 ### Triggering integration tests on a PR
 

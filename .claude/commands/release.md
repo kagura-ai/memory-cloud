@@ -182,9 +182,9 @@ git push origin vX.Y.Z
 git ls-remote --tags origin refs/tags/vX.Y.Z           # confirm the tag landed
 ```
 
-The tag push triggers the `push: tags: ["v*"]` CI run in `.github/workflows/ci.yml`.
+The tag push starts no CI run (#3027): the tagged commit is the squash commit of the release pull request, which CI checked before the merge.
 
-It also triggers `.github/workflows/publish-mcp-registry.yml`, which publishes `server.json` to the Official MCP Registry (GitHub OIDC, no secret); it fails before publishing when the tag is not `v` + `server.json`'s `version`. A failed publish does not block the release or the deploy. A dispatch on the tag (`gh workflow run publish-mcp-registry.yml --ref vX.Y.Z`) runs the tag's own workflow file and `server.json`, so re-running it only helps when the cause is outside the repository (an outage, the registry side). A cause inside the repository is fixed on `main`, and the listing catches up with the next release tag; publishing never happens from a branch. A dispatch on a branch is a dry run: it verifies the publisher, validates `server.json` and logs in through OIDC, and publishes nothing. Check the listing with `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=kagura&version=latest'`.
+It triggers `.github/workflows/publish-mcp-registry.yml`, which publishes `server.json` to the Official MCP Registry (GitHub OIDC, no secret); it fails before publishing when the tag is not `v` + `server.json`'s `version`. A failed publish does not block the release or the deploy. A dispatch on the tag (`gh workflow run publish-mcp-registry.yml --ref vX.Y.Z`) runs the tag's own workflow file and `server.json`, so re-running it only helps when the cause is outside the repository (an outage, the registry side). A cause inside the repository is fixed on `main`, and the listing catches up with the next release tag; publishing never happens from a branch. A dispatch on a branch is a dry run: it verifies the publisher, validates `server.json` and logs in through OIDC, and publishes nothing. Check the listing with `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=kagura&version=latest'`.
 
 ### 11. Create the GitHub Release
 
@@ -250,9 +250,7 @@ Requires `CODECOV_TOKEN` (read from `.env.local`, or export it).
 
 Print:
 - the new version and the GitHub Release URL,
-- the tag-triggered CI run and its conclusion, matched by the tagged commit's SHA:
-  `gh run list --workflow ci.yml --event push --commit "$(git rev-parse 'vX.Y.Z^{commit}')" --limit 1`
-  (`--branch vX.Y.Z` also finds it — a tag push is recorded with the tag name as `head_branch` — but the SHA match cannot pick up a branch that happens to share the name),
+- the release pull request's CI conclusion (`gh pr checks <release PR>`); a tag push starts no CI run,
 - the Codecov status on the merge commit: `gh api repos/{owner}/{repo}/commits/$(git rev-parse HEAD)/status --jq '.statuses[] | select(.context == "codecov/patch") | .state'`.
 
 ## Recovery

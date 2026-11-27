@@ -2,7 +2,8 @@
 
 ``backend-unit`` has no Postgres, so every test that takes the ``db_session``
 fixture skips there. ``backend-integration`` runs the backend-unit suite
-again against Postgres in one step, then the integration suite in another. A
+again against Postgres in its ``db`` job, and the integration suite in its
+numbered shard jobs (tests/ci/test_pytest_shard.py). A
 list of hand-picked files once stood in for that step and left about 1,000
 tests unrun, 13 of them failing on main.
 """
@@ -70,6 +71,10 @@ def test_the_db_step_runs_against_postgres() -> None:
     assert env.get("DATABASE_URL") == env["TEST_DATABASE_URL"]
 
 
+def test_the_db_step_runs_in_the_db_job_only() -> None:
+    assert _db_step()["if"] == "${{ matrix.shard == 'db' }}"
+
+
 def test_what_the_db_step_leaves_out_runs_in_the_integration_step() -> None:
     steps = _pytest_steps("backend-integration")
     db_step = _db_step()
@@ -79,7 +84,9 @@ def test_what_the_db_step_leaves_out_runs_in_the_integration_step() -> None:
         if a.startswith("--ignore=")
     }
     later = steps[steps.index(db_step) + 1 :]
-    covered = {a.rstrip("/") for s in later for a in _pytest_args(s) if a.startswith("tests/")}
+    # The integration step hands its roots to the shard script, which gives
+    # each shard job its files.
+    covered = {a.rstrip("/") for s in later for a in s["run"].split() if a.startswith("tests/")}
 
     # tests/e2e needs a browser and a running stack; it has its own lanes.
     assert ignored - {"tests/e2e"} <= covered, ignored - covered
