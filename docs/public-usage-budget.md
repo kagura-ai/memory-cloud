@@ -119,8 +119,8 @@ address is counted like anyone. There is no owner preview on the public path.
 
 Exempt (the authenticated control-UI read projection):
 
-- the owner routes `/api/v1/resources/{resource_id}/public-mcp` and
-  `/public-mcp/usage-health` (workspace owner);
+- the owner routes `/api/v1/resources/{resource_id}/public-mcp`,
+  `/public-mcp/usage-health` and `/public-mcp/usage-stats` (workspace owner);
 - sync installation inspection (signed-in browser client, `workspaces:read`);
 - the observability API (observation credential);
 - the authenticated `/mcp` tools (member token; the workspace's daily MCP

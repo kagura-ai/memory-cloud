@@ -89,8 +89,13 @@ def test_render_count_is_exact_below_100_else_two_significant_digits(
 
 _TAIL = (
     " Call get_context_info first for the owner's description and usage guide."
-    " recall searches it{by}; list_tags lists categories. Nothing you send is stored."
+    " recall searches it{by}; list_tags lists categories."
+    " Calls are counted without query text; a search's embedding is cached for 24 hours."
 )
+# The last sentence of the instructions (#3035): what a call leaves on the server.
+_KEPT = " Calls are counted without query text; a search's embedding is cached for 24 hours."
+# The longest text any variant renders, pinned as a number beside the cap.
+_LONGEST = 378
 
 
 def _expected(head: str, by: str = "") -> str:
@@ -182,8 +187,23 @@ def test_every_variant_is_bounded_one_line_and_free_of_instruction_wording() -> 
             text
         )
         assert text.startswith("Read-only public data of ")
-        assert text.endswith(" Nothing you send is stored.")
+        assert text.endswith(_KEPT)
     assert longest <= pt.PUBLIC_INSTRUCTIONS_MAX
+    assert longest == _LONGEST, (
+        f"the longest public instructions text is {longest} characters: the template "
+        "(transport._PUBLIC_INSTRUCTIONS) changed; update _LONGEST and the cap together"
+    )
+
+
+def test_the_cache_period_the_instructions_state_is_the_embedding_cache_ttl() -> None:
+    from services.embedding_service import EMBEDDING_CACHE_TTL_SECONDS
+
+    assert "cached for 24 hours" in _KEPT
+    assert EMBEDDING_CACHE_TTL_SECONDS == 24 * 3600, (
+        "the public instructions sentence (transport._PUBLIC_INSTRUCTIONS) and "
+        "docs/public-mcp-usage-events.md 'What a public call leaves on the server' state "
+        "that a search's embedding is cached for 24 hours; change them with the TTL"
+    )
 
 
 def test_the_fixed_text_of_every_count_variant_passes_the_wording_guard() -> None:

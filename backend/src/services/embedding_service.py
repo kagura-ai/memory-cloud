@@ -41,6 +41,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# How long a query's embedding vector stays cached (under a hash of the text).
+# The public endpoint's instructions say "24 hours" (a test pins the two).
+EMBEDDING_CACHE_TTL_SECONDS = 86_400
+
 # The credential tier ``_get_user_api_key`` resolved a key from. ``"workspace"``
 # / ``"context"`` are BYOK rows in ``external_api_keys``; ``"env"`` is the
 # platform ``OPENAI_API_KEY`` fallback. Maps directly to ``LLMCallLog.paid_by``
@@ -748,7 +752,7 @@ class EmbeddingService:
                     or 0
                 )
 
-            await set_cache(cache_key, json.dumps(vector), ttl=86400)
+            await set_cache(cache_key, json.dumps(vector), ttl=EMBEDDING_CACHE_TTL_SECONDS)
 
             logger.debug(
                 "embedding_generated",
@@ -892,7 +896,7 @@ class EmbeddingService:
                     # Cache for 24 hours (use normalized text from uncached_texts)
                     text_hash = xxhash.xxh64(uncached_texts[i].encode()).hexdigest()[:16]
                     cache_key = f"emb:{self.model}:{text_hash}"
-                    await set_cache(cache_key, json.dumps(vector), ttl=86400)
+                    await set_cache(cache_key, json.dumps(vector), ttl=EMBEDDING_CACHE_TTL_SECONDS)
 
                 logger.debug(
                     "batch_embedding_generated",

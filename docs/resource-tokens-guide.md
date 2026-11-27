@@ -231,6 +231,17 @@ curl "$KAGURA/api/v1/resources/products/public-mcp/usage-health" -H "Authorizati
 #    "writer": {"enabled": true, "queue_depth": 0, …, "process_local": true}, "retention_days": 90}
 ```
 
+`GET /api/v1/resources/{resource_id}/public-mcp/usage-stats?days=7` (owner, [#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) gives the live endpoint's calls, searches and search outcomes per UTC day and the documents its searches returned most often, with their public title and URL while the endpoint serves. These are calls to the public MCP endpoint only (not REST public searches), not visitors, and answers a cache in front of the endpoint served are not counted. The context's overview page shows the same numbers to the workspace owner.
+
+```bash
+curl "$KAGURA/api/v1/resources/products/public-mcp/usage-stats?days=30" -H "Authorization: Bearer kagura_{owner_key}"
+# → {"resource_id": "products", "window_days": 30, "totals": {"calls": 42, "searches": 30, "search_outcomes": {…}},
+#    "days": [{"date": "2026-10-29", "calls": 0, …}, …], "documents": {"status": "ok", "publication_serving": true,
+#    "items": [{"doc_key": "…", "searches": 12, "best_rank": 1, "title": "Trail shoe", "source_url": "https://example.com/p/1"}], …}, …}
+```
+
+Details and limits: [Statistics for the owner](public-mcp-usage-events.md#statistics-for-the-owner).
+
 **Your own domain** ([#2809](https://github.com/kagura-ai/memory-cloud/issues/2809)): when the operator switches custom domains on (`MCP_PUBLIC_DOMAINS_ENABLED`; `GET /api/v1/system/info` then reports `features.public_mcp_domains: true`), the published endpoint can also answer at `https://<your host>/mcp`, for example `https://mcp.example.org/mcp`. The alias serves the same endpoint as the fixed address: same tools, limits and usage budget. Adding and verifying a domain needs the workspace's canonical owner (the owner the workspace belongs to); on a deployment that sells it, the workspace also needs the custom-domain right. One domain per published endpoint, a few per workspace (default 3).
 
 ```bash
