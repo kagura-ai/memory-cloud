@@ -27,6 +27,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, insert, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.agent_scope import AgentScope, set_agent_scope
@@ -553,35 +554,81 @@ async def test_day_count_failure_is_503_and_keeps_the_session(world: World, monk
     assert r.json()["error"] == "usage_stats_unavailable"
 
 
-async def test_document_section_cannot_write(world: World, monkeypatch) -> None:
-    w = world
-    probe, after = uuid4().hex, uuid4().hex
-
-    async def writing(db, endpoint, keys):
-        await db.execute(
-            insert(PublicMcpDocKey).values(
-                resource_pk=w.resource_pk["cat"], doc_key=probe, resource_doc_id="probe"
-            )
-        )
-
-    monkeypatch.setattr(stats, "resolve_public_documents", writing)
-    async with w.factory() as db:
-        result = await _read(db, w)
-        assert result.documents.status == "unavailable"
-        # The read-only mode ended with the savepoint: the session can write.
-        await db.execute(
-            insert(PublicMcpDocKey).values(
-                resource_pk=w.resource_pk["cat"], doc_key=after, resource_doc_id="p"
-            )
-        )
-        await db.rollback()
-    async with w.factory() as db:
-        written = await db.scalar(
+async def _keys_written(db: AsyncSession, *keys: str) -> int:
+    return int(
+        await db.scalar(
             select(func.count())
             .select_from(PublicMcpDocKey)
-            .where(PublicMcpDocKey.doc_key.in_([probe, after]))
+            .where(PublicMcpDocKey.doc_key.in_(list(keys)))
         )
-    assert written == 0
+        or 0
+    )
+
+
+def _insert_key(w: World, key: str):
+    return insert(PublicMcpDocKey).values(
+        resource_pk=w.resource_pk["cat"], doc_key=key, resource_doc_id="probe"
+    )
+
+
+def _writing_resolver(w: World, key: str, errors: list[DBAPIError]):
+    """A resolver that inserts a document key; it returns normally if the insert works."""
+
+    async def writing(db, endpoint, keys):
+        try:
+            await db.execute(_insert_key(w, key))
+        except DBAPIError as exc:
+            errors.append(exc)
+            raise
+        return {}
+
+    return writing
+
+
+def _sqlstate(exc: DBAPIError) -> str | None:
+    orig = exc.orig
+    return getattr(orig, "sqlstate", None) or getattr(orig.__cause__, "sqlstate", None)
+
+
+async def test_document_section_cannot_write(world: World, monkeypatch) -> None:
+    w = world
+    probe = uuid4().hex
+    errors: list[DBAPIError] = []
+    monkeypatch.setattr(stats, "resolve_public_documents", _writing_resolver(w, probe, errors))
+    async with w.factory() as db:
+        result = await _read(db, w)
+        # The insert itself was refused as a write in a read-only transaction.
+        assert [_sqlstate(e) for e in errors] == ["25006"]
+        assert result.documents.status == "unavailable"
+        # The same transaction would see a row the section had kept.
+        assert await _keys_written(db, probe) == 0
+        await db.commit()
+    async with w.factory() as db:
+        assert await _keys_written(db, probe) == 0
+
+
+@pytest.mark.parametrize("section_fails", [True, False], ids=["rolled-back", "released"])
+async def test_read_only_mode_ends_with_the_section(
+    world: World, monkeypatch, section_fails: bool
+) -> None:
+    w = world
+    after = uuid4().hex
+    errors: list[DBAPIError] = []
+    if section_fails:
+        monkeypatch.setattr(
+            stats, "resolve_public_documents", _writing_resolver(w, uuid4().hex, errors)
+        )
+    async with w.factory() as db:
+        result = await _read(db, w)
+        assert result.documents.status == ("unavailable" if section_fails else "ok")
+        assert len(errors) == (1 if section_fails else 0)
+        # Both endings of the section (ROLLBACK and RELEASE of its savepoint)
+        # leave the session's transaction writable.
+        await db.execute(_insert_key(w, after))
+        assert await _keys_written(db, after) == 1
+        await db.rollback()
+    async with w.factory() as db:
+        assert await _keys_written(db, after) == 0
 
 
 async def test_statement_timeout_is_set_in_the_reading_transaction(world: World) -> None:

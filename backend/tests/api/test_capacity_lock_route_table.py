@@ -334,6 +334,8 @@ ROUTES: dict[tuple[str, str], str] = {
     ("DELETE", "/api/v1/resources/{resource_id}/public-mcp"): ALLOWED,
     # #2678: usage event counts and recording health, no memory content
     ("GET", "/api/v1/resources/{resource_id}/public-mcp/usage-health"): ALLOWED,
+    # #3035: usage event counts; document titles and URLs only while the
+    # endpoint itself serves (serving_paused covers the capacity lock)
     ("GET", "/api/v1/resources/{resource_id}/public-mcp/usage-stats"): ALLOWED,
     # #2809: custom domain metadata of the publication (owner only); the alias
     # itself refuses to serve a capacity-locked workspace like the fixed address
