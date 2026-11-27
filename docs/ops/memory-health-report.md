@@ -95,7 +95,7 @@ eternal WARNs (the Phase-1 account-wide window had already aged them out).
 |---|---|---|---|
 | Latest sleep run `status=failed` | **fail** | `latest_sleep_failed` | Total judge death — the #1177 class. |
 | Any `llm_call_failures > 0` in the window | warn | `judge_failures` | Partial judge death grades `degraded`, never a silent `completed` (#1183). |
-| A `degraded` run with zero judge failures | warn | `degraded_runs` | A maintenance phase crashed (graded degraded by #1229's phase-failure rule); the run's error message names the phase. |
+| A `degraded` run with zero judge failures | warn | `degraded_runs` | A maintenance phase failed (`phase_failure: <phase>`, #1229's phase-failure rule), or a phase finished with some failed items (`reindex_partial_failure: N of M reindex operations failed`, #3036); the run's error message names the cause. |
 | A `failed` run in the window with a recovered latest | warn | `failed_runs_recovered` | Recent instability is worth a look even after recovery. |
 | `deferred_pairs > 0` in the window | warn | `deferred_pairs` | Cluster caps deferring candidate pairs unjudged — dedup may be structurally behind (#1184 class). |
 | Oldest `sleep_maintenance` soft-deleted merge loser > 90 days | warn | `merge_backlog_old` | Backlog suggests a retention window is wanted (`sleep_merge_retention_days`, #1209). |
@@ -158,7 +158,7 @@ above is the deep link for operators.
 | Note code | Params |
 |---|---|
 | `latest_sleep_failed` | — |
-| `judge_failures` | `count`, `degraded_runs` (only runs whose own judge failed — phase-crash degraded runs are counted by `degraded_runs` instead) |
+| `judge_failures` | `count`, `degraded_runs` (only runs whose own judge failed — runs degraded by a failed phase or a phase with failed items are counted by `degraded_runs` instead) |
 | `degraded_runs` | `count` |
 | `failed_runs_recovered` | `count` |
 | `deferred_pairs` | `count` |

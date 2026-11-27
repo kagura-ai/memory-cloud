@@ -9,6 +9,8 @@
 - rows with different times keep their newest-first order.
 
 Run on a private database only (``REQUIRE_TEST_DATABASE=1 TEST_DATABASE_URL=...``).
+The tests commit, so each deletes the rows it wrote: later files in the same
+CI shard read whole tables (``sleep_reports``) and expect them empty.
 """
 
 from __future__ import annotations
@@ -18,8 +20,10 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.auth import User
 from models.referral import ReferralGrant
 from models.sleep import SleepReport
 from services.sleep_reporter_service import SleepReporterService
@@ -32,6 +36,26 @@ pytestmark = pytest.mark.asyncio
 T0 = datetime(2033, 3, 1, 12, 0, 0)
 # Seven rows share the newest time, three an older one, one is oldest.
 TIMES = [T0] * 7 + [T0 - timedelta(hours=1)] * 3 + [T0 - timedelta(hours=2)]
+
+# What the running test committed: report ids, grant ids, user ids.
+_committed: dict[str, list] = {"reports": [], "grants": [], "users": []}
+
+
+@pytest.fixture(autouse=True)
+async def _delete_committed_rows(db_session: AsyncSession):
+    """Delete every row the test committed, by its own ids."""
+    for ids in _committed.values():
+        ids.clear()
+    yield
+    await db_session.rollback()
+    await db_session.execute(delete(SleepReport).where(SleepReport.id.in_(_committed["reports"])))
+    await db_session.execute(
+        delete(ReferralGrant).where(ReferralGrant.id.in_(_committed["grants"]))
+    )
+    await db_session.execute(delete(User).where(User.user_id.in_(_committed["users"])))
+    await db_session.commit()
+    for ids in _committed.values():
+        ids.clear()
 
 
 def _expected(rows: list[tuple[datetime, UUID]]) -> list[str]:
@@ -63,6 +87,7 @@ async def test_sleep_report_pages_return_each_row_once_with_ties_in_id_order(
     reports = [
         SleepReport(id=uuid4(), user_id=user_id, started_at=at, status="completed") for at in TIMES
     ]
+    _committed["reports"].extend(r.id for r in reports)
     db_session.add_all(reports)
     await db_session.commit()
     expected = _expected([(r.started_at, r.id) for r in reports])
@@ -95,12 +120,11 @@ async def test_workspace_sleep_report_pages_share_the_order(db_session: AsyncSes
         for at in TIMES
     ]
     # Another workspace's report at the same time never shows up.
-    db_session.add_all(
-        [
-            *reports,
-            SleepReport(user_id="other", workspace_id=uuid4(), started_at=T0, status="completed"),
-        ]
+    other = SleepReport(
+        id=uuid4(), user_id="other", workspace_id=uuid4(), started_at=T0, status="completed"
     )
+    _committed["reports"].extend([*(r.id for r in reports), other.id])
+    db_session.add_all([*reports, other])
     await db_session.commit()
     expected = _expected([(r.started_at, r.id) for r in reports])
 
@@ -121,6 +145,7 @@ async def test_referral_pages_return_each_row_once_with_ties_in_id_order(
 ) -> None:
     referrer = make_user(name="Tiebreak Referrer")
     referred = [make_user(name=f"Tiebreak Referred {i}") for i in range(len(TIMES))]
+    _committed["users"].extend(user.user_id for user in [referrer, *referred])
     db_session.add_all([referrer, *referred])
     await db_session.flush()
     grants = [
@@ -134,6 +159,7 @@ async def test_referral_pages_return_each_row_once_with_ties_in_id_order(
         )
         for user, at in zip(referred, TIMES, strict=True)
     ]
+    _committed["grants"].extend(g.id for g in grants)
     db_session.add_all(grants)
     await db_session.commit()
     expected = _expected([(g.granted_at, g.id) for g in grants])

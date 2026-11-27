@@ -43,6 +43,16 @@ from models.memory import (
 from repositories.memory import MemoryRepository
 from services.graph_service import GraphService
 from services.llm_service import LLMService, billed_usage
+from services.sleep.coverage import (
+    BUDGET,
+    FAILURE,
+    PASSED,
+    SETTLED,
+    JudgeCoverage,
+    LaneEntry,
+    rotate,
+    sweep_key,
+)
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     CONSOLIDATION_JUDGE_SYSTEM,
@@ -55,6 +65,7 @@ from services.sleep.reporter import (
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
+    phase_outcome,
 )
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -103,18 +114,33 @@ class _ConsolidationTally:
     # #3019: borderline memories the judge never saw because the phase's LLM
     # calls ran out (0 when the pass finished or did not run).
     llm_unjudged: int = 0
+    # #3019: borderline memories in a batch the judge answered without
+    # promoting them, and in a batch whose call failed.
+    llm_kept: int = 0
+    llm_failed: int = 0
 
 
 class ConsolidationPhase(LLMSpendTracker):
     """Consolidate working memories with optional LLM judgment."""
 
     def __init__(
-        self, db: AsyncSession, llm_service: LLMService, collection_name: str | None = None
+        self,
+        db: AsyncSession,
+        llm_service: LLMService,
+        collection_name: str | None = None,
+        *,
+        coverage: LaneEntry | None = None,
     ):
         self.db = db
         self.llm_service = llm_service
         self.memory_repo = MemoryRepository(db)
         self.collection_name = collection_name or "kagura_memories"
+        # #3019: where the judge stopped last run (None: a first run), and the
+        # rows it saw this run with their outcomes, which the orchestrator turns
+        # into the next position. None when the judge did not run.
+        self._judge_entry = coverage or LaneEntry()
+        self.coverage_outcome: JudgeCoverage | None = None
+        self._judge_marks: dict[UUID, str] = {}
         # #1183: judge-failure counter (init here so the LLM judge helper can
         # be unit-tested without execute()).
         self._llm_failures: int = 0
@@ -122,6 +148,9 @@ class ConsolidationPhase(LLMSpendTracker):
         # dedup phase established the pattern in #475).
         self._tokens_used: int = 0
         self._llm_breakdown: LLMCallBreakdown | None = None
+        # #3019: promotions the statement skipped (a row promoted, forgotten
+        # or pinned since the fetch; see _promote_and_record).
+        self._promotion_skipped: int = 0
 
     @staticmethod
     def _should_promote(
@@ -225,6 +254,7 @@ class ConsolidationPhase(LLMSpendTracker):
         if not to_promote:
             return 0
         promoted = await self.memory_repo.bulk_promote_to_persistent(list(to_promote))
+        self._promotion_skipped += len(to_promote) - len(promoted)  # #3019
         for memory_id in promoted:
             memory, age_days = to_promote[memory_id]
             result.changed_memory_ids.add(memory_id)
@@ -259,10 +289,15 @@ class ConsolidationPhase(LLMSpendTracker):
 
         The judge answers promote or keep; a kept memory stays working. When
         the phase's LLM calls run out, the rest is left unjudged and counted
-        in ``tally.llm_unjudged`` (#3019).
+        in ``tally.llm_unjudged`` (#3019). ``_judge_marks`` records, per row,
+        whether its batch was answered, failed or not reached.
         """
+        self._judge_marks = {}
         for batch_start in range(0, len(borderline), BATCH_SIZE):
             if not budget.can_afford(llm_calls=1):
+                self._judge_marks.update(
+                    dict.fromkeys((m.id for m in borderline[batch_start:]), BUDGET)
+                )
                 tally.llm_unjudged = len(borderline) - batch_start
                 logger.info(
                     "consolidation_llm_pass_cut_for_budget",
@@ -272,9 +307,16 @@ class ConsolidationPhase(LLMSpendTracker):
                 break
 
             batch = borderline[batch_start : batch_start + BATCH_SIZE]
+            failures_before = self._llm_failures
             decisions = await self._llm_judge_batch(
                 batch, user_id, context_id, workspace_id, budget, config
             )
+            if self._llm_failures > failures_before:
+                tally.llm_failed += len(batch)
+                self._judge_marks.update(dict.fromkeys((m.id for m in batch), FAILURE))
+            else:
+                tally.llm_kept += sum(1 for m in batch if decisions.get(m.id) != "promote")
+                self._judge_marks.update(dict.fromkeys((m.id for m in batch), SETTLED))
 
             batch_map = {m.id: m for m in batch}
             to_promote: dict[UUID, tuple[Memory, int]] = {}
@@ -313,11 +355,13 @@ class ConsolidationPhase(LLMSpendTracker):
         self._llm_failures = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
+        self._promotion_skipped = 0
+        self.coverage_outcome = None
 
         # Fetch working memories
         working = await self._fetch_working_memories(user_id, workspace_id, context_id)
         if not working:
-            result.details = {"message": "no_working_memories"}
+            result.details = {"message": "no_working_memories", **phase_outcome(0)}
             return result
 
         # Get neural metrics
@@ -351,6 +395,15 @@ class ConsolidationPhase(LLMSpendTracker):
             config.sleep_llm_provider != ""
         )
         if borderline and llm_enabled:
+            # #3019: the judge continues where it stopped: the borderline rows
+            # in (created_at, id) order, from after its position, wrapping.
+            # Promotion rules are unchanged; only the order the judge sees
+            # them in is.
+            borderline = rotate(borderline, self._judge_entry.position)
+            self.coverage_outcome = JudgeCoverage(
+                keys=[sweep_key(m) for m in borderline],
+                outcomes=dict.fromkeys((m.id for m in borderline), FAILURE),
+            )
             await self._llm_pass(
                 borderline,
                 config=config,
@@ -363,6 +416,14 @@ class ConsolidationPhase(LLMSpendTracker):
                 reporter=reporter,
                 report_id=report_id,
             )
+            # A failed batch's rows pass when another batch answered in this
+            # run (the failure was theirs); with none answered they hold the
+            # position (an outage).
+            answered = SETTLED in self._judge_marks.values()
+            self.coverage_outcome.outcomes = {
+                mid: (PASSED if answered else FAILURE) if mark == FAILURE else mark
+                for mid, mark in self._judge_marks.items()
+            }
 
         result.memories_processed = len(working)
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -382,6 +443,17 @@ class ConsolidationPhase(LLMSpendTracker):
             "llm_archived": 0,
             "llm_archive_guarded": 0,
             "llm_call_failures": self._llm_failures,  # #1183
+            **phase_outcome(
+                len(working),
+                {
+                    "judge_off": 0 if llm_enabled else len(borderline),
+                    "kept_by_judge": tally.llm_kept,
+                    "judge_failed": tally.llm_failed,
+                    "not_judged_budget": tally.llm_unjudged,
+                    "changed_since_fetch": self._promotion_skipped,
+                },
+                budget_cut=tally.llm_unjudged > 0,
+            ),
         }
 
         logger.info(

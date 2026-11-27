@@ -808,11 +808,12 @@ class MemoryHealthService:
             status = STATUS_FAIL
             notes.append(_note("latest_sleep_failed"))
         else:
-            # #1229: 'degraded' has two independent causes — a partially dead
-            # judge (#1183) and a phase crash with a healthy judge. One window
-            # can hold both, so the notes are independent (an elif hid the
-            # phase crash behind the judge note) and each counts only its own
-            # runs.
+            # #1229: 'degraded' has independent causes — a partially dead
+            # judge (#1183), and with a healthy judge a phase that failed or a
+            # phase that finished with failed items (a partial reindex,
+            # #3036). One window can hold both kinds, so the notes are
+            # independent (an elif hid the phase failure behind the judge
+            # note) and each counts only its own runs.
             judge_degraded = sum(
                 1 for r in window if r["status"] == "degraded" and r["llm_call_failures"] > 0
             )
@@ -824,8 +825,9 @@ class MemoryHealthService:
                     _note("judge_failures", count=total_failures, degraded_runs=judge_degraded)
                 )
             if degraded - judge_degraded > 0:
-                # Phase-crash degraded runs — blaming the judge here sent
-                # operators to the wrong config. Distinct note code.
+                # Runs degraded by a failed phase or a phase with failed items
+                # (the run's error message names which) — blaming the judge
+                # here sent operators to the wrong config. Distinct note code.
                 status = STATUS_WARN
                 notes.append(_note("degraded_runs", count=degraded - judge_degraded))
             if failed > 0:

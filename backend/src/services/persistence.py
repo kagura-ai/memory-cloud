@@ -39,7 +39,8 @@ DELIBERATELY NOT CLAIMED — this is not a retention SLA:
   adoption gate**: a pair at or above ``SLEEP_DEDUP_SIMILARITY_THRESHOLD``
   cosine (default 0.92) that the LLM judge calls a duplicate, or, when no judge
   runs, a pair at or above 0.98 (``AUTO_MERGE_THRESHOLD``).
-  ``_fetch_active_memories`` selects on user/workspace/context,
+  ``dedup_eligible`` (the one rule for the rows dedup reads, compares as
+  neighbours and merges) selects on user/workspace/context,
   ``deleted_at IS NULL`` and the lane exemptions only
   (``delivery_mode='always'`` rows never enter candidacy, #1519, and since
   #1523 the same predicate exempts them from importance re-evaluation too —
@@ -49,7 +50,9 @@ DELIBERATELY NOT CLAIMED — this is not a retention SLA:
   which are persistent from creation and whose lifecycle belongs to their
   source). An unpinned, non-time memory written minutes ago can lose a merge
   the same night (its tags and edges transfer to the winner, but its id stops
-  resolving), which is why the detail text names the merge next to forget().
+  resolving), and since #3019 a memory of any age can lose a merge to a newly
+  written near-duplicate (a search hit outside the night's window is compared
+  too), which is why the detail text names the merge next to forget().
 * ``forget()`` and account erasure remove memories on demand.
 """
 

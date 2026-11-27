@@ -504,12 +504,16 @@ def _requeued_by_switch(requeue_since: datetime) -> ColumnElement[bool]:
     """The live rows :func:`switch_context_embedding` re-queues with ``requeue_since``:
     not embedded successfully, written since, or embedded since under the old
     routing (``embedding_attempted_at``: a Sleep undo or rollback restoring a
-    row the re-embed skipped as a tombstone, #2063, or an embedding run)."""
+    row the re-embed skipped as a tombstone, #2063, or an embedding run), or
+    re-evaluated since (#3019: Sleep's importance re-evaluation writes
+    ``importance_reevaluated_at``, not ``updated_at``; without this arm the new
+    collection's point would keep the old importance)."""
     return or_(
         Memory.embedding_status != "success",
         Memory.created_at >= requeue_since,
         Memory.updated_at >= requeue_since,
         Memory.embedding_attempted_at >= requeue_since,
+        Memory.importance_reevaluated_at >= requeue_since,
     )
 
 
@@ -520,7 +524,8 @@ def _left_by_switch(requeue_since: datetime) -> ColumnElement[bool]:
     ``updated_at >= since`` is NULL for it, so the switch leaves such a row
     alone; a plain ``updated_at < since`` would drop it from this side too.
     ``embedding_attempted_at`` is nullable in the same way (a row written
-    before #1852, or never stamped). ``embedding_status`` and ``created_at``
+    before #1852, or never stamped), and so is ``importance_reevaluated_at``
+    (#3019: a row never re-evaluated). ``embedding_status`` and ``created_at``
     are NOT NULL.
     """
     return and_(
@@ -530,6 +535,10 @@ def _left_by_switch(requeue_since: datetime) -> ColumnElement[bool]:
         or_(
             Memory.embedding_attempted_at.is_(None),
             Memory.embedding_attempted_at < requeue_since,
+        ),
+        or_(
+            Memory.importance_reevaluated_at.is_(None),
+            Memory.importance_reevaluated_at < requeue_since,
         ),
     )
 

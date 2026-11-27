@@ -40,6 +40,9 @@ import {
 import {
   buildHeadline,
   buildJudgeFailureNote,
+  budgetPhaseLabelKey,
+  buildBudgetCutNote,
+  buildBudgetNote,
   buildPhaseNarrative,
   type PhaseName,
 } from "@/lib/utils/sleep-narrative";
@@ -154,6 +157,15 @@ export function SleepReportDetailView({
         },
         report,
       );
+
+  // #3019: the phases this run's budget skipped or cut, per kind.
+  const budgetLines = isAnalysis
+    ? []
+    : buildBudgetNote(report.budget_limited_phases);
+  const phaseLabel = (phase: string) => {
+    const key = budgetPhaseLabelKey(phase);
+    return key ? t(key) : phase;
+  };
 
   const relativeStarted = formatRelativeTime(report.started_at, locale);
   const duration = formatDuration(report.started_at, report.completed_at);
@@ -289,6 +301,21 @@ export function SleepReportDetailView({
             <CardTitle>{t("detail.phaseResults")}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
+            {budgetLines.length > 0 && (
+              <div
+                role="status"
+                data-testid="sleep-report-budget-note"
+                className="rounded border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300"
+              >
+                {budgetLines.map((line) => (
+                  <div key={line.key}>
+                    {t(line.key, {
+                      phases: line.phases.map(phaseLabel).join(", "),
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
             {isAnalysis && (
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 {t("detail.analysisNoPhases")}
@@ -297,6 +324,7 @@ export function SleepReportDetailView({
             {!isAnalysis && phaseResults.map(({ key, result }) => {
               const narrative = buildPhaseNarrative(key, result);
               const judgeNote = buildJudgeFailureNote(result);
+              const budgetNote = buildBudgetCutNote(result);
               return (
                 <details
                   key={key}
@@ -316,6 +344,11 @@ export function SleepReportDetailView({
                       {judgeNote && (
                         <div className="text-xs text-yellow-700 dark:text-yellow-400 truncate">
                           {t(judgeNote.key, judgeNote.values)}
+                        </div>
+                      )}
+                      {budgetNote && (
+                        <div className="text-xs text-yellow-700 dark:text-yellow-400 truncate">
+                          {t(budgetNote.key, budgetNote.values)}
                         </div>
                       )}
                     </div>

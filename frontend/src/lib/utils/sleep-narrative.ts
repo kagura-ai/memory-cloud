@@ -265,6 +265,77 @@ export function buildPhaseNarrative(
 }
 
 /**
+ * #3019: the message key of each phase name the API can report in
+ * `budget_limited_phases` (the four phases that call a model and the related
+ * index). Any other name has no label and is shown as it is.
+ */
+const BUDGET_PHASE_LABEL_KEYS: Record<string, string> = {
+  edge_discovery: "budget.phases.edgeDiscovery",
+  related_index: "budget.phases.relatedIndex",
+  dedup_merge: "budget.phases.dedup",
+  importance_reeval: "budget.phases.importance",
+  consolidation: "budget.phases.consolidation",
+};
+
+/** The label key of a budget-limited phase name, or null to show it raw. */
+export function budgetPhaseLabelKey(phase: string): string | null {
+  return Object.prototype.hasOwnProperty.call(BUDGET_PHASE_LABEL_KEYS, phase)
+    ? BUDGET_PHASE_LABEL_KEYS[phase]
+    : null;
+}
+
+export interface BudgetNoteLine {
+  key: string;
+  /** Phase names in run order; label them with `budgetPhaseLabelKey`. */
+  phases: string[];
+}
+
+/**
+ * Build the run-level budget note (#3019): one line per kind present in
+ * `budget_limited_phases`, the skipped phases first, each naming its phases
+ * in run order. Returns [] when the map is empty or absent (older reports).
+ */
+export function buildBudgetNote(
+  limited: Record<string, string> | null | undefined,
+): BudgetNoteLine[] {
+  if (!limited) return [];
+  const entries = Object.entries(limited);
+  const lines: BudgetNoteLine[] = [];
+  const skipped = entries.filter(([, kind]) => kind === "skipped");
+  const cut = entries.filter(([, kind]) => kind === "cut");
+  if (skipped.length > 0) {
+    lines.push({
+      key: "detail.narrative.budgetSkipped",
+      phases: skipped.map(([phase]) => phase),
+    });
+  }
+  if (cut.length > 0) {
+    lines.push({
+      key: "detail.narrative.budgetCut",
+      phases: cut.map(([phase]) => phase),
+    });
+  }
+  return lines;
+}
+
+/**
+ * Build the budget sub-note for a phase card (#3019): the phase stopped
+ * because its budget ran out, with work left. Reads `budget_cut`, or the
+ * consolidation judge's `llm_pass_cut_for_budget` on older reports. Returns
+ * null otherwise.
+ */
+export function buildBudgetCutNote(
+  result: NarrativePhaseResult | null,
+): Narrative | null {
+  const d = result?.details;
+  if (!d) return null;
+  if (d.budget_cut === true || d.llm_pass_cut_for_budget === true) {
+    return { key: "detail.narrative.budgetCutPhase", values: {} };
+  }
+  return null;
+}
+
+/**
  * Build the judge-failure sub-note for a phase card (#1183 / #1190).
  *
  * A phase whose judge-LLM calls partially failed still renders a plain

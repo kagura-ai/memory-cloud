@@ -26,7 +26,7 @@ from services.sleep.dedup_merge import (
     DedupMergePhase,
     UnionFind,
 )
-from services.sleep.reporter import SleepBudget
+from services.sleep.reporter import SleepBudget, phase_outcome
 from utils.datetime import utcnow
 
 # ---------------------------------------------------------------------------
@@ -58,6 +58,11 @@ def dedup_phase(mock_db, mock_llm):
     # scope; mock-db tests pass non-UUID scope strings, so stub it like the
     # candidate fetch. Real-DB coverage lives in test_count_pinned_*.
     phase._count_pinned = AsyncMock(return_value=0)
+    # #3019: the same for the two reads of rows outside the window: by default
+    # no search hit outside the fetched set is eligible and none loads.
+    # Real-DB coverage lives in TestOutsideRowsRealDB.
+    phase._eligible_outside_ids = AsyncMock(return_value=set())
+    phase._load_cluster_members = AsyncMock(return_value=[])
     return phase
 
 
@@ -220,19 +225,24 @@ class TestUnionFindInternals:
 class TestFindSimilarPairs:
     """Hit-filtering, self-skip, out-of-set skip, dedup, exception swallow."""
 
-    async def test_skips_self_and_unknown_hits_keeps_valid_pair(self, dedup_phase):
+    async def test_skips_self_and_ineligible_hits_keeps_valid_pairs(self, dedup_phase):
+        """#3019: a hit outside the fetched set joins when the eligibility check
+        returns it, and is dropped and counted when it does not."""
         a = _make_memory(summary="alpha")
         b = _make_memory(summary="beta")
-        stranger = uuid4()  # not in the memory set → must be skipped
+        stranger = uuid4()  # not eligible (pinned, other context, ...) → skipped
+        older = uuid4()  # an eligible row outside the window → kept
+        dedup_phase._eligible_outside_ids = AsyncMock(return_value={older})
         dedup_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1] * 8, 5))
         dedup_phase.embedding_service.provider = "openai"
         dedup_phase.embedding_service.model = "text-embedding-3-small"
 
         def fake_search(**kwargs):
             return [
-                {"id": str(a.id), "score": 0.99},  # self-hit → skipped
-                {"id": str(stranger), "score": 0.95},  # not in set → skipped
+                {"id": str(a.id), "score": 0.99},  # self-hit for a → skipped
+                {"id": str(stranger), "score": 0.95},  # not eligible → skipped
                 {"id": str(b.id), "score": 0.97},  # valid neighbour
+                {"id": str(older), "score": 0.93},  # eligible outside row
             ]
 
         with patch(
@@ -241,12 +251,11 @@ class TestFindSimilarPairs:
         ):
             pairs = await dedup_phase._find_similar_pairs([a, b], "u", "ws", "ctx", threshold=0.9)
 
-        # Only (a, b) survives. b's own search returns the same list, but the
-        # canonical sorted key dedups the reverse pair.
-        assert len(pairs) == 1
-        ida, idb, score = pairs[0]
-        assert {ida, idb} == {a.id, b.id}
-        assert score == 0.97
+        # (a, b) once — b's own search returns it reversed and the canonical key
+        # dedups it — plus each window row's pair with the eligible outside row.
+        assert pairs == [(a.id, b.id, 0.97), (a.id, older, 0.93), (b.id, older, 0.93)]
+        assert set(dedup_phase._eligible_outside_ids.await_args.args[0]) == {stranger, older}
+        assert dedup_phase._search_reasons()["neighbour_not_eligible"] == 2
 
     async def test_exception_per_memory_is_swallowed_and_continues(self, dedup_phase):
         """A failing embed for one memory is logged, not raised; others proceed."""
@@ -472,36 +481,63 @@ class TestLLMJudge:
 
 
 class TestLLMJudgeRecency:
-    """#1195: the judge deleted the NEWER fact of an update pair in 10-18% of
-    judged pairs because it never saw timestamps and had no update-pair winner
-    rule. The prompt must carry created_at and an explicit newer-wins rule."""
+    """#1195: the judge sometimes deleted the NEWER fact of an update pair
+    because it never saw timestamps and had no update-pair winner rule. The
+    prompt must carry each memory's recency and an explicit newer-wins rule."""
 
     async def test_prompt_includes_last_updated(self, dedup_phase):
         # Summaries deliberately carry NO dates: the asserts below must be
         # satisfiable only by the trusted last_updated= metadata rendering
         # (PR #1198 review: a date in the summary would mask a dropped field).
-        # mem_b was edited in place (created_at preserved, updated_at bumped):
-        # the prompt must show max(created_at, updated_at), minute precision.
+        # mem_b's text was edited in place (created_at preserved, the edit in
+        # the revision log): the prompt shows the edit time, minute precision.
+        # mem_c was only stamped (updated_at moved, version 1): the prompt
+        # shows its creation time (#3019).
+        from types import SimpleNamespace
+
         mem_a = _make_memory(summary="deploy target is blue")
         mem_a.created_at = datetime(2026, 6, 1, 9, 0)
         mem_a.updated_at = datetime(2026, 6, 1, 9, 0)
+        mem_a.version = 1
         mem_b = _make_memory(summary="deploy target is green")
         mem_b.created_at = datetime(2026, 6, 15, 8, 0)
         mem_b.updated_at = datetime(2026, 7, 1, 15, 30)
+        mem_b.version = 2
+        mem_c = _make_memory(summary="deploy target is red")
+        mem_c.created_at = datetime(2026, 5, 2, 7, 0)
+        mem_c.updated_at = datetime(2026, 7, 20, 10, 45)
+        mem_c.version = 1
         scores = {tuple(sorted([mem_a.id, mem_b.id], key=str)): 0.96}
         dedup_phase.llm_service.complete_json = AsyncMock(
             return_value=_make_llm_response({"judgments": []})
         )
         dedup_phase._tokens_used = 0
         dedup_phase._llm_breakdown = None
+        revisions = MagicMock()
+        revisions.all.return_value = [
+            SimpleNamespace(
+                memory_id=mem_b.id,
+                version=2,
+                writer="api",
+                at=datetime(2026, 7, 1, 15, 30),
+                text=True,
+                restored_from=None,
+            )
+        ]
+        dedup_phase.db.begin_nested = MagicMock(return_value=AsyncMock())
+        dedup_phase.db.execute = AsyncMock(return_value=revisions)
 
+        await dedup_phase._load_text_edit_times([mem_a, mem_b, mem_c])
         await dedup_phase._llm_judge(
-            [mem_a, mem_b], scores, "u", "ctx", "ws", SleepBudget(), _make_config()
+            [mem_a, mem_b, mem_c], scores, "u", "ctx", "ws", SleepBudget(), _make_config()
         )
 
         prompt = dedup_phase.llm_service.complete_json.call_args.kwargs["prompt"]
         assert "last_updated=2026-06-01 09:00" in prompt
         assert "last_updated=2026-07-01 15:30" in prompt
+        assert "last_updated=2026-05-02 07:00" in prompt
+        assert "2026-07-20 10:45" not in prompt
+        assert dedup_phase.db.execute.await_count == 1
 
     def test_system_prompt_has_newer_wins_rule(self):
         from services.sleep.prompts import DEDUP_JUDGE_SYSTEM
@@ -692,18 +728,19 @@ class TestExecuteMergeRealDB:
 
 
 class TestFetchActiveMemoriesOrdering:
-    """#1868: ``updated_at`` is NULL until a memory is edited. Ordering the
-    capped candidate fetch on the bare column put every never-edited row ahead
-    of every edited one (PostgreSQL sorts NULLs first under DESC), in no
-    defined order. The fetch orders by ``coalesce(updated_at, created_at)``
-    with ``id`` as the tie-break instead."""
+    """#3019: the window comes from two lanes. The changed lane takes the rows
+    changed since its position, newest by ``coalesce(updated_at, created_at)``
+    (#1868: ``updated_at`` is NULL until a memory is edited), and hands them
+    to the judge oldest first; the sweep takes older rows by ``(created_at,
+    id)``, newest first. Row-value comparisons on ``id`` keep rows that share
+    a timestamp from repeating or being skipped across runs."""
 
-    async def _phase_for_db(self, db_session):
+    async def _phase_for_db(self, db_session, lanes=None):
         with (
             patch("services.sleep.dedup_merge.NeuralEdgeRepository"),
             patch("services.sleep.dedup_merge.EmbeddingService"),
         ):
-            return DedupMergePhase(db_session, AsyncMock())
+            return DedupMergePhase(db_session, AsyncMock(), coverage=lanes)
 
     @staticmethod
     async def _add(db_session, user_id, *, created_days_ago, updated_days_ago=None):
@@ -727,29 +764,40 @@ class TestFetchActiveMemoriesOrdering:
         await db_session.flush()
         return mem
 
-    async def test_never_edited_and_edited_rows_interleave_newest_first(self, db_session):
-        """Above the cap, the kept set is the most recent memories whichever
-        clock made them recent, and the oldest never-edited row is the one cut."""
+    async def test_changed_lane_newest_first_then_the_sweep(self, db_session):
+        """A first run: everything counts as changed. The newest three by either
+        clock are the changed lane (judged oldest first), the next row by
+        ``created_at`` is the sweep's reserved one, and the newest row left out
+        of the changed lane is its floor."""
+        from services.sleep.coverage import changed_key, sweep_key
+
         user_id = f"dedup-order-{uuid4()}"
         never_1d = await self._add(db_session, user_id, created_days_ago=1)
         edited_2d = await self._add(db_session, user_id, created_days_ago=30, updated_days_ago=2)
         never_3d = await self._add(db_session, user_id, created_days_ago=3)
         edited_4d = await self._add(db_session, user_id, created_days_ago=40, updated_days_ago=4)
         never_5d = await self._add(db_session, user_id, created_days_ago=5)
-        never_6d = await self._add(db_session, user_id, created_days_ago=6)
+        await self._add(db_session, user_id, created_days_ago=6)
         phase = await self._phase_for_db(db_session)
 
         first = await phase._fetch_active_memories(user_id, None, None, limit=4)
+        window = phase.coverage_outcome
         second = await phase._fetch_active_memories(user_id, None, None, limit=4)
 
-        expected = [never_1d.id, edited_2d.id, never_3d.id, edited_4d.id]
+        expected = [never_3d.id, edited_2d.id, never_1d.id, never_5d.id]
         assert [m.id for m in first] == expected
         assert [m.id for m in second] == expected
-        assert never_5d.id not in expected and never_6d.id not in expected
+        assert window.changed == [changed_key(m) for m in (never_3d, edited_2d, never_1d)]
+        assert window.sweep == [sweep_key(never_5d)]
+        assert window.floor == changed_key(edited_4d)
+        assert window.exhausted is False
 
-    async def test_equal_timestamps_break_ties_on_id(self, db_session):
-        """Rows sharing a timestamp (a bulk import) come back in a defined
-        order, so the capped subset is the same on every run."""
+    async def test_equal_timestamps_neither_repeat_nor_skip_across_runs(self, db_session):
+        """Six rows of one import share ``created_at``: the first window takes
+        four of them in ``id`` order, and the positions it leaves give the next
+        window exactly the other two."""
+        from services.sleep.coverage import SETTLED, DedupLanes, advance_dedup
+
         user_id = f"dedup-order-{uuid4()}"
         stamp = utcnow() - timedelta(days=2)
         ids = []
@@ -769,12 +817,41 @@ class TestFetchActiveMemoriesOrdering:
             db_session.add(mem)
             ids.append(mem.id)
         await db_session.flush()
+        # PostgreSQL orders uuid by its bytes, which is the order of the hex text.
+        descending = sorted(ids, key=lambda i: i.hex, reverse=True)
+
         phase = await self._phase_for_db(db_session)
+        first = await phase._fetch_active_memories(user_id, None, None, limit=4)
+        assert [m.id for m in first] == [*reversed(descending[:3]), descending[3]]
+
+        window = phase.coverage_outcome
+        window.outcomes = dict.fromkeys(window.outcomes, SETTLED)
+        lanes, _ = advance_dedup(DedupLanes(), window, returned=True, now=utcnow())
+        phase = await self._phase_for_db(db_session, lanes)
+        second = await phase._fetch_active_memories(user_id, None, None, limit=4)
+
+        assert [m.id for m in second] == descending[4:]
+        assert phase.coverage_outcome.changed == []
+        assert phase.coverage_outcome.exhausted is True
+
+    async def test_an_edit_puts_an_old_row_in_the_changed_lane(self, db_session):
+        from services.sleep.coverage import LaneEntry, changed_key
+
+        user_id = f"dedup-order-{uuid4()}"
+        rows = [await self._add(db_session, user_id, created_days_ago=d) for d in (10, 9, 8)]
+        edited = await self._add(db_session, user_id, created_days_ago=50, updated_days_ago=1)
+        position = changed_key(rows[2])
+        from services.sleep.coverage import DedupLanes
+
+        lanes = DedupLanes(changed=LaneEntry(at=position[0], id=position[1]))
+        phase = await self._phase_for_db(db_session, lanes)
 
         fetched = await phase._fetch_active_memories(user_id, None, None, limit=4)
 
-        # PostgreSQL orders uuid by its bytes, which is the order of the hex text.
-        assert [m.id for m in fetched] == sorted(ids, key=lambda i: i.hex, reverse=True)[:4]
+        assert phase.coverage_outcome.changed == [changed_key(edited)]
+        assert phase.coverage_outcome.floor is None
+        assert [m.id for m in fetched][0] == edited.id
+        assert {m.id for m in fetched[1:]} == {m.id for m in rows}
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +1015,52 @@ class TestPinRecheckAtExecution:
 
         assert executed is False
         phase.edge_repo.transfer_edges.assert_not_called()
+
+    @pytest.mark.parametrize("side", ["winner", "loser"])
+    @pytest.mark.parametrize("shadow", [False, True], ids=["remove", "shadow"])
+    async def test_a_row_edited_after_the_fetch_is_refused(self, db_session, side, shadow):
+        """#3019: an edit made while the judge ran moves the row's version. The
+        judge compared the text it fetched, so the locked re-check refuses the
+        pair in both modes and nothing is written."""
+        from sqlalchemy import text
+
+        winner = await _make_db_memory(db_session, summary="w", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="l", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        edited = winner if side == "winner" else loser
+        # Another session's update_memory; this session's object keeps the
+        # version it was fetched with.
+        await db_session.execute(
+            text("UPDATE memories SET summary = 'edited', version = version + 1 WHERE id = :id"),
+            {"id": edited.id},
+        )
+        assert edited.version == 1
+
+        with patch(
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
+            if shadow:
+                executed, _ = await phase._execute_shadow_merge(
+                    winner, loser, "dedup-user", None, None
+                )
+            else:
+                executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        rows = (
+            await db_session.execute(
+                select(Memory.id, Memory.deleted_at, Memory.tags).where(
+                    Memory.id.in_([winner.id, loser.id])
+                )
+            )
+        ).all()
+        assert {row.id: (row.deleted_at, list(row.tags)) for row in rows} == {
+            winner.id: (None, ["a"]),
+            loser.id: (None, ["b"]),
+        }
+        queue.assert_not_called()
+        phase.edge_repo.transfer_edges.assert_not_called()
+        phase.edge_repo.create_or_update_edge.assert_not_called()
 
     async def test_unpinned_pair_still_merges_in_both_modes(self, db_session):
         winner = await _make_db_memory(db_session, summary="w", tags=["a"])
@@ -1203,11 +1326,24 @@ class TestExecuteEarlyReturns:
         assert result.skipped is True
         assert result.skip_reason == "dedup_disabled"
 
-    async def test_fewer_than_two_memories_returns_not_enough(self, dedup_phase):
+    async def test_an_empty_window_returns_not_enough(self, dedup_phase):
+        config = _make_config()
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[])
+        result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
+        assert result.details == {
+            "message": "not_enough_memories",
+            "count": 0,
+            **phase_outcome(0),
+        }
+
+    async def test_one_window_row_is_searched(self, dedup_phase):
+        """#3019: its neighbours can be anywhere in the context."""
         config = _make_config()
         dedup_phase._fetch_active_memories = AsyncMock(return_value=[_make_memory()])
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=[])
         result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
-        assert result.details == {"message": "not_enough_memories", "count": 1}
+        dedup_phase._find_similar_pairs.assert_awaited_once()
+        assert result.details == {"message": "no_duplicate_candidates", **phase_outcome(1)}
 
     async def test_no_candidate_pairs_returns_message(self, dedup_phase):
         config = _make_config()
@@ -1216,7 +1352,7 @@ class TestExecuteEarlyReturns:
         )
         dedup_phase._find_similar_pairs = AsyncMock(return_value=[])
         result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
-        assert result.details == {"message": "no_duplicate_candidates"}
+        assert result.details == {"message": "no_duplicate_candidates", **phase_outcome(2)}
 
     async def test_no_candidate_pairs_still_reports_the_embedding_spend(self, dedup_phase):
         """#2060: the candidate search embeds before finding no pairs; that
@@ -1237,7 +1373,7 @@ class TestExecuteEarlyReturns:
 
         result = await dedup_phase.execute(config, "u", "ws", "ctx", SleepBudget())
 
-        assert result.details == {"message": "no_duplicate_candidates"}
+        assert result.details == {"message": "no_duplicate_candidates", **phase_outcome(2)}
         assert result.embedding_calls_used == 2
         assert result.embedding_tokens == 300
         assert result.embedding_model == "text-embedding-3-small"
@@ -1876,3 +2012,157 @@ class TestArchiveExemptLoserRealDB:
         queue.assert_awaited_once_with(db_session, [entry])
         assert phase.pending_point_deletes == [entry]
         assert set((await _row_state(other.id)).tags) == {"tech-debt", "area:sleep", "status:done"}
+
+
+# ---------------------------------------------------------------------------
+# #3019: rows outside the window (real db_session)
+# ---------------------------------------------------------------------------
+
+
+class TestOutsideRowsRealDB:
+    """The neighbour check and the member load apply the window's exclusions
+    (``dedup_eligible``) plus a successful embedding; the locked recheck also
+    refuses a row that left the partition."""
+
+    async def _phase_for_db(self, db_session):
+        with (
+            patch("services.sleep.dedup_merge.NeuralEdgeRepository"),
+            patch("services.sleep.dedup_merge.EmbeddingService"),
+        ):
+            phase = DedupMergePhase(db_session, AsyncMock())
+        phase.edge_repo = AsyncMock()
+        phase.edge_repo.transfer_edges = AsyncMock(return_value=0)
+        return phase
+
+    async def _partition(self, db_session):
+        from models.auth import Context, Workspace
+
+        user = f"outside-user-{uuid4()}"
+        ws_id, ctx_id, other_ctx_id = uuid4(), uuid4(), uuid4()
+        db_session.add(Workspace(id=ws_id, name="ws", owner_user_id=user))
+        await db_session.flush()
+        db_session.add_all(
+            [
+                Context(id=ctx_id, workspace_id=ws_id, name="ctx"),
+                Context(id=other_ctx_id, workspace_id=ws_id, name="other"),
+            ]
+        )
+        await db_session.flush()
+        return user, ws_id, ctx_id, other_ctx_id
+
+    def _row(self, user, ws_id, ctx_id, **fields) -> Memory:
+        values = {
+            "id": uuid4(),
+            "user_id": user,
+            "summary": "near duplicate",
+            "content": "c",
+            "type": "note",
+            "client": "pytest",
+            "scope": "working",
+            "workspace_id": ws_id,
+            "context_id": ctx_id,
+            "embedding_status": "success",
+            **fields,
+        }
+        return Memory(**values)
+
+    async def test_neighbour_check_and_member_load_apply_the_window_exclusions(self, db_session):
+        from services.resource_indexer import resource_point_id
+
+        user, ws_id, ctx_id, other_ctx_id = await self._partition(db_session)
+        eligible = self._row(user, ws_id, ctx_id)
+        excluded = [
+            self._row(user, ws_id, ctx_id, embedding_status="pending"),
+            self._row(user, ws_id, ctx_id, delivery_mode=DELIVERY_MODE_ALWAYS),
+            self._row(
+                user,
+                ws_id,
+                ctx_id,
+                details={
+                    "tool_trigger": {"tool": "Bash", "on": "pre", "match": "x", "action": "inform"}
+                },
+            ),
+            self._row(
+                user,
+                ws_id,
+                ctx_id,
+                type=MEMORY_TYPE_TIME,
+                details={
+                    "trigger": {
+                        "year": 2026,
+                        "month": 9,
+                        "day": 9,
+                        "from": "2026-09-09T00:00:00",
+                        "until": "2026-09-09T23:59:59",
+                    }
+                },
+            ),
+            self._row(
+                user,
+                ws_id,
+                ctx_id,
+                details={"resource_id": "reports", "doc_id": "doc-1", "version": 2},
+                summary_embedding_id=resource_point_id("reports", "doc-1", 2),
+            ),
+            self._row(user, ws_id, ctx_id, deleted_at=utcnow(), deleted_by="someone"),
+            self._row(f"other-{uuid4()}", ws_id, ctx_id),
+            self._row(user, ws_id, other_ctx_id),
+        ]
+        db_session.add_all([eligible, *excluded])
+        await db_session.flush()
+        ids = [eligible.id, *(m.id for m in excluded), uuid4()]
+
+        phase = await self._phase_for_db(db_session)
+        assert await phase._eligible_outside_ids(ids, user, str(ws_id), str(ctx_id)) == {
+            eligible.id
+        }
+
+        vectors = AsyncMock(return_value={str(eligible.id): [1.0, 0.0]})
+        with patch("services.sleep.dedup_merge.retrieve_dense_vectors", vectors):
+            loaded = await phase._load_cluster_members(ids, user, str(ws_id), str(ctx_id))
+        assert [m.id for m in loaded] == [eligible.id]
+        assert vectors.await_args.args[1] == [str(eligible.id)]
+        assert phase._summary_vectors == {eligible.id: [1.0, 0.0]}
+
+    async def test_a_failed_vector_read_leaves_the_member_without_a_vector(self, db_session):
+        user, ws_id, ctx_id, _ = await self._partition(db_session)
+        row = self._row(user, ws_id, ctx_id)
+        db_session.add(row)
+        await db_session.flush()
+
+        phase = await self._phase_for_db(db_session)
+        with patch(
+            "services.sleep.dedup_merge.retrieve_dense_vectors",
+            AsyncMock(side_effect=RuntimeError("store down")),
+        ):
+            loaded = await phase._load_cluster_members([row.id], user, str(ws_id), str(ctx_id))
+        assert [m.id for m in loaded] == [row.id]
+        assert phase._summary_vectors == {}
+
+    async def test_a_row_moved_to_another_context_after_the_fetch_is_refused(self, db_session):
+        from sqlalchemy import text
+
+        user, ws_id, ctx_id, other_ctx_id = await self._partition(db_session)
+        winner = self._row(user, ws_id, ctx_id, summary="w")
+        loser = self._row(user, ws_id, ctx_id, summary="l")
+        db_session.add_all([winner, loser])
+        await db_session.flush()
+        # Another session moves the loser; this session's object keeps the
+        # context it was fetched with.
+        await db_session.execute(
+            text("UPDATE memories SET context_id = :ctx WHERE id = :id"),
+            {"ctx": other_ctx_id, "id": loser.id},
+        )
+
+        phase = await self._phase_for_db(db_session)
+        with patch(
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
+            executed = await phase._execute_merge(winner, loser, user, str(ws_id), str(ctx_id))
+
+        assert executed is False
+        queue.assert_not_awaited()
+        deleted_at = (
+            await db_session.execute(select(Memory.deleted_at).where(Memory.id == loser.id))
+        ).scalar_one()
+        assert deleted_at is None

@@ -48,6 +48,60 @@ SLEEP_REPORT_PAID_BY_VALUES: tuple[str, ...] = ("platform", "byok")
 # branches in ``services.sleep.orchestrator.SleepOrchestrator.run``.
 SleepMode = Literal["full", "edges_only", "skip"]
 
+# #3019: how a phase's budget limited it in a run. ``skipped``: the phase did
+# not run because its budget was used up at entry. ``cut``: it ran and stopped
+# with work left.
+BudgetLimit = Literal["skipped", "cut"]
+
+# #3019: every phase result a report stores, in run order: (phase, column,
+# key inside that column's blob or None for the blob itself). The related
+# index is stored inside edge_discovery_result and the forget and measurement
+# retention results inside merge_retention_result.
+_PHASE_RESULT_BLOBS: tuple[tuple[str, str, str | None], ...] = (
+    ("edge_discovery", "edge_discovery_result", None),
+    ("related_index", "edge_discovery_result", "related_index"),
+    ("dedup_merge", "dedup_result", None),
+    ("merge_retention", "merge_retention_result", None),
+    ("forget_retention", "merge_retention_result", "forget_retention"),
+    ("measurement_retention", "merge_retention_result", "measurement_retention"),
+    ("importance_reeval", "importance_result", None),
+    ("consolidation", "consolidation_result", None),
+    ("reindex", "reindex_result", None),
+)
+
+
+def budget_limited_phases(report: Any) -> dict[str, BudgetLimit]:
+    """The phases of a run its budget limited, in run order (#3019).
+
+    Derived from the stored phase results, nothing else: ``skipped`` when a
+    phase's blob says ``skipped`` with ``skip_reason == "budget_exhausted"``,
+    ``cut`` when its details say ``budget_cut`` or, on a report written before
+    that key existed, ``llm_pass_cut_for_budget``. A blob that is not a dict
+    is treated as absent, so a report without results gives ``{}``.
+
+    Args:
+        report: A ``SleepReport`` or any object with its result attributes.
+
+    Returns:
+        Phase name to ``"skipped"`` or ``"cut"``; ``{}`` when none was limited.
+    """
+    limited: dict[str, BudgetLimit] = {}
+    for phase, column, key in _PHASE_RESULT_BLOBS:
+        blob = getattr(report, column, None)
+        if key is not None:
+            blob = blob.get(key) if isinstance(blob, dict) else None
+        if not isinstance(blob, dict):
+            continue
+        if blob.get("skipped") is True and blob.get("skip_reason") == "budget_exhausted":
+            limited[phase] = "skipped"
+            continue
+        details = blob.get("details")
+        if isinstance(details, dict) and (
+            details.get("budget_cut") is True or details.get("llm_pass_cut_for_budget") is True
+        ):
+            limited[phase] = "cut"
+    return limited
+
 
 class SleepReport(Base):
     """Sleep Maintenance execution report.
@@ -124,6 +178,13 @@ class SleepReport(Base):
     importance_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
     consolidation_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
     reindex_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
+    # #3019: the positions of the phases that work through the partition in a
+    # stable order (dedup's two lanes, the consolidation judge), as this run
+    # left them (``services.sleep.coverage``). NULL when the run produced no
+    # outcome for either phase; the current state of a partition is that of
+    # its latest report (by ``started_at``) that has one. Memory ids and
+    # timestamps only, no text; not returned by any route or tool.
+    coverage_state: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
 
     # Cost tracking — legacy roll-up totals (#101).
     # Issue #471 split per-(phase, provider, model) LLM usage into the
@@ -228,6 +289,11 @@ class SleepReport(Base):
             text("started_at DESC"),
         ),
     )
+
+    @property
+    def budget_limited_phases(self) -> dict[str, BudgetLimit]:
+        """The phases this run's budget skipped or cut (#3019); see the function."""
+        return budget_limited_phases(self)
 
     def __repr__(self) -> str:
         return (

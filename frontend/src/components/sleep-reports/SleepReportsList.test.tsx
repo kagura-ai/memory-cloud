@@ -135,6 +135,48 @@ describe("SleepReportsList — source (#2219)", () => {
   });
 });
 
+describe("SleepReportsList — budget-limited runs (#3019)", () => {
+  const fetchData = vi.fn();
+
+  beforeEach(() => {
+    fetchData.mockReset();
+  });
+
+  it("marks only a Sleep run whose map is not empty", async () => {
+    fetchData.mockResolvedValue(
+      response([
+        report({
+          id: "r-1",
+          budget_limited_phases: { dedup_merge: "skipped", future: "cut" },
+        }),
+        report({ id: "r-2", budget_limited_phases: {} }),
+        report({ id: "r-3" }),
+        report({
+          id: "r-4",
+          source: "analysis",
+          budget_limited_phases: { consolidation: "cut" },
+        }),
+      ]),
+    );
+    render(
+      <SleepReportsList
+        title="t"
+        description="d"
+        fetchData={fetchData}
+        detailHrefPrefix="/admin/sleep-reports"
+      />,
+    );
+
+    await screen.findAllByTestId("sleep-report-source");
+    const badges = screen.getAllByTestId("sleep-report-budget-limited");
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent("budget.badge");
+    expect(badges[0].getAttribute("title")).toBe(
+      'budget.badgeTitle:{"phases":"budget.phases.dedup, future"}',
+    );
+  });
+});
+
 describe("sleep-reports API client — source (#2219)", () => {
   beforeEach(() => mockApiGet.mockReset());
 

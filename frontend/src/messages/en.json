@@ -3517,7 +3517,10 @@
               "empty": "Nothing to reindex"
             }
           },
-          "headlineAnalysis": "Memory Analysis spend: {calls, plural, one {# LLM call} other {# LLM calls}}, {tokens} tokens"
+          "headlineAnalysis": "Memory Analysis spend: {calls, plural, one {# LLM call} other {# LLM calls}}, {tokens} tokens",
+          "budgetSkipped": "Not run, its budget was used up: {phases}",
+          "budgetCut": "Stopped with work left when its budget ran out: {phases}",
+          "budgetCutPhase": "Stopped when its budget ran out; the rest waits for a later run"
         },
         "analysisNoPhases": "This row records the LLM spend of a Memory Analysis run (cluster labeling). None of the Sleep phases ran, and the labeling phase keeps no per-phase result here: the clusters are on the analysis itself."
       },
@@ -3536,6 +3539,17 @@
         "runConflict": "A sleep run is already in progress.",
         "runConflictViewLink": "View the running report",
         "runError": "Failed to start sleep run."
+      },
+      "budget": {
+        "badge": "Budget-limited",
+        "badgeTitle": "Limited by its budget: {phases}",
+        "phases": {
+          "edgeDiscovery": "Edge Discovery",
+          "relatedIndex": "Related index",
+          "dedup": "Deduplication",
+          "importance": "Importance Re-evaluation",
+          "consolidation": "Consolidation"
+        }
       }
     },
     "environment": {
@@ -4180,7 +4194,7 @@
     "notes": {
       "latest_sleep_failed": "The latest sleep run failed: the model that compares memories did not answer, so nothing was merged. If the next run fails too, check the sleep setting of this context or ask your administrator.",
       "judge_failures": "{count} memory comparison(s) failed in recent sleep runs ({degraded_runs} run(s) finished only partly). Some duplicates may stay unmerged until a later run; if this keeps happening, ask your administrator.",
-      "degraded_runs": "{count} recent sleep run(s) finished only partly because one upkeep step stopped early. Your memories are not affected; if this keeps happening, ask your administrator.",
+      "degraded_runs": "{count} recent sleep run(s) finished only partly because an upkeep step stopped early or could not finish for some memories. Nothing in your memories was lost or changed by it; if this keeps happening, ask your administrator.",
       "failed_runs_recovered": "{count} sleep run(s) failed recently, but the latest run worked. Nothing to do unless failures come back.",
       "deferred_pairs": "{count} pair(s) of possibly duplicate memories were left for a later run, because one run compares only so many. Later runs catch up; until then some duplicates may show up in recall.",
       "merge_backlog_old": "Memories that sleep merged into others are kept for a while so they can be restored; the oldest is {oldest_days} days old (more than {threshold_days}). They do not show up in recall; your administrator decides how long they are kept.",

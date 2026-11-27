@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  budgetPhaseLabelKey,
+  buildBudgetCutNote,
+  buildBudgetNote,
   buildHeadline,
   buildJudgeFailureNote,
   buildPhaseNarrative,
@@ -315,5 +318,85 @@ describe("buildJudgeFailureNote", () => {
     const n = buildJudgeFailureNote(phase({ llm_call_failures: 5 }));
     expect(n?.key).toBe("detail.narrative.judgeFailures");
     expect(n?.values.count).toBe(5);
+  });
+});
+
+describe("buildBudgetNote (#3019)", () => {
+  it("returns no line for an empty or absent map", () => {
+    expect(buildBudgetNote({})).toEqual([]);
+    expect(buildBudgetNote(undefined)).toEqual([]);
+    expect(buildBudgetNote(null)).toEqual([]);
+  });
+
+  it("names the skipped phases", () => {
+    expect(buildBudgetNote({ dedup_merge: "skipped" })).toEqual([
+      { key: "detail.narrative.budgetSkipped", phases: ["dedup_merge"] },
+    ]);
+  });
+
+  it("names the cut phases", () => {
+    expect(buildBudgetNote({ consolidation: "cut" })).toEqual([
+      { key: "detail.narrative.budgetCut", phases: ["consolidation"] },
+    ]);
+  });
+
+  it("names both kinds in run order", () => {
+    expect(
+      buildBudgetNote({
+        edge_discovery: "cut",
+        related_index: "skipped",
+        dedup_merge: "skipped",
+        consolidation: "cut",
+      }),
+    ).toEqual([
+      {
+        key: "detail.narrative.budgetSkipped",
+        phases: ["related_index", "dedup_merge"],
+      },
+      {
+        key: "detail.narrative.budgetCut",
+        phases: ["edge_discovery", "consolidation"],
+      },
+    ]);
+  });
+
+  it("keeps an unknown phase name, which has no label", () => {
+    expect(buildBudgetNote({ future_phase: "cut" })).toEqual([
+      { key: "detail.narrative.budgetCut", phases: ["future_phase"] },
+    ]);
+    expect(budgetPhaseLabelKey("future_phase")).toBeNull();
+    expect(budgetPhaseLabelKey("importance_reeval")).toBe(
+      "budget.phases.importance",
+    );
+  });
+});
+
+describe("buildBudgetCutNote (#3019)", () => {
+  it("returns null for a null result or no details", () => {
+    expect(buildBudgetCutNote(null)).toBeNull();
+    expect(buildBudgetCutNote(phase())).toBeNull();
+  });
+
+  it("builds the note when the phase was cut", () => {
+    expect(
+      buildBudgetCutNote(phase({ details: { budget_cut: true } }))?.key,
+    ).toBe("detail.narrative.budgetCutPhase");
+  });
+
+  it("reads the consolidation key of older reports", () => {
+    expect(
+      buildBudgetCutNote(phase({ details: { llm_pass_cut_for_budget: true } }))
+        ?.key,
+    ).toBe("detail.narrative.budgetCutPhase");
+  });
+
+  it("returns null when neither key is true", () => {
+    expect(
+      buildBudgetCutNote(
+        phase({
+          details: { budget_cut: false, llm_pass_cut_for_budget: false },
+        }),
+      ),
+    ).toBeNull();
   });
 });

@@ -1368,9 +1368,13 @@ class TestSwitchRequeuePredicates:
             Column("created_at", DateTime),
             Column("updated_at", DateTime),
             Column("embedding_attempted_at", DateTime),
+            # #3019: the importance re-evaluation marker.
+            Column("importance_reevaluated_at", DateTime),
         )
         stamps = (None, before, after)
-        combos = list(product(("success", "pending", "failed"), (before, after), stamps, stamps))
+        combos = list(
+            product(("success", "pending", "failed"), (before, after), stamps, stamps, stamps)
+        )
         engine = create_engine("sqlite://")
         with engine.connect() as conn:
             table.create(conn)
@@ -1383,8 +1387,9 @@ class TestSwitchRequeuePredicates:
                         "created_at": c,
                         "updated_at": u,
                         "embedding_attempted_at": a,
+                        "importance_reevaluated_at": r,
                     }
-                    for n, (st, c, u, a) in enumerate(combos)
+                    for n, (st, c, u, a, r) in enumerate(combos)
                 ],
             )
 
@@ -1397,12 +1402,18 @@ class TestSwitchRequeuePredicates:
 
         assert requeued.isdisjoint(left)
         assert requeued | left == set(range(len(combos)))
-        never_edited = combos.index(("success", before, None, None))
+        never_edited = combos.index(("success", before, None, None, None))
         assert never_edited in left  # the F20 row: not re-queued, so still checked
         # #2063: a row a Sleep undo restored (and re-embedded) since is re-queued.
-        assert combos.index(("success", before, None, after)) in requeued
+        assert combos.index(("success", before, None, after, None)) in requeued
+        # #3019: a row re-evaluated since (importance changed, updated_at not
+        # stamped) is re-queued, so the new collection gets its importance.
+        assert combos.index(("success", before, None, None, after)) in requeued
         assert left == {
-            combos.index(("success", before, u, a)) for u in (None, before) for a in (None, before)
+            combos.index(("success", before, u, a, r))
+            for u in (None, before)
+            for a in (None, before)
+            for r in (None, before)
         }
 
 

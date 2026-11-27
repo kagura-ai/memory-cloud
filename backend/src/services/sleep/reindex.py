@@ -23,7 +23,7 @@ from services.content_chunk_writer import (
 )
 from services.embedding_service import EmbeddingService
 from services.resource_indexer import ResourceIndexer, owns_resource_point
-from services.sleep.reporter import PhaseResult
+from services.sleep.reporter import PhaseResult, phase_outcome
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -81,7 +81,7 @@ class ReindexPhase:
         result = PhaseResult(phase_name="reindex")
 
         if not changed_memory_ids:
-            result.details = {"message": "no_memories_to_reindex"}
+            result.details = {"message": "no_memories_to_reindex", **phase_outcome(0)}
             return result
 
         reindexed = 0
@@ -212,6 +212,18 @@ class ReindexPhase:
             # #2061: memories whose chunk write failed, re-queued for the
             # embedding sweep (still counted as reindexed).
             "content_chunk_requeued": chunk_requeues,
+            # #3019: the changed ids, those the batch fetch no longer
+            # returned (forgotten or moved since the change), and the writes
+            # that failed. The reindex is never gated on a budget.
+            **phase_outcome(
+                len(changed_memory_ids),
+                {
+                    "gone_since_change": sum(
+                        1 for memory_id in changed_memory_ids if memory_id not in memory_map
+                    ),
+                    "write_failed": failed,
+                },
+            ),
         }
 
         if failed > 0 and reindexed == 0:

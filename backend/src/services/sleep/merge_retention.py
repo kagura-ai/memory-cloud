@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 from models.auth import Context
 from models.memory import SLEEP_TOMBSTONE_DELETED_BY, Memory
-from services.sleep.reporter import PhaseResult
+from services.sleep.reporter import PhaseResult, phase_outcome
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -78,11 +78,11 @@ def restore_sleep_tombstone_stmt(memory_id: UUID, user_id: str, *, deleted_by: s
     pipeline's clock, ``embedding_attempted_at``, stamped (#2063): an
     embedding-model switch re-queues the rows embedded since its re-embed
     started, and that re-embed skipped this row while it was a tombstone.
-    ``updated_at`` stays as it is — Sleep dedup reads it as the fact's
-    currency, and a restore changes no content. A row in any other state keeps
-    its stamp (the claim fence, the stale-claim recovery and the retry backoff
-    read it), and the switch re-queues every row that is not ``success``
-    anyway. The ORM cannot evaluate the CASE, so it expires
+    ``updated_at`` stays as it is: it reads as "the fact changed" (``list``,
+    ``changes_since``), and a restore changes no content. A row in any other
+    state keeps its stamp (the claim fence, the stale-claim recovery and the
+    retry backoff read it), and the switch re-queues every row that is not
+    ``success`` anyway. The ORM cannot evaluate the CASE, so it expires
     ``embedding_attempted_at`` on an in-session row; the restore paths do not
     read it before they commit.
     """
@@ -197,6 +197,7 @@ async def purge_tombstones(
             "purged": 0,
             "retention_days": retention_days,
             "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+            **phase_outcome(0),  # #3019
         }
         return result
 
@@ -226,6 +227,8 @@ async def purge_tombstones(
         "purged": len(ids),
         "retention_days": retention_days,
         "cutoff": f"{cutoff:%Y-%m-%d %H:%M}",
+        # #3019: the tombstones past the cutoff.
+        **phase_outcome(len(ids)),
     }
 
     # Batch-summary audit action (deliberately NOT per-row): the purge is

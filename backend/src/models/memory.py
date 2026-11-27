@@ -283,9 +283,9 @@ class Memory(Base):
     # It used to be ``updated_at``, which made every freshly embedded memory
     # look edited to anyone reading ``updated_at`` as "a person changed this"
     # (``list`` / ``changes_since``, #1852); ``updated_at`` is now written by
-    # an edit, a scope promotion or a Sleep maintenance change (importance
-    # re-evaluation, dedup tag merge, rollback); never by the initial write or
-    # an embedding retry.
+    # an edit, the tag union of a Sleep merge winner or the rollback of a
+    # promotion; never by the initial write, an embedding retry, a promotion
+    # or an importance re-evaluation (#3019: ``importance_reevaluated_at``).
     embedding_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # #2092: the digest of summary + content this row was last embedded with
     # (``services.supersede_verify.embedded_text_digest``). NULL = never
@@ -354,6 +354,12 @@ class Memory(Base):
     # written before the column existed starts NULL). No index.
     first_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #3019: when Sleep's importance re-evaluation last judged this row (set
+    # for every row of a batch whose judge call answered, whether or not the
+    # importance changed). Re-evaluation does not write ``updated_at``; its
+    # seven-day cadence reads this column. NULL = never judged since the
+    # column exists. Not exported (``DERIVED_ONLY_FIELD_NAMES``). No index.
+    importance_reevaluated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     accessed_by_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     # ``access_count`` counts *surfacing*: every recall top-k return + explore
     # spreading-activation hit + reference(). It is the signal Sleep
@@ -388,9 +394,10 @@ class Memory(Base):
     )
     # #1317: NO ``onupdate`` — ``updated_at`` is the documented staleness cue
     # ("last time the fact was changed"), so it must move only when an edit
-    # path sets it explicitly (update/patch/upsert, resource re-index, sleep
-    # merge/re-eval all do). With ``onupdate=func.now()`` every read-path
-    # access-stats flush (recall/reference/explore) silently re-stamped it.
+    # path sets it explicitly (update/patch/upsert, resource re-index, the
+    # Sleep merge's tag union and a promotion rollback do; importance
+    # re-evaluation does not since #3019). With ``onupdate=func.now()`` every
+    # read-path access-stats flush (recall/reference/explore) re-stamped it.
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # #2043: optimistic-concurrency version. 1 on create; +1 on an edit that
     # changes one of ``VERSIONED_FIELDS`` (each such edit writes an

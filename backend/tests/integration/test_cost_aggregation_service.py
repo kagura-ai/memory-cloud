@@ -122,14 +122,19 @@ def _make_usage(
 
 @pytest.mark.asyncio
 async def test_empty_period_returns_empty_list(db_session):
-    """A period with no sleep_reports rows returns an empty list."""
+    """A period with no sleep_reports rows returns an empty list.
+
+    The window lies in 2001, a year no test dates Sleep reports or call-log
+    rows in: other files in the same database (a CI shard) may leave
+    committed rows dated today.
+    """
     await _seed_pricing(db_session)
 
     service = CostAggregationService(db_session)
     rows = await service.aggregate(
         period="day",
-        start=datetime(2026, 4, 1),
-        end=datetime(2026, 4, 8),
+        start=datetime(2001, 4, 1),
+        end=datetime(2001, 4, 8),
     )
     assert rows == []
 
@@ -519,13 +524,15 @@ async def test_window_at_cap_boundary_is_allowed(db_session):
 
     The half-open window ``end - start`` equals the frontend's inclusive
     day count (``end = to + 1 day``), so a 365-day backend window is the
-    UI's maximum permitted selection and must pass. Empty DB → empty list.
+    UI's maximum permitted selection and must pass. The window lies in 2001,
+    a year no test dates Sleep reports or call-log rows in, so it is empty
+    whatever other files in the same database left behind.
     """
     service = CostAggregationService(db_session)
     rows = await service.aggregate(
         period="day",
-        start=datetime(2026, 1, 1),
-        end=datetime(2027, 1, 1),  # 365-day half-open window (2026 is not a leap year)
+        start=datetime(2001, 1, 1),
+        end=datetime(2002, 1, 1),  # 365-day half-open window (2001 is not a leap year)
     )
     assert rows == []
 

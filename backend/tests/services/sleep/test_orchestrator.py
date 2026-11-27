@@ -3,6 +3,7 @@
 Issue #101/#103: Phase execution order, budget enforcement, error isolation.
 """
 
+import copy
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -19,6 +20,15 @@ def mock_db():
     # manager (each phase runs inside its own SAVEPOINT).
     db.begin_nested = MagicMock(return_value=AsyncMock())
     return db
+
+
+@pytest.fixture(autouse=True)
+def coverage_lookup():
+    """#3019: the run reads its partition's last coverage positions from
+    sleep_reports. These tests pass a mock session and non-UUID scope strings,
+    so the lookup answers "no state" unless a test sets it."""
+    with patch("services.sleep.orchestrator.current_state", AsyncMock(return_value=None)) as lookup:
+        yield lookup
 
 
 def _make_config():
@@ -943,3 +953,273 @@ class TestPerPhaseBudgets:
         assert seen["consolidation"][0] == 0
         assert seen["edge_discovery"][0] == 0
         assert not [r for r in results if r.skip_reason == "budget_exhausted"]
+
+
+class TestCoverageState:
+    """#3019: the orchestrator reads the partition's positions after the graph
+    learning lock, hands dedup its lanes, and writes the positions the run
+    leaves before completing the report. A phase never writes them."""
+
+    async def _run(
+        self,
+        mock_db,
+        *,
+        sleep_mode="full",
+        dedup=None,
+        dedup_raises=False,
+        judge=None,
+        judge_raises=False,
+    ):
+        from services.sleep.coverage import DedupCoverage
+
+        events: list[str] = []
+        report = MagicMock()
+        report.id = uuid4()
+        report.coverage_state = None
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
+            patch("services.sleep.orchestrator.EdgeDiscoveryPhase") as MockED,
+            patch("services.sleep.orchestrator.DedupMergePhase") as MockDM,
+            patch("services.sleep.orchestrator.ImportanceReevalPhase") as MockIR,
+            patch("services.sleep.orchestrator.ConsolidationPhase") as MockCP,
+            patch("services.sleep.orchestrator.ReindexPhase") as MockRI,
+            patch(
+                "services.sleep.orchestrator.lock_graph_learning",
+                AsyncMock(side_effect=lambda *a: events.append("lock")),
+            ),
+        ):
+            reporter = AsyncMock()
+            reporter.create_report = AsyncMock(return_value=report)
+            # What complete_report saw when it ran (the report and the phase
+            # results are shared objects; reading them after run() returns
+            # cannot tell whether the state was set before or after the call).
+            self.at_complete: dict = {}
+
+            async def complete(rep, results):
+                events.append("complete")
+                dedup_result = next((r for r in results if r.phase_name == "dedup_merge"), None)
+                details = dedup_result.details if dedup_result is not None else None
+                self.at_complete = {
+                    "coverage_state": copy.deepcopy(rep.coverage_state),
+                    "dedup_coverage": copy.deepcopy(
+                        details.get("coverage") if isinstance(details, dict) else None
+                    ),
+                }
+
+            reporter.complete_report = AsyncMock(side_effect=complete)
+            MockReporter.return_value = reporter
+            for mock, name in (
+                (MockED, "edge_discovery"),
+                (MockIR, "importance_reeval"),
+                (MockCP, "consolidation"),
+            ):
+                mock.return_value.execute = AsyncMock(return_value=PhaseResult(phase_name=name))
+            instance = MagicMock()
+            instance.pending_point_deletes = []
+            if isinstance(dedup, DedupCoverage):
+                instance.coverage_outcome = dedup
+
+            async def dedup_execute(*args, **kwargs):
+                if dedup_raises:
+                    raise RuntimeError("dedup crashed")
+                return PhaseResult(phase_name="dedup_merge", details={"merged": 0})
+
+            instance.execute = dedup_execute
+            MockDM.return_value = instance
+            if judge is not None:
+                MockCP.return_value.coverage_outcome = judge
+                MockCP.return_value.execute = AsyncMock(
+                    side_effect=RuntimeError("judge crashed") if judge_raises else None,
+                    return_value=PhaseResult(phase_name="consolidation", details={}),
+                )
+            MockRI.return_value.execute = AsyncMock(return_value=PhaseResult(phase_name="reindex"))
+
+            orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value=sleep_mode)
+            orchestrator._get_context_embedding_info = AsyncMock(return_value=(None, "c"))
+            await orchestrator.run("user-1", "ws-1", str(uuid4()), config=_make_config())
+        self.consolidation_class = MockCP
+        return report, MockDM, reporter, events
+
+    @pytest.mark.asyncio
+    async def test_dedup_gets_the_stored_lanes(self, mock_db, coverage_lookup):
+        from services.sleep.coverage import CoverageState, DedupLanes, LaneEntry
+
+        lanes = DedupLanes(sweep=LaneEntry(passes=3), turn="sweep")
+        coverage_lookup.return_value = CoverageState(dedup=lanes)
+
+        _, MockDM, _, _ = await self._run(mock_db)
+
+        coverage_lookup.assert_awaited_once()
+        assert MockDM.call_args.kwargs["coverage"] == lanes
+
+    @pytest.mark.asyncio
+    async def test_no_lookup_when_neither_phase_can_run(self, mock_db, coverage_lookup):
+        await self._run(mock_db, sleep_mode="edges_only")
+        coverage_lookup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_window_leaves_the_column_null(self, mock_db):
+        report, _, _, _ = await self._run(mock_db)
+        assert report.coverage_state is None
+
+    @pytest.mark.asyncio
+    async def test_the_window_becomes_the_next_state_before_the_report_completes(self, mock_db):
+        from datetime import timedelta
+
+        from services.sleep.coverage import SETTLED, DedupCoverage, parse_state
+        from utils.datetime import utcnow
+
+        row = (utcnow() - timedelta(days=3), uuid4())
+        window = DedupCoverage(
+            changed=[row], sweep=[], floor=None, exhausted=True, outcomes={row[1]: SETTLED}
+        )
+        report, _, reporter, events = await self._run(mock_db, dedup=window)
+
+        assert events.index("lock") < events.index("complete")
+        # Both were already set when complete_report ran, and nothing changed
+        # them afterwards.
+        state = parse_state(self.at_complete["coverage_state"])
+        assert state.dedup.changed.position == row
+        assert state.dedup.turn == "sweep"
+        assert self.at_complete["dedup_coverage"]["changed"]["advanced"] == 1
+        assert report.coverage_state == self.at_complete["coverage_state"]
+        results = reporter.complete_report.call_args.args[1]
+        dedup = next(r for r in results if r.phase_name == "dedup_merge")
+        assert dedup.details["coverage"] == self.at_complete["dedup_coverage"]
+
+    @pytest.mark.asyncio
+    async def test_a_phase_that_raised_after_its_read_stalls(self, mock_db):
+        from datetime import timedelta
+
+        from services.sleep.coverage import FAILURE, DedupCoverage, parse_state
+        from utils.datetime import utcnow
+
+        row = (utcnow() - timedelta(days=3), uuid4())
+        window = DedupCoverage(
+            changed=[row], sweep=[], floor=None, exhausted=False, outcomes={row[1]: FAILURE}
+        )
+        report, _, reporter, _ = await self._run(mock_db, dedup=window, dedup_raises=True)
+
+        state = parse_state(report.coverage_state)
+        assert state.dedup.changed.position is None
+        assert state.dedup.changed.stalls == 1
+        # The phase did not return: the turn stays.
+        assert state.dedup.turn == "changed"
+        # What the run did to the lanes is in the stored blob although the
+        # phase raised; its point-5 keys stay absent.
+        results = reporter.complete_report.call_args.args[1]
+        dedup = next(r for r in results if r.phase_name == "dedup_merge")
+        assert dedup.error == "dedup crashed"
+        assert set(dedup.details) == {"coverage"}
+        assert dedup.details["coverage"]["changed"]["taken"] == 1
+        assert dedup.details["coverage"]["changed"]["advanced"] == 0
+        assert dedup.details["coverage"]["skipped_after_stalls"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_raised_phase_reports_the_window_its_stalls_passed(
+        self, mock_db, coverage_lookup
+    ):
+        """Invariant 1's one exception, the stall rule, is counted in the
+        report: on the third run that raises, the window is passed and the
+        stored dedup blob says how many rows were passed that way."""
+        from datetime import timedelta
+
+        from services.sleep.coverage import (
+            STALL_LIMIT,
+            CoverageState,
+            DedupCoverage,
+            DedupLanes,
+            LaneEntry,
+            parse_state,
+        )
+        from utils.datetime import utcnow
+
+        coverage_lookup.return_value = CoverageState(
+            dedup=DedupLanes(
+                changed=LaneEntry(stalls=STALL_LIMIT - 1),
+                sweep=LaneEntry(stalls=STALL_LIMIT - 1),
+            )
+        )
+        changed = (utcnow() - timedelta(days=3), uuid4())
+        sweep = (utcnow() - timedelta(days=30), uuid4())
+        window = DedupCoverage(changed=[changed], sweep=[sweep], floor=None, exhausted=False)
+
+        report, _, reporter, _ = await self._run(mock_db, dedup=window, dedup_raises=True)
+
+        state = parse_state(report.coverage_state)
+        assert state.dedup.changed.position == changed
+        assert state.dedup.sweep.position == sweep
+        assert (state.dedup.changed.stalls, state.dedup.sweep.stalls) == (0, 0)
+        # Set before complete_report stored the blob.
+        assert self.at_complete["dedup_coverage"]["skipped_after_stalls"] == 2
+        results = reporter.complete_report.call_args.args[1]
+        dedup = next(r for r in results if r.phase_name == "dedup_merge")
+        assert set(dedup.details) == {"coverage"}
+        assert dedup.details["coverage"]["skipped_after_stalls"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_raised_judge_reports_the_rows_its_stalls_passed(
+        self, mock_db, coverage_lookup
+    ):
+        from datetime import timedelta
+
+        from services.sleep.coverage import (
+            STALL_LIMIT,
+            CoverageState,
+            JudgeCoverage,
+            LaneEntry,
+            parse_state,
+        )
+        from utils.datetime import utcnow
+
+        coverage_lookup.return_value = CoverageState(judge=LaneEntry(stalls=STALL_LIMIT - 1))
+        rows = [(utcnow() - timedelta(days=d), uuid4()) for d in (8, 7)]
+
+        report, _, reporter, _ = await self._run(
+            mock_db, judge=JudgeCoverage(keys=rows), judge_raises=True
+        )
+
+        state = parse_state(report.coverage_state)
+        assert state.judge.stalls == 0
+        results = reporter.complete_report.call_args.args[1]
+        consolidation = next(r for r in results if r.phase_name == "consolidation")
+        assert consolidation.error == "judge crashed"
+        assert consolidation.details == {
+            "coverage": {"judge": {"taken": 2, "advanced": 2}, "skipped_after_stalls": 2}
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_judge_gets_its_position_and_leaves_the_next(self, mock_db, coverage_lookup):
+        from datetime import timedelta
+
+        from services.sleep.coverage import (
+            SETTLED,
+            CoverageState,
+            DedupLanes,
+            JudgeCoverage,
+            LaneEntry,
+            parse_state,
+        )
+        from utils.datetime import utcnow
+
+        entry = LaneEntry(at=utcnow() - timedelta(days=9), id=uuid4())
+        lanes = DedupLanes(sweep=LaneEntry(passes=2))
+        coverage_lookup.return_value = CoverageState(dedup=lanes, judge=entry)
+        rows = [(utcnow() - timedelta(days=d), uuid4()) for d in (8, 7)]
+        judge = JudgeCoverage(keys=rows, outcomes={rows[0][1]: SETTLED})
+
+        report, _, reporter, _ = await self._run(mock_db, judge=judge)
+
+        assert self.consolidation_class.call_args.kwargs["coverage"] == entry
+        state = parse_state(report.coverage_state)
+        assert state.judge.position == rows[0]
+        # Dedup produced no window: its lanes are carried as they were.
+        assert state.dedup == lanes
+        results = reporter.complete_report.call_args.args[1]
+        consolidation = next(r for r in results if r.phase_name == "consolidation")
+        assert consolidation.details["coverage"] == {
+            "judge": {"taken": 2, "advanced": 1},
+            "skipped_after_stalls": 0,
+        }

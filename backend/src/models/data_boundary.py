@@ -299,6 +299,10 @@ DERIVED_ONLY_FIELD_NAMES: frozenset[str] = frozenset(
         "reindex_result",
         "hub_tags",
         "threshold_used",
+        # #3019: Sleep's own bookkeeping — the re-evaluation marker on
+        # memories and the coverage positions on sleep_reports.
+        "importance_reevaluated_at",
+        "coverage_state",
     }
 )
 

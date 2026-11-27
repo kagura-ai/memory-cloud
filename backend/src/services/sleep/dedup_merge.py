@@ -17,8 +17,8 @@ Algorithm:
 Academic notes:
 - Union-Find transitivity: A~B + B~C clusters all three even if A~C is low.
   Cluster size cap (5) + LLM second gate mitigate runaway merges. Templated
-  corpora collapse into one mega-cluster (Day-5: 782 pairs → 1 cluster);
-  capacity-capped greedy agglomeration (#1184) restores partial progress.
+  corpora can collapse into one mega-cluster; capacity-capped greedy
+  agglomeration (#1184) restores partial progress.
 - Positional bias: batch order is shuffled before LLM calls.
 - ID hallucination: short labels (A, B, C) used in prompts, mapped back to UUIDs.
 """
@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import random
 import string
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -37,10 +38,11 @@ if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepReporter
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
-from db.qdrant import search_memories_qdrant
+from db.qdrant import retrieve_dense_vectors, search_memories_qdrant
 from models.memory import (
     DELETED_BY_SLEEP_MERGE,
     MEMORY_TYPE_TIME,
@@ -56,7 +58,25 @@ from repositories.neural_edge import NeuralEdgeRepository
 from services.deferred_point_deletes import PointDelete, queue_point_deletes
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
+from services.memory_versions import (
+    TextEditEvent,
+    revision_log_began_query,
+    text_edit_event,
+    text_edit_events_query,
+    text_edit_times,
+)
 from services.resource_indexer import unshared_point_id
+from services.sleep.coverage import (
+    BUDGET,
+    FAILURE,
+    OVERSIZE_MERGE,
+    PASSED,
+    SETTLED,
+    DedupCoverage,
+    DedupLanes,
+    fetch_window,
+    sweep_call_share,
+)
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     DEDUP_JUDGE_SYSTEM,
@@ -69,8 +89,14 @@ from services.sleep.reporter import (
     PhaseResult,
     SleepBudget,
     accumulate_llm_response,
+    phase_outcome,
 )
 from utils.datetime import utcnow
+from utils.exceptions import (
+    ConfigurationError,
+    EmbeddingSpendCapExceeded,
+    FeatureNotAvailableError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,6 +110,54 @@ MAX_EXTRA_NEIGHBORS = 50
 # Maximum cluster size to process in one run.
 # Larger clusters are deferred to the next sleep cycle.
 MAX_CLUSTER_SIZE = 5
+
+# #3019: ids per statement when checking a search hit outside the window, and
+# per statement and vector read when loading a cluster's outside members.
+ELIGIBILITY_CHECK_CHUNK = 1000
+MEMBER_LOAD_CHUNK = 100
+
+# #3019: embedding refusals that are never one row's own — the workspace's
+# embedding spend cap, a provider key or a plan that is not there. A row
+# refused this way holds its lane like an outage, whatever else answered.
+_REFUSALS_NOT_ROW_SPECIFIC: tuple[type[Exception], ...] = (
+    EmbeddingSpendCapExceeded,
+    ConfigurationError,
+    FeatureNotAvailableError,
+)
+
+
+def dedup_eligible(
+    user_id: str, workspace_id: str | None, context_id: str | None
+) -> ColumnElement[bool]:
+    """The one rule for which memories dedup may compare and merge (#3019).
+
+    The run's user's live rows in the run's workspace and context, minus the
+    deterministic lanes: pinned rows (#1519, ``load_pinned()``), tool
+    guardrails (``load_guardrails``), time memories (#1524,
+    ``recall_upcoming``) and rows the resource indexer owns (#2996). The
+    window fetch, the check of a search hit outside the window and the load
+    of a cluster's outside members all build their WHERE from this function,
+    so a row the window would exclude can never come in as a neighbour. No
+    age, scope or adoption gate: a memory of any age can lose a merge to a
+    newly written near-duplicate.
+    """
+    return and_(
+        Memory.user_id == user_id,
+        Memory.deleted_at.is_(None),
+        # #1523: the shared exemption every automated deleter uses.
+        not_pinned_predicate(),
+        # Tool guardrails: same exemption, the guardrail lane.
+        not_tool_triggered_predicate(),
+        # #1524: time memories are served by their trigger window, not their
+        # summary — a same-summary occurrence is not a duplicate.
+        Memory.type != MEMORY_TYPE_TIME,
+        # #2996: a row the resource indexer owns is the source's: two
+        # documents that read alike are two records, and the source alone
+        # removes either.
+        not_resource_owned_predicate(),
+        Memory.workspace_id == UUID(workspace_id) if workspace_id else true(),
+        Memory.context_id == UUID(context_id) if context_id else true(),
+    )
 
 
 def _pair_key(a: UUID, b: UUID) -> tuple[UUID, UUID]:
@@ -109,6 +183,36 @@ def _fmt_minute(dt: datetime | None) -> str | None:
     the post-hoc verification honest.
     """
     return f"{dt:%Y-%m-%d %H:%M}" if dt else None
+
+
+def _to_minute(dt: datetime) -> datetime:
+    """``dt`` at the minute precision the winner rules compare at."""
+    return dt.replace(second=0, microsecond=0)
+
+
+def _edited_version(version: object) -> bool:
+    """A ``Memory.version`` above 1: an edit moved it at least once (#3019).
+
+    Anything that is not an int (a test double, a missing attribute) reads as
+    unedited, so no revision read is made for it.
+    """
+    return isinstance(version, int) and not isinstance(version, bool) and version > 1
+
+
+def _edited_since_fetch(memory: Memory, locked_version: object) -> bool:
+    """The locked row's version is not the one ``memory`` was fetched with (#3019).
+
+    Both must be ints (bool excluded) for the comparison to mean anything; a
+    test double without one reads as unchanged.
+    """
+    fetched = getattr(memory, "version", None)
+    return (
+        isinstance(fetched, int)
+        and not isinstance(fetched, bool)
+        and isinstance(locked_version, int)
+        and not isinstance(locked_version, bool)
+        and fetched != locked_version
+    )
 
 
 # Similarity threshold for auto-merge without LLM (LLM-off mode)
@@ -163,8 +267,8 @@ def _split_oversize_cluster(
 
     Templated corpora (daily standups, status logs) push cross-unit similarity
     over the candidate threshold, union-find collapses everything into one
-    mega-cluster (Day-5 eval: 782 pairs → 1 cluster), and the old wholesale
-    deferral disabled dedup for exactly the corpora that need it most.
+    mega-cluster, and the old wholesale deferral disabled dedup for exactly
+    the corpora that need it most.
 
     Greedy capacity-capped agglomeration: walk the cluster's internal pairs in
     DESCENDING similarity and union two components only while the merged size
@@ -265,18 +369,49 @@ class _MergeTally:
 class DedupMergePhase(EmbeddingSpendTracker):
     """Detect and merge duplicate memories."""
 
+    # #3019: what ``_find_similar_pairs`` saw per window row, read by
+    # ``execute`` for ``details.no_action_reasons``. Class defaults so a
+    # stubbed search (many tests) reads zeros.
+    _rows_without_neighbour: int = 0
+    _rows_search_failed: int = 0
+    _hits_not_eligible: int = 0
+    # #3019: the window rows whose embed and search succeeded (None: the
+    # search was stubbed, every row counts as searched).
+    _searched_ok: set[UUID] | None = None
+    # #3019: the step each failed window row failed at ("embed", "search", or
+    # "refused" for a refusal that is never the row's own), and how many
+    # embeds the provider answered. A vector from the cache says nothing about
+    # the provider, so it is no evidence that a failed embed was the row's own.
+    _search_failures: dict[UUID, str] | None = None
+    _provider_embeds: int = 0
+    # #3019: when the deployment's revision log began, read at most once a
+    # run and only when a pair needs it (``_revision_log_began``), and the
+    # pairs kept because the log cannot tell which row is newer.
+    _log_began_at: datetime | None = None
+    _log_began_read: bool = False
+    _ambiguous_pairs: int = 0
+
     def __init__(
         self,
         db: AsyncSession,
         llm_service: LLMService,
         embedding_model: str | None = None,
         collection_name: str | None = None,
+        *,
+        coverage: DedupLanes | None = None,
     ):
         self.db = db
         self.llm_service = llm_service
         self.edge_repo = NeuralEdgeRepository(db)
         self.embedding_service = EmbeddingService(db, model=embedding_model)
         self.collection_name = collection_name
+        # #3019: the partition's lane positions as the last run left them
+        # (None: a first run), and this run's window with each row's outcome,
+        # which the orchestrator turns into the next positions. A stubbed
+        # fetch leaves the window None: rows are judged in list order and the
+        # positions are carried unchanged.
+        self._lanes = coverage or DedupLanes()
+        self.coverage_outcome: DedupCoverage | None = None
         # #475: embedding cost-grade accumulators (init here so
         # ``_find_similar_pairs`` can be unit-tested without execute()).
         self._embedding_calls_used: int = 0
@@ -290,6 +425,17 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #1195/#1198: newer-wins override counter (init here so
         # ``_judge_cluster`` can be unit-tested without execute()).
         self._winner_overrides: int = 0
+        # #3019: when each judged member's text was last edited, read from the
+        # revision log once a run (``_load_text_edit_times``); None for a
+        # member the log names no edit for. Newer-wins compares this with
+        # ``created_at`` and never reads ``updated_at``; the stamp only says
+        # whether the log can tell the pair apart (``_recency_unknowable``).
+        self._text_edited_at: dict[UUID, datetime | None] = {}
+        # #3019: members whose revision read failed (their logged edits are
+        # unknown), and the doubt a rollback that names no block left
+        # (``TextEditTimes.unsure_until``). Both feed ``_recency_unknowable``.
+        self._text_edit_unread: set[UUID] = set()
+        self._text_edit_unsure: dict[UUID, datetime] = {}
         # #1209: per-reason override breakdown ("recency" | "source") and
         # per-decision audit metadata (merge_reason from the judge, override
         # info), keyed by the FINAL (winner_id, loser_id). Kept beside the
@@ -311,6 +457,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #2565: the merge losers' points, queued in the phase's savepoint;
         # the orchestrator deletes them after its caller commits.
         self.pending_point_deletes: list[PointDelete] = []
+
+    def _search_reasons(self) -> dict[str, int]:
+        """The per-row reasons the candidate search recorded (#3019)."""
+        return {
+            "no_similar_neighbour": self._rows_without_neighbour,
+            "search_failed": self._rows_search_failed,
+            "neighbour_not_eligible": self._hits_not_eligible,
+        }
 
     def _backfill_cluster_scores(
         self,
@@ -359,9 +513,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         Eligibility is deterministic and judged on the SCORE, not on cluster
         membership: union-find clusters chain transitively AND candidate
         generation can regress, so the judge can nominate pairs whose true
-        pairwise cosine is far below the threshold — observed 0.43-0.66 under
-        0.92, destroying distinct facts. A merge executes only when the pair's
-        direct similarity meets the configured threshold.
+        pairwise cosine is far below the threshold, which would destroy
+        distinct facts. A merge executes only when the pair's direct
+        similarity meets the configured threshold.
 
         #2584: a loser carrying one of ``exempt_tags`` (exact match) is never
         retired, in either mode. The pair is skipped, not flipped: merge folds
@@ -585,6 +739,13 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #1209: reset the per-reason breakdown + per-decision audit metadata.
         self._override_reasons = {}
         self._decision_meta = {}
+        # #3019: edit times and the log start are read again each run.
+        self._text_edited_at = {}
+        self._text_edit_unread = set()
+        self._text_edit_unsure = {}
+        self._log_began_at = None
+        self._log_began_read = False
+        self._ambiguous_pairs = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
         # #475: reset embedding accumulators between sleep cycles.
@@ -592,6 +753,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
         self._embedding_tokens_used = 0
         # #1232: reset the settled-pair record between sleep cycles.
         self._settled_pair_keys = set()
+        # #3019: reset the search's per-row counters (a stubbed search leaves them).
+        self._rows_without_neighbour = 0
+        self._rows_search_failed = 0
+        self._hits_not_eligible = 0
+        self._searched_ok = None
+        self._search_failures = None
+        self._provider_embeds = 0
+        self.coverage_outcome = None
+        calls_at_entry = max(0, budget.max_llm_calls - budget.llm_calls_used)
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -607,8 +777,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
         memories = await self._fetch_active_memories(
             user_id, workspace_id, context_id, config.sleep_max_memories_per_run
         )
-        if len(memories) < 2:
-            result.details = {"message": "not_enough_memories", "count": len(memories)}
+        # #3019: one window row is searched too — its neighbours can be
+        # anywhere in the partition.
+        if not memories:
+            result.details = {
+                "message": "not_enough_memories",
+                "count": len(memories),
+                **phase_outcome(len(memories)),
+            }
             return result
 
         # Step 2: Find similar pairs via Qdrant. #1523: pinned rows are not
@@ -624,7 +800,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
             extra_neighbors=pinned_in_scope,
         )
         if not pairs:
-            result.details = {"message": "no_duplicate_candidates"}
+            self._settle_outcomes(memories)
+            result.details = {
+                "message": "no_duplicate_candidates",
+                **phase_outcome(len(memories), self._search_reasons()),
+            }
             # #2060: the candidate search above already billed its embeddings.
             self.record_spend(result)
             return result
@@ -639,9 +819,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 pairs, user_id
             )
             if not pairs:
+                self._settle_outcomes(memories)
                 result.details = {
                     "message": "all_candidates_already_superseded",
                     "settled_pairs_skipped": settled_pairs_skipped,
+                    **phase_outcome(
+                        len(memories),
+                        {**self._search_reasons(), "already_superseded": settled_pairs_skipped},
+                    ),
                 }
                 self.record_spend(result)  # #2060: embeddings already billed
                 return result
@@ -663,14 +848,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # cross-subcluster pairs are counted as deferred, not silently lost.
         split_subclusters = 0
         deferred_pairs = 0
-        for big in oversize:
+        # #3019: the original oversize cluster each subcluster came from.
+        origin_of: dict[int, int] = {}
+        for big_index, big in enumerate(oversize):
             subclusters, skipped = _split_oversize_cluster(big, pairs)
             split_subclusters += len(subclusters)
             deferred_pairs += skipped
-            # Appended AFTER the normal-size clusters deliberately: under
-            # budget exhaustion the pre-existing cluster set keeps priority
-            # and mega-cluster subclusters only consume the margin.
-            processable.extend(subclusters)
+            for subcluster in subclusters:
+                origin_of[len(processable)] = big_index
+                processable.append(subcluster)
 
         if oversize:
             logger.info(
@@ -683,60 +869,142 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
         # Step 4: Process each cluster
         memory_map = {m.id: m for m in memories}
+        # #3019: a cluster's members that are not window rows are loaded (full
+        # row and stored vector) right before it is judged; on the rule path,
+        # which judges every cluster, all at once.
+        if not llm_enabled:
+            await self._load_outside_members(
+                [mid for cluster in processable for mid in cluster],
+                memory_map,
+                user_id,
+                workspace_id,
+                context_id,
+            )
         pair_scores = {_pair_key(a, b): s for a, b, s in pairs}
         tally = _MergeTally()
         # #1231: pair keys whose score came from the on-demand direct check
         # rather than candidate discovery — merges on these are "rescues"
         # the top-10 candidate cap would previously have vetoed.
         backfilled_keys: set[tuple[UUID, UUID]] = set()
+        # #3019: clusters judged with no merge, and whose judge call failed;
+        # what happened to each cluster (for its window rows' outcomes).
+        kept_both = 0
+        failed_clusters = 0
+        judge_answered = False
+        cluster_state: dict[int, str] = {}
+        merged_oversize: set[int] = set()
+        shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
 
-        for cluster in processable:
-            if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
-                break
+        for order, cap in self._judge_stages(
+            processable, memories, llm_enabled=llm_enabled, calls=calls_at_entry
+        ):
+            for index in order:
+                if index in cluster_state:
+                    continue
+                if cap is not None and budget.llm_calls_used - llm_calls_before >= cap:
+                    break
+                if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
+                    break
+                cluster = processable[index]
+                if llm_enabled:
+                    await self._load_outside_members(
+                        cluster, memory_map, user_id, workspace_id, context_id
+                    )
+                # A member that no longer loads (forgotten, pinned, moved) is
+                # left out of the cluster.
+                cluster_memories = [memory_map[mid] for mid in cluster if mid in memory_map]
+                if len(cluster_memories) < 2:
+                    cluster_state[index] = "dropped"
+                    continue
 
-            cluster_memories = [memory_map[mid] for mid in cluster if mid in memory_map]
-            if len(cluster_memories) < 2:
-                continue
+                # #3019: the judge prompt, the winner rules and the audit all
+                # read the members' recency; their edit times come first.
+                await self._load_text_edit_times(cluster_memories)
+                self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
 
-            self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
+                # #3019 (owner decision 2026-11-27): a pair the revision log
+                # cannot order is kept both (``_recency_unknowable``). When no
+                # judge answer could merge any pair of the cluster, it is not
+                # sent to the judge. Coverage: such a cluster, like a judged
+                # one, is "kept", so its window rows are settled and the lanes
+                # move past them; nothing is written to either row, so neither
+                # comes back through the changed lane. Kept pairs are not
+                # remembered between runs (a judge's keep_both is not either):
+                # the pair is looked at again when the sweep's next pass, or a
+                # nearby row's window, brings either row back, or when either
+                # is written. Each time that costs the rows' search (spent on
+                # every window row anyway), a revision read for an edited
+                # member and the one log start read of the run, and no judge
+                # call. A cluster that also holds a pair that can merge is
+                # judged (one call) and its kept pair is dropped again.
+                if llm_enabled:
+                    unknowable = await self._unknowable_cluster_pairs(
+                        cluster_memories, pair_scores, threshold
+                    )
+                    if unknowable:
+                        self._ambiguous_pairs += unknowable
+                        cluster_state[index] = "kept"
+                        result.memories_processed += len(cluster_memories)
+                        continue
 
-            merge_decisions = await self._judge_cluster(
-                cluster_memories,
-                pair_scores,
-                llm_enabled,
-                user_id,
-                context_id,
-                workspace_id,
-                budget,
-                config,
-            )
+                failures_before = self._llm_failures
+                ambiguous_before = self._ambiguous_pairs
+                merge_decisions = await self._judge_cluster(
+                    cluster_memories,
+                    pair_scores,
+                    llm_enabled,
+                    user_id,
+                    context_id,
+                    workspace_id,
+                    budget,
+                    config,
+                )
+                if self._llm_failures > failures_before:
+                    failed_clusters += 1
+                    cluster_state[index] = "failed"
+                else:
+                    judge_answered = True
+                    cluster_state[index] = "judged"
+                    if not merge_decisions and self._ambiguous_pairs == ambiguous_before:
+                        kept_both += 1
 
-            shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
+                merge_jobs = self._plan_cluster_merges(
+                    merge_decisions,
+                    memory_map,
+                    pair_scores,
+                    backfilled_keys,
+                    threshold,
+                    tally,
+                    snapshot_audit=bool(reporter and report_id),
+                    exempt_tags=exempt_tags,
+                )
+                merged_before = tally.merged
+                await self._execute_merge_jobs(
+                    merge_jobs,
+                    shadow_mode=shadow_mode,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    context_id=context_id,
+                    pair_scores=pair_scores,
+                    result=result,
+                    tally=tally,
+                    reporter=reporter,
+                    report_id=report_id,
+                )
+                if tally.merged > merged_before and index in origin_of:
+                    merged_oversize.add(origin_of[index])
 
-            merge_jobs = self._plan_cluster_merges(
-                merge_decisions,
-                memory_map,
-                pair_scores,
-                backfilled_keys,
-                threshold,
-                tally,
-                snapshot_audit=bool(reporter and report_id),
-                exempt_tags=exempt_tags,
-            )
-            await self._execute_merge_jobs(
-                merge_jobs,
-                shadow_mode=shadow_mode,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                context_id=context_id,
-                pair_scores=pair_scores,
-                result=result,
-                tally=tally,
-                reporter=reporter,
-                report_id=report_id,
-            )
+                result.memories_processed += len(cluster_memories)
 
-            result.memories_processed += len(cluster_memories)
+        unjudged_clusters = len(processable) - len(cluster_state)
+        self._settle_outcomes(
+            memories,
+            processable=processable,
+            cluster_state=cluster_state,
+            oversize=oversize,
+            merged_oversize=merged_oversize,
+            judge_answered=judge_answered,
+        )
 
         result.details = {
             "candidates": len(pairs),
@@ -790,6 +1058,27 @@ class DedupMergePhase(EmbeddingSpendTracker):
             "winner_overrides": self._winner_overrides,
             # #1209: per-rule breakdown ("recency" | "source") of the above.
             "winner_override_reasons": dict(self._override_reasons),
+            **phase_outcome(
+                len(memories),
+                {
+                    **self._search_reasons(),
+                    "already_superseded": settled_pairs_skipped,
+                    "deferred_oversize": deferred_pairs,
+                    "judge_kept_both": kept_both,
+                    "judge_failed": failed_clusters,
+                    "not_judged_budget": unjudged_clusters,
+                    "below_threshold": tally.guarded,
+                    "unverifiable": tally.unverifiable,
+                    "already_settled": tally.settled_skipped,
+                    "exempt_tag": tally.skipped_exempt,
+                    "changed_since_fetch": tally.skipped_pinned,
+                    "resource_owned": tally.skipped_resource_owned,
+                    # #3019: pairs kept because the revision log cannot tell
+                    # which row is newer (``_recency_unknowable``).
+                    "ambiguous_recency": self._ambiguous_pairs,
+                },
+                budget_cut=unjudged_clusters > 0,
+            ),
         }
 
         result.llm_calls_used = budget.llm_calls_used - llm_calls_before
@@ -804,6 +1093,118 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
         return result
 
+    def _judge_stages(
+        self,
+        processable: list[set[UUID]],
+        memories: list[Memory],
+        *,
+        llm_enabled: bool,
+        calls: int,
+    ) -> list[tuple[list[int], int | None]]:
+        """The order the clusters are judged in, as stages (#3019).
+
+        Each stage is (cluster indexes, a cap on the calls the phase may have
+        used when the stage judges its next cluster, or None). ``C`` holds the
+        clusters with a changed-lane row, ordered by their earliest such row;
+        ``S`` those with a sweep-lane row, by their earliest sweep row (a
+        cluster of both lanes is in both and judged once). With a judge, ``C``
+        first until the sweep's share of the calls is all that is left, then
+        ``S`` with every call left, then the rest of ``C``: neither lane can use
+        the other's share. On the rule path every cluster is judged, ``C`` then
+        ``S``. Without a window (a stubbed fetch) the clusters are judged in the
+        order of their earliest row in the fetched list.
+        """
+        window = self.coverage_outcome
+
+        def ordered(position: dict[UUID, int]) -> list[int]:
+            first = {
+                index: min(position[mid] for mid in cluster if mid in position)
+                for index, cluster in enumerate(processable)
+                if any(mid in position for mid in cluster)
+            }
+            return sorted(first, key=lambda index: first[index])
+
+        if window is None:
+            listed = {m.id: i for i, m in enumerate(memories)}
+            last = len(memories)
+            return [
+                (
+                    sorted(
+                        range(len(processable)),
+                        key=lambda index: min(listed.get(mid, last) for mid in processable[index]),
+                    ),
+                    None,
+                )
+            ]
+        changed = ordered({key[1]: i for i, key in enumerate(window.changed)})
+        sweep = ordered({key[1]: i for i, key in enumerate(window.sweep)})
+        if not llm_enabled:
+            return [(changed, None), (sweep, None)]
+        sweep_calls = sweep_call_share(calls, self._lanes.turn)
+        return [(changed, calls - sweep_calls), (sweep, None), (changed, None)]
+
+    def _settle_outcomes(
+        self,
+        memories: list[Memory],
+        *,
+        processable: list[set[UUID]] | None = None,
+        cluster_state: dict[int, str] | None = None,
+        oversize: list[set[UUID]] | None = None,
+        merged_oversize: set[int] | None = None,
+        judge_answered: bool = False,
+    ) -> None:
+        """Each window row's outcome in this run (#3019), on ``coverage_outcome``.
+
+        ``settled``: its search succeeded and it has no eligible pair, or its
+        cluster was judged (the judge answered, or the rule path), was kept
+        without a call because the revision log cannot order any pair that
+        could merge, or could not be judged because fewer than two members
+        loaded. ``budget``: its cluster was not reached for lack of calls.
+        ``oversize_merge``: a merge executed in the original oversize cluster
+        it belongs to, so the pairs the split left out are compared next run (a head of the sweep held this way
+        counts toward the stall limit; one whose own subcluster the calls did
+        not reach is ``budget``, which never does). A failure of the row's
+        own — its search, or its cluster's judge call — is ``passed`` when the
+        same kind of work succeeded for another row in this run, else
+        ``failure`` (an outage holds the lane). For a failed search
+        the kind is the step that raised: an embed needs another embed the
+        provider answered (a vector from the cache proves nothing about the
+        provider), a vector search another search that answered. A refusal that
+        is never one row's own (the spend cap, a missing key or plan) is always
+        a ``failure``.
+        """
+        window = self.coverage_outcome
+        if window is None:
+            return
+        searched = self._searched_ok
+        failed_at = self._search_failures or {}
+        evidence = {
+            "embed": self._provider_embeds > 0,
+            "search": bool(searched),
+        }
+        cluster_of = {mid: index for index, c in enumerate(processable or []) for mid in c}
+        oversize_of = {mid: index for index, c in enumerate(oversize or []) for mid in c}
+        states = cluster_state or {}
+        merged = merged_oversize or set()
+        for memory in memories:
+            mid = memory.id
+            if searched is not None and mid not in searched:
+                outcome = PASSED if evidence.get(failed_at.get(mid, ""), False) else FAILURE
+            elif oversize_of.get(mid) in merged:
+                unreached = mid in cluster_of and states.get(cluster_of[mid]) is None
+                outcome = BUDGET if unreached else OVERSIZE_MERGE
+            elif mid in cluster_of:
+                state = states.get(cluster_of[mid])
+                if state in ("judged", "kept", "dropped"):
+                    outcome = SETTLED
+                elif state == "failed":
+                    outcome = PASSED if judge_answered else FAILURE
+                else:
+                    outcome = BUDGET
+            else:
+                outcome = SETTLED
+            window.outcomes[mid] = outcome
+
     async def _fetch_active_memories(
         self,
         user_id: str,
@@ -811,15 +1212,22 @@ class DedupMergePhase(EmbeddingSpendTracker):
         context_id: str | None,
         limit: int = 500,
     ) -> list[Memory]:
-        """Fetch active (non-deleted), unpinned, non-time memories, capped by limit.
+        """Fetch the window: up to ``limit`` eligible memories (``dedup_eligible``).
+
+        #3019: the rows come from two lanes (``services.sleep.coverage``): the
+        rows changed since the changed lane's position (newest first when more
+        changed than fit), then the sweep over older rows in stable
+        ``(created_at, id)`` order, so every row of the partition is read in a
+        bounded number of runs. The window and each row's outcome are kept on
+        ``coverage_outcome`` for the orchestrator.
 
         #1519: ``delivery_mode='always'`` rows are the deterministic
         ``load_pinned()`` lane (#886) and never enter dedup candidacy. A pinned
         loser would silently drop out of that lane, and a pinned *winner* is no
         better — merge folds only tags, so it would discard the newer unpinned
-        fact instead of absorbing it. Excluding them here covers every downstream
-        path at once: ``_find_similar_pairs`` restricts vector-search hits to the
-        fetched id set, so a pinned neighbour cannot re-enter that way either.
+        fact instead of absorbing it. The same rule (``dedup_eligible``) decides
+        which search hits outside the window are compared (#3019), so a pinned
+        neighbour cannot re-enter that way either.
 
         #1524: ``type='time'`` rows are the other deterministic lane
         (``recall_upcoming``, keyed on ``details.trigger``). Two occurrences of a
@@ -834,41 +1242,104 @@ class DedupMergePhase(EmbeddingSpendTracker):
         belong to their source, which alone removes or replaces them. They are
         also no longer embedded here, one embedding call each per run.
         """
-        stmt = (
-            select(Memory)
-            .where(
-                Memory.user_id == user_id,
-                Memory.deleted_at.is_(None),
-                # #1523: the shared exemption every automated deleter uses.
-                not_pinned_predicate(),
-                # Tool guardrails: same exemption, the guardrail lane.
-                not_tool_triggered_predicate(),
-                # #1524: time memories are served by their trigger window, not
-                # their summary — a same-summary occurrence is not a duplicate.
-                Memory.type != MEMORY_TYPE_TIME,
-                # #2996: a row the resource indexer owns is the source's: two
-                # documents that read alike are two records, and the source
-                # alone removes either.
-                not_resource_owned_predicate(),
-            )
-            # #1868: ``updated_at`` is NULL until a memory is edited, and
-            # PostgreSQL sorts NULLs first under DESC — the bare column put
-            # every never-edited row ahead of every edited one, unordered.
-            # Fall back to ``created_at`` and break ties on ``id`` so the cap
-            # keeps the most recent memories, the same ones on every run.
-            .order_by(
-                func.coalesce(Memory.updated_at, Memory.created_at).desc(),
-                Memory.id.desc(),
-            )
-            .limit(limit)
+        memories, window = await fetch_window(
+            self.db, dedup_eligible(user_id, workspace_id, context_id), self._lanes, limit
         )
-        if workspace_id:
-            stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
-        if context_id:
-            stmt = stmt.where(Memory.context_id == UUID(context_id))
+        self.coverage_outcome = window
+        return memories
 
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+    async def _eligible_outside_ids(
+        self,
+        ids: list[UUID],
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> set[UUID]:
+        """The search hits outside the window that dedup may compare (#3019).
+
+        An id-only check under ``dedup_eligible``, plus a successful
+        embedding: a neighbour's score was computed against its stored vector,
+        which matches its text only when its last embedding succeeded. A hit
+        that does not come back (pinned, a guardrail, a time memory,
+        resource-owned, forgotten, another user's or context's, a point id that
+        is no memory, not embedded) is not compared.
+        """
+        eligible: set[UUID] = set()
+        for start in range(0, len(ids), ELIGIBILITY_CHECK_CHUNK):
+            chunk = ids[start : start + ELIGIBILITY_CHECK_CHUNK]
+            rows = await self.db.execute(
+                select(Memory.id).where(
+                    Memory.id.in_(chunk),
+                    dedup_eligible(user_id, workspace_id, context_id),
+                    Memory.embedding_status == "success",
+                )
+            )
+            eligible.update(rows.scalars().all())
+        return eligible
+
+    async def _load_cluster_members(
+        self,
+        ids: list[UUID],
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> list[Memory]:
+        """Load outside-window cluster members and their stored vectors (#3019).
+
+        The rows are read under ``dedup_eligible`` and a successful
+        embedding; a member that no longer qualifies does not load. Each
+        loaded row's stored dense vector (its point: ``summary_embedding_id``,
+        else its id — the embedding of its summary, the text the window rows
+        are embedded from) goes into ``_summary_vectors``, so the direct-score
+        veto scores its pairs like a window row's. A vector read that fails
+        leaves the rows without vectors: their pairs are unverifiable.
+        """
+        loaded: list[Memory] = []
+        collection = self.collection_name or "kagura_memories"
+        for start in range(0, len(ids), MEMBER_LOAD_CHUNK):
+            chunk = ids[start : start + MEMBER_LOAD_CHUNK]
+            rows = list(
+                (
+                    await self.db.execute(
+                        select(Memory).where(
+                            Memory.id.in_(chunk),
+                            dedup_eligible(user_id, workspace_id, context_id),
+                            Memory.embedding_status == "success",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                continue
+            loaded.extend(rows)
+            points = {row.id: str(row.summary_embedding_id or row.id) for row in rows}
+            try:
+                vectors = await retrieve_dense_vectors(collection, list(points.values()))
+            except Exception as e:
+                logger.warning("dedup_member_vectors_unavailable", count=len(rows), error=str(e))
+                continue
+            for memory_id, point_id in points.items():
+                vector = vectors.get(point_id)
+                if vector is not None:
+                    self._summary_vectors[memory_id] = vector
+        return loaded
+
+    async def _load_outside_members(
+        self,
+        member_ids: Iterable[UUID],
+        memory_map: dict[UUID, Memory],
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> None:
+        """Add the members of ``member_ids`` not yet in ``memory_map`` (#3019)."""
+        missing = sorted({mid for mid in member_ids if mid not in memory_map}, key=str)
+        if not missing:
+            return
+        for row in await self._load_cluster_members(missing, user_id, workspace_id, context_id):
+            memory_map[row.id] = row
 
     async def _count_pinned(
         self,
@@ -910,8 +1381,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
     ) -> list[tuple[UUID, UUID, float]]:
         """Find pairs of memories with cosine similarity >= threshold.
 
-        For each memory, embed its summary and search Qdrant for
+        For each window memory, embed its summary and search Qdrant for
         high-similarity neighbors. Deduplicates pairs by sorted ID tuple.
+
+        #3019: a hit outside the window is kept when ``_eligible_outside_ids``
+        returns it (the same eligibility rule as the window, plus a successful
+        embedding), checked once after the search loop and before clustering,
+        so an excluded row can neither be merged nor chain two clusters. Pairs
+        come in window order; every pair has a window row.
 
         ``extra_neighbors`` (#1523) widens the per-memory neighbour cap by the
         number of pinned rows in scope (capped at ``MAX_EXTRA_NEIGHBORS``):
@@ -920,26 +1397,40 @@ class DedupMergePhase(EmbeddingSpendTracker):
         unpinned memory's true duplicate (the #1231 saturation shape).
         """
         neighbor_limit = NEIGHBOR_LIMIT + max(0, min(extra_neighbors, MAX_EXTRA_NEIGHBORS))
-        pairs: list[tuple[UUID, UUID, float]] = []
-        seen: set[tuple[UUID, UUID]] = set()
         memory_ids = {m.id for m in memories}
+        hits_by_row: list[tuple[UUID, list[tuple[UUID, float]]]] = []
         # #1231: cache every successfully embedded vector for the veto's
         # on-demand direct check. Reset here (not in execute()) so the
         # cache's lifecycle matches the candidate search that fills it.
         self._summary_vectors = {}
+        # #3019: per-row reasons for ``details.no_action_reasons``.
+        self._rows_without_neighbour = 0
+        self._rows_search_failed = 0
+        self._hits_not_eligible = 0
+        self._searched_ok = set()
+        self._search_failures = {}
+        self._provider_embeds = 0
 
         for memory in memories:
+            row_hits: list[tuple[UUID, float]] = []
+            # Where the vector came from, as the service reports it (#1989).
+            embedded: dict[str, Any] = {}
+            step = "embed"
             try:
                 vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
                     user_id=user_id,
                     context_id=context_id,
                     workspace_id=workspace_id,
+                    outcome=embedded,
                 )
+                if embedded.get("cache_hit") is False:
+                    self._provider_embeds += 1
                 self._embedding_calls_used += 1
                 self._embedding_tokens_used += tokens
                 self._summary_vectors[memory.id] = vector
 
+                step = "search"
                 results = await search_memories_qdrant(
                     user_id=user_id,
                     query_vector=vector,
@@ -953,22 +1444,44 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     hit_id = UUID(str(hit["id"]))
                     if hit_id == memory.id:
                         continue
-                    if hit_id not in memory_ids:
-                        continue
-                    # Canonical pair key (order-independent)
-                    a, b = sorted([memory.id, hit_id], key=str)
-                    pair_key = (a, b)
-                    if pair_key in seen:
-                        continue
-                    seen.add(pair_key)
-                    pairs.append((memory.id, hit_id, hit["score"]))
+                    row_hits.append((hit_id, hit["score"]))
             except Exception as e:
+                self._rows_search_failed += 1
+                self._search_failures[memory.id] = (
+                    "refused" if isinstance(e, _REFUSALS_NOT_ROW_SPECIFIC) else step
+                )
                 logger.warning(
                     "dedup_search_failed",
                     memory_id=str(memory.id),
                     error=str(e),
                 )
+                continue
+            self._searched_ok.add(memory.id)
+            hits_by_row.append((memory.id, row_hits))
+            if not row_hits:
+                self._rows_without_neighbour += 1
 
+        outside = sorted(
+            {hit_id for _, hits in hits_by_row for hit_id, _ in hits if hit_id not in memory_ids},
+            key=str,
+        )
+        eligible = (
+            await self._eligible_outside_ids(outside, user_id, workspace_id, context_id)
+            if outside
+            else set()
+        )
+        pairs: list[tuple[UUID, UUID, float]] = []
+        seen: set[tuple[UUID, UUID]] = set()
+        for memory_id, hits in hits_by_row:
+            for hit_id, score in hits:
+                if hit_id not in memory_ids and hit_id not in eligible:
+                    self._hits_not_eligible += 1
+                    continue
+                pair_key = _pair_key(memory_id, hit_id)
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                pairs.append((memory_id, hit_id, score))
         return pairs
 
     def _direct_pair_similarity(self, id_a: UUID, id_b: UUID) -> float | None:
@@ -1034,11 +1547,17 @@ class DedupMergePhase(EmbeddingSpendTracker):
             # deterministically (rule-based path is correct by construction
             # and needs no post-check).
             decisions = self._enforce_winner_rules(decisions, cluster_memories)
+            importance_decides = False
         else:
             # Rule-based fallback
             decisions = self._rule_based_judge(cluster_memories, pair_scores)
+            importance_decides = True
 
-        return decisions
+        # #3019: on both paths, and so in shadow mode too (no edge is written
+        # for a pair dropped here).
+        return await self._keep_both_when_unknowable(
+            decisions, cluster_memories, importance_decides=importance_decides
+        )
 
     async def _llm_judge(
         self,
@@ -1066,8 +1585,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # embedded instruction cannot steer the merge judgment. last_updated= is
         # trusted DB metadata and stays OUTSIDE the wrapper: the judge needs it
         # to pick the newer version of an updated fact as winner (#1195).
-        # Minute precision so same-day update pairs stay orderable; max of
-        # created_at/updated_at so in-place edits count as recency (#1198).
+        # Minute precision so same-day update pairs stay orderable. It is
+        # ``_recency_key``: creation, or the last text edit when there is one
+        # (#1198, #3019), the same value the winner rules and the audit use.
         # source= is trusted #887 server-stamped provenance (#1209): the judge
         # sees which side is human-authored ('manual') vs ingested, and the
         # deterministic source tie-break is verifiable against it post-hoc.
@@ -1209,27 +1729,209 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
         return decisions
 
-    @staticmethod
-    def _recency_key(mem: Memory) -> datetime | None:
-        """Last time this memory's content was current: max(created_at,
-        updated_at) over whichever are real datetimes, else None.
+    def _recency_key(self, mem: Memory) -> datetime | None:
+        """When this memory's text was last written: the later of
+        ``created_at`` and its last text edit, else None (#1198, #3019).
 
-        created_at alone is WRONG for recency (#1198 review): an in-place
-        edit preserves created_at and bumps updated_at, so the row holding
-        the current fact can carry the older created_at.
+        created_at alone misses an in-place edit (#1198 review): an edit keeps
+        created_at, so the row holding the current fact can carry the older
+        one. ``updated_at`` is not read (#3019): writes that change no text
+        stamp it too (a merge winner's tag union, the undo of a promotion, a
+        context-merge copy, and importance re-evaluation before it kept its own
+        clock), so a stamped old row would outrank a newer duplicate and the
+        newer fact would be the one retired. The edit time comes from the
+        revision log (``_load_text_edit_times``); a memory with no edit known
+        there is compared by its creation time.
         """
-        stamps = [
-            v
-            for v in (getattr(mem, "created_at", None), getattr(mem, "updated_at", None))
-            if isinstance(v, datetime)
-        ]
+        created = getattr(mem, "created_at", None)
+        edited = (getattr(self, "_text_edited_at", None) or {}).get(mem.id)
+        stamps = [v for v in (created, edited) if isinstance(v, datetime)]
         return max(stamps) if stamps else None
 
-    @classmethod
-    def _is_newer(cls, candidate: Memory, other: Memory) -> bool:
+    async def _load_text_edit_times(self, cluster_memories: list[Memory]) -> None:
+        """Read when each edited cluster member's text was last written (#3019).
+
+        A member at version 1 was never edited through a versioned path, so
+        its creation time is its recency and nothing is read; Sleep, the
+        context-merge copy and the other writes that stamp ``updated_at``
+        without an edit never move the version. The other members' ``updated``
+        revisions are read in one statement for the cluster and walked by
+        ``text_edit_times``. Each id is read once a run. A read that fails
+        is rolled back to its savepoint and leaves those members at their
+        creation time, the direction that never makes an old row look newer,
+        and marks them unread: their logged edits are unknown, so
+        ``_recency_unknowable`` keeps a pair they lose when their stamp says an
+        edit could make them the newer row.
+        """
+        self._ensure_audit_state()
+        known = self._text_edited_at
+        ids = [
+            mem.id
+            for mem in cluster_memories
+            if _edited_version(getattr(mem, "version", None)) and mem.id not in known
+        ]
+        if not ids:
+            return
+        try:
+            async with self.db.begin_nested():
+                rows = (await self.db.execute(text_edit_events_query(ids))).all()
+        except Exception as e:
+            logger.warning("dedup_text_edit_times_unavailable", count=len(ids), error=str(e))
+            rows = []
+            self._text_edit_unread.update(ids)
+        events: dict[UUID, list[TextEditEvent]] = {}
+        for row in rows:
+            events.setdefault(row.memory_id, []).append(text_edit_event(row))
+        for memory_id in ids:
+            times = text_edit_times(events.get(memory_id, ()))
+            known[memory_id] = times.last
+            if times.unsure_until is not None:
+                self._text_edit_unsure[memory_id] = times.unsure_until
+
+    async def _revision_log_began(self) -> datetime | None:
+        """When the deployment's revision log began, read once a run (#3019).
+
+        ``revision_log_began_query`` in a savepoint, made only when a pair
+        needs it. A log with no row yet, or a read that fails, is None: nothing
+        tells when logging began, so it tells no pair apart.
+        """
+        if not self._log_began_read:
+            self._log_began_read = True
+            value: object = None
+            try:
+                async with self.db.begin_nested():
+                    value = (await self.db.execute(revision_log_began_query())).scalar()
+            except Exception as e:
+                logger.warning("dedup_revision_log_start_unavailable", error=str(e))
+            self._log_began_at = value if isinstance(value, datetime) else None
+        return self._log_began_at
+
+    async def _recency_unknowable(self, winner: Memory, loser: Memory) -> bool:
+        """Could an edit of ``loser``'s text that the revision log does not
+        show make it the newer row? Then the pair is kept (#3019, owner
+        decision 2026-11-27).
+
+        ``loser`` is the row the winner rules make lose. The log holds every
+        text edit made since it began (``revision_log_began_query``), so an
+        edit it does not show was made before that. At the minute precision
+        the rules compare at, the pair is kept when:
+
+        - no logged edit wrote the loser's current text (a logged one is its
+          recency already, and an edit the log does not show is older);
+        - its ``updated_at`` is later than the winner's recency (every text
+          write stamps it, so an edit is never later than the stamp; Sleep's
+          bookkeeping stamps it without an edit, so the stamp alone tells
+          nothing);
+        - the log began after the winner's recency, or nothing tells when it
+          began. Otherwise an edit later than the winner's recency would be in
+          the log.
+
+        A loser whose revision read failed skips the last condition (its
+        logged edits are unknown). One a session rollback naming no block put
+        older text back on is kept when the latest edit it may have restored
+        (``TextEditTimes.unsure_until``) is later than the winner's recency.
+        The documented exception: a context-merge copy starts at version 1 and
+        its source's edits are logged under the source's id, so an edit made
+        there before the merge is not seen even after the log began.
+        """
+        self._ensure_audit_state()
+        winner_minute = self._recency_minute(winner)
+        if winner_minute is None or self._text_edited_at.get(loser.id) is not None:
+            return False
+        unsure = self._text_edit_unsure.get(loser.id)
+        if unsure is not None and _to_minute(unsure) > winner_minute:
+            return True
+        stamped = getattr(loser, "updated_at", None)
+        if not isinstance(stamped, datetime) or _to_minute(stamped) <= winner_minute:
+            return False
+        if loser.id in self._text_edit_unread:
+            return True
+        began = await self._revision_log_began()
+        return began is None or _to_minute(began) > winner_minute
+
+    async def _keep_both_when_unknowable(
+        self,
+        decisions: list[tuple[UUID, UUID]],
+        cluster_memories: list[Memory],
+        *,
+        importance_decides: bool,
+    ) -> list[tuple[UUID, UUID]]:
+        """Drop the decisions ``_recency_unknowable`` keeps both for (#3019).
+
+        Each is counted under ``ambiguous_recency``. On the rule path
+        (``importance_decides``) a pair decided on importance is never
+        dropped: an edit of the loser would not change that decision.
+
+        A kept row is never absorbed through a third one: every decision that
+        stays has a winner whose recency is at least its loser's at minute
+        precision (the newer-wins rule; the rule path's equal-importance
+        tie-break), or one that outranks the loser on importance. So along a
+        chain of merges L -> C -> ... -> S the survivor S is at least as recent
+        as C, or outranks L on importance, and C passed this check against L:
+        the direct pair (S, L) would pass it too.
+        """
+        id_to_mem = {m.id: m for m in cluster_memories}
+        kept: list[tuple[UUID, UUID]] = []
+        for winner_id, loser_id in decisions:
+            winner = id_to_mem.get(winner_id)
+            loser = id_to_mem.get(loser_id)
+            if (
+                winner is not None
+                and loser is not None
+                and not (importance_decides and winner.importance != loser.importance)
+                and await self._recency_unknowable(winner, loser)
+            ):
+                self._ambiguous_pairs += 1
+                self._decision_meta.pop((winner_id, loser_id), None)
+                logger.info(
+                    "dedup_merge_kept_both_recency_unknown",
+                    winner_id=str(winner_id),
+                    loser_id=str(loser_id),
+                )
+                continue
+            kept.append((winner_id, loser_id))
+        return kept
+
+    async def _unknowable_cluster_pairs(
+        self,
+        cluster_memories: list[Memory],
+        pair_scores: dict[tuple[UUID, UUID], float],
+        threshold: float,
+    ) -> int:
+        """The cluster's pairs that could merge, when every one of them would be
+        kept by ``_recency_unknowable`` whatever the judge answered (#3019).
+
+        A pair could merge when its score is at or above the threshold and no
+        supersedes edge settles it (anything else ``_plan_cluster_merges``
+        refuses). The winner rules fix its direction whatever the judge picks
+        unless both rows share their recency minute and source
+        (``_rule_winner``); every direction left must be one that is kept.
+        Returns 0 when the judge is needed: some pair could merge, or none is
+        at the threshold (the judge's answer is then recorded as before).
+        """
+        pairs = 0
+        for i, mem_x in enumerate(cluster_memories):
+            for mem_y in cluster_memories[i + 1 :]:
+                key = _pair_key(mem_x.id, mem_y.id)
+                score = pair_scores.get(key)
+                if key in self._settled_pair_keys or score is None or score < threshold:
+                    continue
+                forced = self._rule_winner(mem_x, mem_y)
+                if forced is None:
+                    directions = [(mem_x, mem_y), (mem_y, mem_x)]
+                else:
+                    winner = forced[0]
+                    directions = [(winner, mem_y if winner is mem_x else mem_x)]
+                for winner, loser in directions:
+                    if not await self._recency_unknowable(winner, loser):
+                        return 0
+                pairs += 1
+        return pairs
+
+    def _is_newer(self, candidate: Memory, other: Memory) -> bool:
         """True iff both carry a recency key and candidate's is strictly newer."""
-        c = cls._recency_key(candidate)
-        o = cls._recency_key(other)
+        c = self._recency_key(candidate)
+        o = self._recency_key(other)
         return c is not None and o is not None and c > o
 
     @staticmethod
@@ -1250,6 +1952,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
             self._override_reasons = {}
         if not hasattr(self, "_winner_overrides"):
             self._winner_overrides = 0
+        if not hasattr(self, "_text_edited_at"):
+            self._text_edited_at = {}
+        if not hasattr(self, "_text_edit_unread"):
+            self._text_edit_unread = set()
+        if not hasattr(self, "_text_edit_unsure"):
+            self._text_edit_unsure = {}
 
     def _record_override(
         self,
@@ -1271,8 +1979,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
             override_reason=reason,
         )
 
-    @classmethod
-    def _recency_minute(cls, mem: Memory) -> datetime | None:
+    def _recency_minute(self, mem: Memory) -> datetime | None:
         """Recency key truncated to the minute — the precision the judge saw.
 
         The prompt renders ``last_updated=`` at minute precision, so the
@@ -1280,8 +1987,21 @@ class DedupMergePhase(EmbeddingSpendTracker):
         are write-ordering noise, not a recency signal, and must neither
         trigger the newer-wins flip nor defeat the source tie-break (#1209).
         """
-        key = cls._recency_key(mem)
-        return key.replace(second=0, microsecond=0) if key else None
+        key = self._recency_key(mem)
+        return _to_minute(key) if key else None
+
+    def _rule_winner(self, a: Memory, b: Memory) -> tuple[Memory, str] | None:
+        """The row the winner rules make win a merge of ``a`` and ``b`` whichever
+        the judge picked, with the rule ("recency" | "source"); None when the
+        judge's pick stands (#1198/#1209). See ``_enforce_winner_rules``.
+        """
+        key_a, key_b = self._recency_minute(a), self._recency_minute(b)
+        if key_a is not None and key_b is not None and key_a != key_b:
+            return (a if key_a > key_b else b), "recency"
+        manual_a, manual_b = self._is_user_authored(a), self._is_user_authored(b)
+        if key_a == key_b and manual_a != manual_b:
+            return (a if manual_a else b), "source"
+        return None
 
     def _enforce_winner_rules(
         self,
@@ -1290,11 +2010,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
     ) -> list[tuple[UUID, UUID]]:
         """Deterministic post-checks on LLM merge decisions (#1195/#1198/#1209).
 
-        The prompt asks for these rules but cannot guarantee them — the judge
-        picked the older memory in 10-18% of update pairs in the Day-5 eval.
-        The duplicate verdict is trusted; the direction is enforced, in order,
-        at MINUTE precision (matching the ``last_updated=`` signal the judge
-        was shown):
+        The prompt asks for these rules but cannot guarantee them: the judge
+        sometimes picks the older memory of an update pair. The duplicate
+        verdict is trusted; the direction is enforced, in order, at MINUTE
+        precision (matching the ``last_updated=`` signal the judge was shown).
+        Recency is ``_recency_key``: creation, or the last text edit the
+        revision log records (#3019), never ``updated_at``.
 
         1. **Newer wins** (#1198): a winner strictly older (by minute) than
            its loser is flipped ("recency" override).
@@ -1313,17 +2034,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
             if winner is None or loser is None:
                 corrected.append((winner_id, loser_id))
                 continue
-            winner_key = self._recency_minute(winner)
-            loser_key = self._recency_minute(loser)
-            if winner_key is not None and loser_key is not None and loser_key > winner_key:
-                self._record_override((winner_id, loser_id), (loser_id, winner_id), "recency")
-                corrected.append((loser_id, winner_id))
-            elif (
-                winner_key == loser_key
-                and self._is_user_authored(loser)
-                and not self._is_user_authored(winner)
-            ):
-                self._record_override((winner_id, loser_id), (loser_id, winner_id), "source")
+            forced = self._rule_winner(winner, loser)
+            if forced is not None and forced[0] is loser:
+                self._record_override((winner_id, loser_id), (loser_id, winner_id), forced[1])
                 corrected.append((loser_id, winner_id))
             else:
                 corrected.append((winner_id, loser_id))
@@ -1579,9 +2292,13 @@ class DedupMergePhase(EmbeddingSpendTracker):
         is the state the merge would act on. Returns True (refuse) when either
         row is now pinned, soft-deleted, missing, (#1524) a time memory —
         ``update_memory`` can flip ``type`` in the same window, and a merge would
-        drop the loser's trigger window from ``recall_upcoming`` — or (#2996) a
+        drop the loser's trigger window from ``recall_upcoming`` — (#2996) a
         row the resource indexer owns (it re-points a ``remember(external_id)``
-        row it matches by natural key).
+        row it matches by natural key), (#3019) a row whose user or context
+        is no longer the one it was fetched with (moved to another context), or
+        (#3019) a row whose version moved since the fetch: an edit of its text
+        while the judge ran, so the judge compared text that is gone and the
+        recency the winner rules read is stale.
         """
         rows = (
             await self.db.execute(
@@ -1592,6 +2309,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     resource_owned_predicate().label("resource_owned"),
                     Memory.deleted_at,
                     Memory.type,
+                    # #3019: the partition the row was fetched in.
+                    Memory.user_id,
+                    Memory.context_id,
+                    # #3019: every versioned edit moves it.
+                    Memory.version,
                 )
                 .where(Memory.id.in_([winner.id, loser.id]))
                 .with_for_update()
@@ -1613,6 +2335,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 reasons.append(f"{label}_resource_owned")
             elif row.type == MEMORY_TYPE_TIME:
                 reasons.append(f"{label}_time")
+            elif row.user_id != memory.user_id or row.context_id != memory.context_id:
+                # #3019: moved to another context (or user) since the fetch.
+                reasons.append(f"{label}_moved")
+            elif _edited_since_fetch(memory, row.version):
+                reasons.append(f"{label}_edited")
         if not reasons:
             return False
         if any(reason.endswith("_resource_owned") for reason in reasons):

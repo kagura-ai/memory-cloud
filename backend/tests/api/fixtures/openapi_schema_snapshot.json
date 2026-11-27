@@ -13409,6 +13409,7 @@
       },
       "SleepReportDetail": {
         "properties": {
+          "budget_limited_phases": {},
           "completed_at": {},
           "consolidation_result": {},
           "context_deleted": {},
@@ -13514,6 +13515,7 @@
       },
       "SleepReportSummary": {
         "properties": {
+          "budget_limited_phases": {},
           "completed_at": {},
           "context_id": {},
           "context_name": {},

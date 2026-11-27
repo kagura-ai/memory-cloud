@@ -17,6 +17,7 @@ another; a phase that calls no model is never skipped for budget.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -30,6 +31,15 @@ from services.deferred_point_deletes import PointDelete
 from services.llm_service import LLMService
 from services.plan_suspension import sleep_suspended
 from services.sleep.consolidation import ConsolidationPhase
+from services.sleep.coverage import (
+    CoverageState,
+    DedupCoverage,
+    JudgeCoverage,
+    advance_dedup,
+    advance_judge,
+    current_state,
+    dump_state,
+)
 from services.sleep.dedup_merge import DedupMergePhase
 from services.sleep.edge_discovery import EdgeDiscoveryPhase
 from services.sleep.forget_retention import ForgetRetentionPhase
@@ -94,6 +104,9 @@ def phase_calls_model(phase_name: str, config: NeuralMemoryConfig) -> bool:
 # #3019: consolidation shares the run's LLM calls for its judge but is never
 # skipped at entry: its rule pass needs no model.
 _NEVER_GATED_LLM_PHASES = {"consolidation"}
+
+# #3019: the phases that work through the partition from a stored position.
+COVERAGE_PHASES = {"dedup_merge", "consolidation"}
 
 
 class SleepOrchestrator:
@@ -167,6 +180,14 @@ class SleepOrchestrator:
         # skipped, and this waits only for a pass already running.
         await lock_graph_learning(self.db, user_id)
 
+        # #3019: the positions the last run of this partition left, read under
+        # the lock (it serialises the runs of one user, so that run's commit
+        # is visible), and one clock for the whole run.
+        now = utcnow()
+        coverage = CoverageState()
+        if allowed_phases & COVERAGE_PHASES:
+            coverage = await current_state(self.db, user_id, context_id) or CoverageState()
+
         # Get context's embedding model and Qdrant collection name
         embedding_model, collection_name = await self._get_context_embedding_info(context_id)
 
@@ -185,16 +206,23 @@ class SleepOrchestrator:
         cn = collection_name
         phases = [
             ("edge_discovery", lambda: EdgeDiscoveryPhase(self.db, self.llm_service, em, cn)),
-            ("dedup_merge", lambda: DedupMergePhase(self.db, self.llm_service, em, cn)),
+            (
+                "dedup_merge",
+                lambda: DedupMergePhase(self.db, self.llm_service, em, cn, coverage=coverage.dedup),
+            ),
             ("merge_retention", lambda: MergeRetentionPhase(self.db)),
             ("forget_retention", lambda: ForgetRetentionPhase(self.db)),
             ("measurement_retention", lambda: MeasurementRetentionPhase(self.db)),
             ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service, cn)),
-            ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service, cn)),
+            (
+                "consolidation",
+                lambda: ConsolidationPhase(self.db, self.llm_service, cn, coverage=coverage.judge),
+            ),
         ]
         if index_enabled():
-            # Capture discovery's evidence before metadata-only maintenance
-            # updates updated_at. Later source edits still fail the fingerprint.
+            # Capture discovery's evidence before the dedup merge stamps a
+            # winner's updated_at (importance re-evaluation no longer stamps
+            # it, #3019). Later source edits still fail the fingerprint.
             phases.insert(1, ("related_index", lambda: RelatedIndexPhase(self.db)))
 
         # #3019: one budget per phase, the LLM calls shared among the phases
@@ -209,6 +237,8 @@ class SleepOrchestrator:
             ],
         )
 
+        # #3019: the phase instances, for their coverage outcome.
+        instances: dict[str, object] = {}
         try:
             # Run phases 1-4 based on sleep_mode
             for phase_name, phase_factory in phases:
@@ -223,9 +253,10 @@ class SleepOrchestrator:
                     continue
 
                 budget = plan.for_phase(phase_name)
+                phase = instances[phase_name] = phase_factory()
                 result = await self._run_phase(
                     phase_name,
-                    phase_factory(),
+                    phase,
                     config,
                     user_id,
                     workspace_id,
@@ -257,6 +288,10 @@ class SleepOrchestrator:
             )
             phase_results.append(reindex_result)
 
+            # #3019: the positions this run leaves for the next one, assigned
+            # inside the run (a run that fails is rolled back with them).
+            self._write_coverage(report, coverage, instances, phase_results, now=now)
+
             # Phase 6: Complete report
             await self.reporter.complete_report(report, phase_results)
 
@@ -270,6 +305,59 @@ class SleepOrchestrator:
             )
             await self.reporter.fail_report(report, str(e))
             raise
+
+    @staticmethod
+    def _write_coverage(
+        report: SleepReport,
+        coverage: CoverageState,
+        instances: dict[str, object],
+        phase_results: list[PhaseResult],
+        *,
+        now: datetime,
+    ) -> None:
+        """Set ``report.coverage_state`` from the phases' outcomes (#3019).
+
+        Only a phase that read its window has an outcome (also when it raised
+        after the read: every row is then a failure). A phase that was skipped
+        or raised before its read carries its entry unchanged. A run in which
+        neither phase produced an outcome leaves the column NULL, and the next
+        run reads the state of the run before. The whole state is written: the
+        entries this run advanced and the others as they were. Each phase
+        with an outcome gets ``details["coverage"]``, saying what moved and how
+        many rows the stall rule passed; a phase that raised has no details of
+        its own, so its details become that one key.
+        """
+        results = {r.phase_name: r for r in phase_results}
+
+        def returned(name: str) -> bool:
+            result = results.get(name)
+            return result is not None and result.success
+
+        def report_on(name: str, report_details: dict | None) -> None:
+            result = results.get(name)
+            if report_details is None or result is None:
+                return
+            if not isinstance(result.details, dict):
+                result.details = {}
+            result.details["coverage"] = report_details
+
+        dedup_window = getattr(instances.get("dedup_merge"), "coverage_outcome", None)
+        if not isinstance(dedup_window, DedupCoverage):
+            dedup_window = None
+        judge_window = getattr(instances.get("consolidation"), "coverage_outcome", None)
+        if not isinstance(judge_window, JudgeCoverage):
+            judge_window = None
+        if dedup_window is None and judge_window is None:
+            return
+        lanes, dedup_report = advance_dedup(
+            coverage.dedup, dedup_window, returned=returned("dedup_merge"), now=now
+        )
+        judge, judge_report = advance_judge(
+            coverage.judge, judge_window, returned=returned("consolidation")
+        )
+        report.coverage_state = dump_state(CoverageState(dedup=lanes, judge=judge))
+        report_on("dedup_merge", dedup_report)
+        report_on("consolidation", judge_report)
 
     async def delete_committed_points(self) -> None:
         """Delete the points this run queued; call only after the caller's commit.

@@ -46,6 +46,7 @@ import type {
   SleepReportSummary,
   SleepReportListResponse,
 } from "@/lib/api/sleep-reports";
+import { budgetPhaseLabelKey } from "@/lib/utils/sleep-narrative";
 
 const PAGE_SIZE = 50;
 
@@ -386,6 +387,26 @@ export function SleepReportsList({
                       >
                         {t(`status.${report.status}`)}
                       </span>
+                      {/* #3019: a Sleep run whose budget skipped or cut a phase. */}
+                      {report.source !== "analysis" &&
+                        report.budget_limited_phases &&
+                        Object.keys(report.budget_limited_phases).length >
+                          0 && (
+                          <span
+                            data-testid="sleep-report-budget-limited"
+                            title={t("budget.badgeTitle", {
+                              phases: Object.keys(report.budget_limited_phases)
+                                .map((phase) => {
+                                  const key = budgetPhaseLabelKey(phase);
+                                  return key ? t(key) : phase;
+                                })
+                                .join(", "),
+                            })}
+                            className="ml-1 inline-flex items-center px-2 py-0.5 text-xs font-medium rounded bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300"
+                          >
+                            {t("budget.badge")}
+                          </span>
+                        )}
                     </TableCell>
                     <TableCell className="text-right font-mono text-sm">
                       {report.memories_processed}

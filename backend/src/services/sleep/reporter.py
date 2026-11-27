@@ -8,8 +8,9 @@ Issue #471: Per-(provider, model) cost-grade breakdown via the
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,6 +140,33 @@ def accumulate_llm_response(
         count_call=count_call,
     )
     return breakdown
+
+
+def phase_outcome(
+    considered: int,
+    reasons: Mapping[str, int] | None = None,
+    *,
+    budget_cut: bool = False,
+) -> dict[str, Any]:
+    """The three keys every Sleep phase's ``details`` carries when it ran (#3019).
+
+    Args:
+        considered: What the phase looked at (memories, edges, tombstones or
+            observations, depending on the phase).
+        reasons: Count per reason for doing nothing. Zero counts are dropped,
+            so ``{}`` means nothing was left undone. The counts are not a
+            partition of ``considered``: their units differ per reason.
+        budget_cut: The phase stopped early because its budget ran out, with
+            work left.
+
+    Returns:
+        ``candidates_considered``, ``no_action_reasons`` and ``budget_cut``.
+    """
+    return {
+        "candidates_considered": int(considered),
+        "no_action_reasons": {key: int(count) for key, count in (reasons or {}).items() if count},
+        "budget_cut": bool(budget_cut),
+    }
 
 
 @dataclass
@@ -477,6 +505,11 @@ class SleepReporter:
         total_embedding_calls = 0
         total_memories = 0
         embedding_tokens_total = 0
+        # #3019: forget_retention and measurement_retention have no column;
+        # their blobs are stored inside merge_retention_result, assigned after
+        # the loop so the result does not depend on the order of the phases.
+        merge_retention_data: dict[str, Any] | None = None
+        nested_retention: dict[str, dict[str, Any]] = {}
 
         for result in phase_results:
             for breakdown in result.llm_breakdown:
@@ -561,7 +594,9 @@ class SleepReporter:
             elif result.phase_name == "dedup_merge":
                 report.dedup_result = phase_data
             elif result.phase_name == "merge_retention":
-                report.merge_retention_result = phase_data
+                merge_retention_data = phase_data
+            elif result.phase_name in ("forget_retention", "measurement_retention"):
+                nested_retention[result.phase_name] = phase_data
             elif result.phase_name == "importance_reeval":
                 report.importance_result = phase_data
             elif result.phase_name == "consolidation":
@@ -573,6 +608,9 @@ class SleepReporter:
                     **(report.edge_discovery_result or {}),
                     "related_index": phase_data,
                 }
+
+        if merge_retention_data is not None or nested_retention:
+            report.merge_retention_result = {**(merge_retention_data or {}), **nested_retention}
 
         report.embedding_tokens = embedding_tokens_total
         report.llm_calls_made = total_llm_calls

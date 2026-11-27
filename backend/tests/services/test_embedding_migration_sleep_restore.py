@@ -11,26 +11,57 @@ the row under the new routing. ``updated_at`` is not touched: Sleep dedup reads
 it as the fact's currency.
 
 Real Postgres: the restore UPDATE, the switch predicates and the re-queue
-UPDATE all run as SQL.
+UPDATE all run as SQL. The tests commit, so each deletes the rows it wrote:
+other files on the same database read whole tables (``sleep_reports``) and
+expect them empty.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE, Memory
+from models.operation_history import OperationHistory
 from models.sleep import SleepAction, SleepReport
 from services import embedding_migration_service as svc
 from utils.datetime import utcnow
 
 TARGET = "qwen3-embedding:4b"
 TARGET_DIMENSIONS = 2560
+
+# (owner user id, workspace id) of every scope the running test committed.
+_created: list[tuple[str, UUID]] = []
+
+
+@pytest.fixture(autouse=True)
+async def _delete_committed_rows(db_session):
+    """Delete every row the test committed, by its own owners and workspaces."""
+    _created.clear()
+    yield
+    owners = [owner for owner, _ in _created]
+    workspaces = [ws_id for _, ws_id in _created]
+    await db_session.rollback()
+    reports = select(SleepReport.id).where(SleepReport.workspace_id.in_(workspaces))
+    await db_session.execute(delete(SleepAction).where(SleepAction.report_id.in_(reports)))
+    await db_session.execute(delete(SleepReport).where(SleepReport.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(OperationHistory).where(OperationHistory.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(Memory).where(Memory.workspace_id.in_(workspaces)))
+    await db_session.execute(delete(Context).where(Context.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(Workspace).where(Workspace.id.in_(workspaces)))
+    await db_session.execute(delete(User).where(User.user_id.in_(owners)))
+    await db_session.commit()
+    _created.clear()
 
 
 async def _scope(db, owner: str) -> tuple[Workspace, Context]:
@@ -46,6 +77,7 @@ async def _scope(db, owner: str) -> tuple[Workspace, Context]:
     )
     db.add(ws)
     await db.flush()
+    _created.append((owner, ws.id))
     db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
     ctx = Context(
         id=uuid4(),
@@ -221,5 +253,56 @@ async def test_switch_requeues_rows_restored_after_verify(db_session):
         loser.id: "pending",
         archive.id: "pending",
         failed_archive.id: "pending",
+        untouched.id: "success",
+    }
+
+
+@pytest.mark.asyncio
+async def test_switch_requeues_a_row_reevaluated_after_the_reembed_started(db_session):
+    """#3019: importance re-evaluation writes ``importance_reevaluated_at``, not
+    ``updated_at``. A row re-evaluated after the re-embed copied it is re-queued,
+    so the new collection's point gets the new importance; a row re-evaluated
+    before is left alone."""
+    owner = f"mig-user-{uuid4().hex[:8]}"
+    ws, ctx = await _scope(db_session, owner)
+    written = utcnow() - timedelta(days=30)
+    requeue_since = utcnow() - timedelta(hours=1)
+    rescored = _row(owner, ws, ctx, written=written, importance_reevaluated_at=utcnow())
+    rescored_before = _row(
+        owner, ws, ctx, written=written, importance_reevaluated_at=written + timedelta(days=1)
+    )
+    untouched = _row(owner, ws, ctx, written=written)
+    db_session.add_all([rescored, rescored_before, untouched])
+    await db_session.commit()
+
+    assert await _count(db_session, [rescored.id], svc._requeued_by_switch(requeue_since)) == 1
+    assert await _count(db_session, [rescored.id], svc._left_by_switch(requeue_since)) == 0
+    left = [rescored_before.id, untouched.id]
+    assert await _count(db_session, left, svc._left_by_switch(requeue_since)) == 2
+    assert await _count(db_session, left, svc._requeued_by_switch(requeue_since)) == 0
+
+    with (
+        patch.object(svc, "delete_points_from_qdrant", AsyncMock()),
+        patch.object(svc, "delete_chunk_points", AsyncMock()),
+    ):
+        result = await svc.switch_context_embedding(
+            db_session, ctx.id, TARGET, TARGET_DIMENSIONS, requeue_since=requeue_since
+        )
+
+    assert result.requeued == 1
+    statuses = dict(
+        (
+            await db_session.execute(
+                select(Memory.id, Memory.embedding_status).where(
+                    Memory.id.in_([rescored.id, *left])
+                )
+            )
+        )
+        .tuples()
+        .all()
+    )
+    assert statuses == {
+        rescored.id: "pending",
+        rescored_before.id: "success",
         untouched.id: "success",
     }
