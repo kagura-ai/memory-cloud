@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import AsyncIterator, Collection, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -246,7 +246,8 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
     Cancellation is logged at warn level — typically a shutdown signal.
 
     Used by every memory write path that fires `process_pending_embedding` as a
-    fire-and-forget task: `remember`, `_update_in_place`, and `patch_memory`.
+    fire-and-forget task (`remember`, `_update_in_place` and `patch_memory`,
+    all through `spawn_embedding_task`, #3034).
     Bind via `functools.partial(_log_embedding_task_result, memory_id=...)` so
     the callback receives a stable id even after the surrounding scope unwinds.
     """
@@ -261,6 +262,67 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
             error=str(exc),
             exc_info=exc,
         )
+
+
+# #3034: strong references to the spawned embedding tasks (the event loop keeps
+# tasks only weakly), and the slots that bound how many run at once, one
+# semaphore per event loop (tests run many loops).
+_embedding_tasks: set[asyncio.Task[None]] = set()
+_embedding_slots_by_loop: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+
+
+def _reset_embedding_tasks_for_tests() -> None:
+    _embedding_tasks.clear()
+    _embedding_slots_by_loop.clear()
+
+
+def _embedding_slots() -> asyncio.Semaphore:
+    """This loop's embedding task slots (``EMBEDDING_TASK_CONCURRENCY``)."""
+    loop = asyncio.get_running_loop()
+    slots = _embedding_slots_by_loop.get(loop)
+    if slots is None:
+        from config.settings import get_settings
+
+        for stale in [lp for lp in _embedding_slots_by_loop if lp.is_closed()]:
+            del _embedding_slots_by_loop[stale]
+        slots = asyncio.Semaphore(get_settings().embedding_task_concurrency)
+        _embedding_slots_by_loop[loop] = slots
+    return slots
+
+
+async def _run_in_embedding_slot(run: Coroutine[Any, Any, None]) -> None:
+    """Await ``run`` once a slot is free; close it unstarted when cancelled first."""
+    try:
+        async with _embedding_slots():
+            await run
+    finally:
+        # A no-op once ``run`` finished; a task cancelled while it waited
+        # closes the never-started pipeline (no "never awaited" warning), and
+        # its row stays ``pending`` for the sweep.
+        run.close()
+
+
+def spawn_embedding_task(memory_id: UUID) -> asyncio.Task[None]:
+    """Start the embedding of a committed row in the background, limited (#3034).
+
+    The one entry of every write path (remember / remember_batch items, an
+    in-place update, a patch). At most ``EMBEDDING_TASK_CONCURRENCY`` of these
+    run at once per event loop; a task over the limit waits for a slot, its
+    row stays ``pending`` and the sweep may take it first (the pipeline's
+    atomic claim then makes the late task a no-op). The slot is taken here,
+    not in ``process_pending_embedding``: the sweep and the rollback re-embed
+    call that directly and must not queue behind request tasks.
+
+    ``process_pending_embedding`` is looked up as the module global when the
+    task is spawned (as before the limit), so a patched pipeline applies to
+    the tasks spawned under it.
+    """
+    run = process_pending_embedding(memory_id)
+    task = asyncio.get_running_loop().create_task(_run_in_embedding_slot(run))
+    _embedding_tasks.add(task)
+    task.add_done_callback(_embedding_tasks.discard)
+    task.add_done_callback(functools.partial(_log_embedding_task_result, memory_id=str(memory_id)))
+    return task
 
 
 def _is_trusted_recall(request: RecallRequest) -> bool:
@@ -1948,11 +2010,7 @@ class MemoryService:
         """Start the embedding task for a committed row, once."""
         if prepared.embedding_scheduled:
             return
-        memory_id = prepared.memory.id
-        task = asyncio.create_task(process_pending_embedding(memory_id))
-        task.add_done_callback(
-            functools.partial(_log_embedding_task_result, memory_id=str(memory_id))
-        )
+        spawn_embedding_task(prepared.memory.id)
         prepared.embedding_scheduled = True
 
     def _bare_response(self, prepared: _PreparedRemember) -> RememberResponse:
@@ -2360,15 +2418,12 @@ class MemoryService:
         record_edit(self.db, memory, before, actor_user_id=user_id)
 
         if needs_reembed:
-            # Async embedding via create_task (same pattern as remember)
+            # Async embedding, limited like remember's (#3034)
             memory.embedding_status = "pending"
             await self.db.flush()
             await self.db.commit()
 
-            task = asyncio.create_task(process_pending_embedding(memory.id))
-            task.add_done_callback(
-                functools.partial(_log_embedding_task_result, memory_id=str(memory.id))
-            )
+            spawn_embedding_task(memory.id)
         else:
             await self._update_sync_qdrant_payload(
                 memory, request, normalized_ctx_summary, effective_details
@@ -3439,10 +3494,7 @@ class MemoryService:
             await self.db.flush()
             await self.db.commit()
 
-            task = asyncio.create_task(process_pending_embedding(memory.id))
-            task.add_done_callback(
-                functools.partial(_log_embedding_task_result, memory_id=str(memory.id))
-            )
+            spawn_embedding_task(memory.id)
 
             await self._patch_invalidate_edges(
                 memory, user_id, memory_workspace_id, memory_context_id
