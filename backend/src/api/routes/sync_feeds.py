@@ -27,7 +27,7 @@ from services import sync_feed_runs as runs
 from services.sync_credentials import CredentialAuthority, sync_token_boundary
 from services.sync_feed_authority import FeedFence, feed_fence, runs_enabled, worker_target
 from services.sync_feed_commit import commit_run
-from services.sync_feed_index import index_status
+from services.sync_feed_index import index_progress, index_status
 from utils.exceptions import SyncProtocolError
 
 router = APIRouter(
@@ -227,7 +227,11 @@ async def inspect_feed_run(
     exact_query(request)
     async with worker(db, token, installation_id, "results:read") as (authority, _fence):
         row, feed = await runs.run_for(db, authority, run_id)
-        result = {**runs.run_view(row), "index_status": await index_status(db, row, feed)}
+        result = {
+            **runs.run_view(row),
+            "index_status": await index_status(db, row, feed),
+            "index_progress": await index_progress(db, row),
+        }
     return result
 
 
