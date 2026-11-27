@@ -205,8 +205,9 @@ class TestDrain:
         await db_session.refresh(first)
         assert first.job_status == "idle"
         assert DRAIN_CONTINUES_KEY not in first.metrics
-        # The last batch's counters are stored, as for a single batch.
-        assert first.metrics["applied_upserts"] == 50
+        # A drain is one run: its batches' counts are stored together.
+        assert first.metrics["applied_upserts"] == 250
+        assert first.metrics["applied_deletes"] == 0
         [line] = _completed(logs, first)
         assert line["batches"] == 3
         assert line["events"] == 250
@@ -222,7 +223,7 @@ class TestDrain:
         with patch.object(job, "record_indexer_run", record):
             await _tick(db_session, targets)
 
-        record.assert_awaited_once_with(first.resource_id, first.context_id)
+        record.assert_awaited_once_with(first.resource_id, first.context_id, count_hour=True)
 
     async def test_each_batch_gets_the_record_the_last_one_returned(self, db_session, first):
         failed = {"event_id": 3, "doc_id": "d3", "error_class": "RuntimeError"}
@@ -347,8 +348,8 @@ class TestTimeBudget:
 
         _result, logs = await _tick(db_session, targets)
 
-        # 65 s, 130 s: room for another batch; 195 s > 180 s: stop.
-        assert targets.batches(first) == 3
+        # 65 s, 130 s: a third batch would end at 195 s > 180 s: stop.
+        assert targets.batches(first) == 2
         await db_session.refresh(first)
         assert first.job_status == "queued"
         assert before <= first.next_run_at <= utcnow()
@@ -365,7 +366,7 @@ class TestTimeBudget:
 
         _result, logs = await _tick(db_session, targets, redis)
 
-        assert targets.batches(first) == 6
+        assert targets.batches(first) == 4
         assert not [e for e in logs if e["event"] == "indexer_waiting_for_interval"]
 
     async def test_the_continuation_is_admitted_past_the_hourly_cap(self, db_session, first):
@@ -377,7 +378,7 @@ class TestTimeBudget:
 
         await _tick(db_session, targets, redis)
 
-        assert targets.batches(first) == 6
+        assert targets.batches(first) == 4
 
     async def test_the_continuation_ends_when_the_backlog_is_applied(self, db_session, first):
         targets = _Targets(batch_seconds=65)
@@ -445,7 +446,7 @@ class TestFairness:
 
         await _tick(db_session, targets)
 
-        assert targets.batches(first) == 3
+        assert targets.batches(first) == 2
         assert targets.batches(second) == 1
         await db_session.refresh(second)
         assert second.job_status == "idle"
@@ -472,3 +473,159 @@ class TestFairness:
         assert second.next_run_at == due
         [deferred] = [e for e in logs if e["event"] == "indexer_tick_budget_used"]
         assert deferred["deferred"] >= 1
+
+
+def _hour_key(state: IndexerState) -> str:
+    return f"indexer:runs:{state.resource_id}:{state.context_id}:hour"
+
+
+def _last_run_key(state: IndexerState) -> str:
+    return f"indexer:last_run:{state.resource_id}:{state.context_id}"
+
+
+async def _queue_again(db_session, state: IndexerState) -> None:
+    state.job_status, state.next_run_at = "queued", utcnow() - timedelta(days=1)
+    await db_session.commit()
+
+
+class TestOneRunPerDrain:
+    """A drain over several ticks is one run for the limiter: the hourly cap
+    counts its first tick, and the interval counts from its last."""
+
+    async def test_continuations_do_not_fill_the_hourly_cap(self, db_session, first):
+        ticks = MAX_RUNS_PER_HOUR + 1
+        targets = _Targets(batch_seconds=65)
+        # Two batches of 100 per tick: the last tick drains it.
+        targets.add(first, ticks * 200)
+        redis = _Redis()
+        stops = []
+        for _ in range(ticks):
+            _result, logs = await _tick(db_session, targets, redis)
+            stops += [line["stop"] for line in _completed(logs, first)]
+
+        assert stops == ["target_budget"] * (ticks - 1) + ["drained"]
+        assert redis.store[_hour_key(first)] == "1"
+
+        # New events inside the interval: refused by the interval, not the cap.
+        await _queue_again(db_session, first)
+        targets.pending[first.resource_id + str(first.context_id)] = 5
+        _result, logs = await _tick(db_session, targets, redis)
+        [waiting] = [e for e in logs if e.get("resource_id") == first.resource_id]
+        assert waiting["event"] == "indexer_waiting_for_interval"
+        assert waiting["reason"].startswith("min_interval_not_met")
+
+        # Once the interval has passed since the drain ended, the run goes.
+        import time
+
+        redis.store[_last_run_key(first)] = str(time.time() - MIN_INTERVAL_SECONDS)
+        await _queue_again(db_session, first)
+        _result, logs = await _tick(db_session, targets, redis)
+        assert _completed(logs, first)[0]["stop"] == "drained"
+        assert redis.store[_hour_key(first)] == "2"
+
+    async def test_a_continuation_refreshes_the_last_run(self, db_session, first):
+        targets = _Targets(batch_seconds=65)
+        targets.add(first, 400)
+        redis = _Redis()
+        await _tick(db_session, targets, redis)
+        redis.store[_last_run_key(first)] = "0"
+
+        await _tick(db_session, targets, redis)
+
+        assert float(redis.store[_last_run_key(first)]) > 0
+        assert redis.store[_hour_key(first)] == "1"
+
+
+class TestSlowBatches:
+    """A batch is started only when one more of the last batch's length fits
+    the budget, so a slow deployment does not run past the next tick."""
+
+    async def test_a_slow_batch_is_not_followed_by_one_that_would_overrun(self, db_session, first):
+        second = await _second_target(db_session, first, waited=timedelta(hours=12))
+        due = second.next_run_at
+        targets = _Targets(batch_seconds=150)
+        targets.add(first, 1000)
+        targets.add(second, 100)
+
+        _result, logs = await _tick(db_session, targets)
+
+        # 150 s; a second batch would end at 300 s, the next tick (past both
+        # budgets; the tick's is checked first).
+        assert targets.batches(first) == 1
+        assert _completed(logs, first)[0]["stop"] == "tick_budget"
+        await db_session.refresh(first)
+        assert first.job_status == "queued"
+        assert first.metrics[DRAIN_CONTINUES_KEY] is True
+        # 150 s + a 150 s batch passes the tick budget: the next row waits.
+        assert targets.batches(second) == 0
+        await db_session.refresh(second)
+        assert second.job_status == "queued"
+        assert second.next_run_at == due
+        assert [e["deferred"] for e in logs if e["event"] == "indexer_tick_budget_used"] == [1]
+
+
+class TestFailures:
+    async def test_a_failed_statement_after_a_batch_marks_the_target_failed(
+        self, db_session, first
+    ):
+        """The aborted transaction is rolled back before the failed state is
+        written, and the tick goes on to the next target."""
+        from sqlalchemy import text
+
+        second = await _second_target(db_session, first, waited=timedelta(hours=12))
+        targets = _Targets()
+        targets.add(first, 500)
+        targets.add(second, 50)
+        has_pending = targets.has_pending
+
+        async def _fails_for_first(db, state_id):
+            if state_id == first.id:
+                await db.execute(text("SELECT 1/0"))
+            return await has_pending(db, state_id)
+
+        targets.has_pending = _fails_for_first
+
+        result, logs = await _tick(db_session, targets)
+
+        assert result == {"picked": 2, "failed": 1, "rate_limited": 0}
+        await db_session.refresh(first)
+        assert first.job_status == "failed"
+        assert "error" in first.metrics
+        await db_session.refresh(second)
+        assert second.job_status == "idle"
+        assert targets.batches(second) == 1
+
+
+class TestStaleRunning:
+    """A target left ``running`` by a process that stopped mid-run is queued
+    again once its last batch is older than the stale limit (#3038)."""
+
+    async def test_a_stale_running_target_is_queued_and_run(self, db_session, first):
+        first.job_status = "running"
+        first.last_run_at = utcnow() - job.STALE_RUNNING_AFTER - timedelta(minutes=1)
+        await db_session.commit()
+        targets = _Targets()
+        targets.add(first, 50)
+
+        _result, logs = await _tick(db_session, targets)
+
+        assert targets.batches(first) == 1
+        await db_session.refresh(first)
+        assert first.job_status == "idle"
+        assert _completed(logs, first)[0]["stop"] == "drained"
+
+    async def test_a_running_target_with_a_recent_batch_is_left_alone(self, db_session, first):
+        first.job_status = "running"
+        first.last_run_at = utcnow() - timedelta(minutes=5)
+        await db_session.commit()
+        targets = _Targets()
+        targets.add(first, 50)
+
+        await _tick(db_session, targets)
+
+        await db_session.refresh(first)
+        assert targets.batches(first) == 0
+        assert first.job_status == "running"
+
+    def test_the_stale_limit_is_well_above_a_tick(self):
+        assert job.STALE_RUNNING_AFTER.total_seconds() >= 5 * DRAIN_TICK_BUDGET_SECONDS

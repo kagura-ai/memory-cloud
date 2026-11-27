@@ -166,9 +166,14 @@ async def test_a_drain_cut_by_its_budget_continues_at_the_next_tick(feeds, ticks
 
 
 async def test_a_run_without_index_events_reports_zero_of_zero(feeds, ticks):
-    """A re-sent snapshot creates no index events: nothing to count."""
+    """A re-sent snapshot creates no index events: nothing to count. Until the
+    earlier run's events are applied it still reads ``pending`` (it waits on
+    them), so ``0`` of ``0`` is not a completion signal; ``index_status`` is."""
     await committed(feeds, [product("sku-0")])
-    await ticks()
     resent = await committed(feeds, [product("sku-0")])
+
+    assert await _progress(feeds, resent["run_id"]) == ("pending", {"indexed": 0, "total": 0})
+
+    await ticks()
 
     assert await _progress(feeds, resent["run_id"]) == ("unchanged", {"indexed": 0, "total": 0})

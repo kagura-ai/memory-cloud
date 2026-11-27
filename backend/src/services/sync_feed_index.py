@@ -20,6 +20,13 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# An ``indexer_state`` row ``running`` whose ``last_run_at`` is older than this
+# has no run in progress: the job refreshes it at the start of a run and at
+# every batch commit, and a drain's batches end within a 5-minute tick. The
+# limit is well above that, so a live run is never queued a second time; the
+# job and the sync maintenance queue such a row again (#3038).
+STALE_RUNNING_AFTER = timedelta(minutes=30)
+
 # #2915: the activity retention is not tick work. One pass of up to 500 rows an
 # hour per process keeps the 90-day bound; the first tick after a start runs it.
 ACTIVITY_PRUNE_INTERVAL_SECONDS = 3600
@@ -175,7 +182,7 @@ async def maintain_sync_runs(db: AsyncSession) -> None:
 
     # A manual run whose request ended is expired now, not at its 24-hour expiry (#2911).
     await expire_ended_manual_runs(db)
-    stale = utcnow() - timedelta(minutes=30)
+    stale = utcnow() - STALE_RUNNING_AFTER
     eligible = (
         select(SyncIndexOutbox.run_id)
         .outerjoin(
@@ -384,7 +391,9 @@ async def index_progress(db: AsyncSession, row: SyncRun) -> dict[str, int]:
     run, which ``index_status`` requires for ``complete``; an event the
     indexer recorded as failed is passed too (``index_status`` says
     ``failed`` then). A run without index events (not committed, or a commit
-    that changed nothing) reads ``0`` of ``0``.
+    that changed nothing) reads ``0`` of ``0``; its ``index_status`` can still
+    be ``pending`` while the feed's earlier events wait, so ``index_status``,
+    not ``indexed == total``, says a run is done.
     """
     outbox = await db.get(SyncIndexOutbox, row.id)
     if outbox is None:
