@@ -365,7 +365,12 @@ class TestResourceIndexer:
         result.scalars.return_value.all.return_value = []
         db.execute = AsyncMock(return_value=result)
         monkeypatch.setattr(mod, "get_db", mock_get_db_factory(db))
-        assert await mod.run_queued_indexers() == {"picked": 0, "failed": 0, "rate_limited": 0}
+        assert await mod.run_queued_indexers() == {
+            "picked": 0,
+            "deferred": 0,
+            "failed": 0,
+            "rate_limited": 0,
+        }
         monkeypatch.setattr(mod, "get_db", mock_get_db_factory(_db(execute_error=OSError())))
         assert await mod.run_queued_indexers() == _failed(OSError)
 

@@ -50,6 +50,7 @@ from services.resource_indexer import (
     get_indexer_status_for_context,
     recorded_failed_events,
 )
+from tasks.job_runs import JobFailed
 from tasks.resource_indexer_job import (
     MAX_RUNS_PER_HOUR,
     MIN_INTERVAL_SECONDS,
@@ -237,6 +238,22 @@ class TestRecordIndexerRun:
         assert setex_args[0] == f"indexer:last_run:res-1:{ctx_id}"
         assert setex_args[1] == MIN_INTERVAL_SECONDS * 2
 
+    async def test_a_drain_continuation_sets_only_the_last_run(self):
+        """#3038: a drain is one run for the hourly cap; its later ticks move
+        the last-run timestamp, so the interval counts from the drain's end."""
+        client = _fake_redis()
+        ctx_id = uuid.uuid4()
+        inc = AsyncMock(return_value=1)
+        with (
+            patch("tasks.resource_indexer_job.get_redis_client", return_value=client),
+            patch("tasks.resource_indexer_job.increment_counter", inc),
+        ):
+            await record_indexer_run("res-1", ctx_id, count_hour=False)
+
+        inc.assert_not_awaited()
+        client.setex.assert_awaited_once()
+        assert client.setex.call_args.args[0] == f"indexer:last_run:res-1:{ctx_id}"
+
     async def test_record_run_swallows_redis_errors(self):
         """A failing increment must NOT raise — recording failure can't block indexing."""
         client = _fake_redis()
@@ -357,7 +374,7 @@ class TestRunQueuedIndexers:
         ):
             result = await run_queued_indexers()
 
-        assert result == {"picked": 1, "failed": 0, "rate_limited": 0}
+        assert result == {"picked": 1, "deferred": 0, "failed": 0, "rate_limited": 0}
         indexer_instance.process_incremental.assert_awaited_once()
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "idle"
@@ -506,6 +523,7 @@ class TestRunQueuedIndexers:
         db = MagicMock()
         db.execute = AsyncMock(side_effect=RuntimeError("db gone"))
         db.commit = AsyncMock()
+        db.rollback = AsyncMock()
 
         with (
             patch("tasks.resource_indexer_job.get_db", _mock_get_db(db)),
@@ -515,9 +533,13 @@ class TestRunQueuedIndexers:
             ),
         ):
             # Must return normally — the outer try/except logs and returns.
-            await run_queued_indexers()
+            result = await run_queued_indexers()
 
-        db.execute.assert_awaited_once()
+        # The stale-running recovery (#3038) fails and is rolled back; the
+        # pick after it fails too and ends the tick.
+        assert db.execute.await_count == 2
+        db.rollback.assert_awaited()
+        assert isinstance(result, JobFailed)
 
 
 FAILED_EVENT = {"event_id": 7, "doc_id": "doc_7", "error_class": "RuntimeError"}

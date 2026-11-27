@@ -122,6 +122,8 @@ class TestResponseContract:
         assert body["resource_id"] == "ec_products"
         assert body["state"] is None
         assert body["recent_events"] == []
+        # #3038: optional, null when the service does not know it.
+        assert body["pending_events"] is None
 
     def test_returns_full_state_when_indexer_has_run(self, client_workspace_a):
         ctx = _make_context()
@@ -156,6 +158,7 @@ class TestResponseContract:
                         "created_at": "2026-04-15T00:00:00Z",
                     }
                 ],
+                "pending_events": 250,
             }
 
         with (
@@ -177,6 +180,7 @@ class TestResponseContract:
         assert body["state"]["metrics"]["failed_events"] == 3
         assert len(body["recent_events"]) == 1
         assert body["recent_events"][0]["op"] == "upsert"
+        assert body["pending_events"] == 250
 
     def test_invalid_job_status_enum_is_rejected_at_response_boundary(self, client_workspace_a):
         """Pydantic must refuse a job_status outside the Literal enum.
@@ -288,7 +292,7 @@ class TestOpenAPISnapshot:
     update, the frontend `IndexerStatusResponse` types must be updated in
     the same change set."""
 
-    EXPECTED_TOP_LEVEL_FIELDS = {"resource_id", "state", "recent_events"}
+    EXPECTED_TOP_LEVEL_FIELDS = {"resource_id", "state", "recent_events", "pending_events"}
     EXPECTED_STATE_FIELDS = {
         "job_status",
         "last_run_at",

@@ -123,6 +123,11 @@ export interface IndexerStatusResponse {
   state: IndexerState | null;
   /** Newest first, server-capped at 5. */
   recent_events: ResourceEventItem[];
+  /**
+   * The resource's events after the indexer's offset (all of them when
+   * `state` is null); 0 once the indexer has caught up, null when unknown.
+   */
+  pending_events?: number | null;
 }
 
 /**

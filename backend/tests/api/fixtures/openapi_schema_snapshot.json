@@ -6538,6 +6538,16 @@
       },
       "IndexerStatusResponse": {
         "properties": {
+          "pending_events": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "recent_events": {
             "items": {
               "$ref": "#/components/schemas/ResourceEventItem"

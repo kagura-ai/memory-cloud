@@ -146,6 +146,14 @@ class IndexerStatusResponse(BaseModel):
             "a cursor-paginated timeline belongs on a dedicated endpoint."
         ),
     )
+    pending_events: int | None = Field(
+        None,
+        description=(
+            "Events of the resource the indexer has not applied yet: those "
+            "after ``state.last_offset``, or all of them when ``state`` is "
+            "``None``. 0 once the indexer has caught up."
+        ),
+    )
 
 
 # ============================================================================
