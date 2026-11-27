@@ -17,11 +17,11 @@ old keys), a deleted memory, an unpublished or switched-off endpoint — is
 from __future__ import annotations
 
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mcp_server.public.feed_record import public_source_url
 from mcp_server.public.publication import load_serving_endpoint
 from mcp_server.public.scope import public_rows
 from models.memory import Memory
@@ -30,19 +30,6 @@ from services.guardrail_digest import cut_summary, flatten_summary
 from services.observability_scope import ScopedResource
 
 DOCUMENT_TITLE_MAX_CHARS = 200
-
-
-def public_source_url(uri: str | None) -> str | None:
-    """``uri`` when it is an absolute http(s) URL, else ``None`` (the #2675 rule)."""
-    if not uri:
-        return None
-    try:
-        parts = urlsplit(uri)
-    except ValueError:
-        return None
-    if parts.scheme.lower() in ("http", "https") and parts.netloc:
-        return uri
-    return None
 
 
 @dataclass(frozen=True)

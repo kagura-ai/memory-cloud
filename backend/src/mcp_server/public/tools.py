@@ -20,13 +20,13 @@ import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from mcp.types import TextContent
 from sqlalchemy import event, func, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mcp_server.public.feed_record import public_source_url
 from mcp_server.public.limits import (
     PUBLIC_DEFAULT_EXPLORE_LIMIT,
     PUBLIC_DEFAULT_K,
@@ -182,17 +182,8 @@ def _max_chars_arg(args: dict[str, Any]) -> int:
 # ============================================================================
 
 
-def _source_url(uri: str | None) -> str | None:
-    """``uri`` when it is an absolute http(s) URL, else ``None`` (omitted)."""
-    if not uri:
-        return None
-    try:
-        parts = urlsplit(uri)
-    except ValueError:
-        return None
-    if parts.scheme.lower() in ("http", "https") and parts.netloc:
-        return uri
-    return None
+# One URL rule for every public surface (an existing test calls it by this name).
+_source_url = public_source_url
 
 
 def _project(memory: Memory, score: float | None = None) -> dict[str, Any]:
