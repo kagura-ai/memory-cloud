@@ -65,7 +65,8 @@ const sections = [
   ["profile-emails", "emails"],
   ["profile-mcp-notices", "mcpNotices"],
   ["profile-workspaces", "workspaces"],
-  ["profile-deletion", "deletion"],
+  // Account deletion stays at the bottom of the page (#profile-deletion) but has no
+  // entry here: the section links are for settings people come back to.
 ] as const;
 
 export default function ProfilePage() {
