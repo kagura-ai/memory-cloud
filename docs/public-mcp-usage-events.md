@@ -139,4 +139,7 @@ For a request to the REST public search:
 For either:
 
 12. A request that carries a valid web sign-in cookie of the same deployment is also recorded as that signed-in user's request (path, method, status, response time), like any request of a signed-in user; the public endpoint itself does not read the cookie.
-13. **The application server's access log** (uvicorn's, on by default): one line per HTTP request with the client address the server sees (a reverse proxy's address, unless `FORWARDED_ALLOW_IPS` trusts that proxy) and the request line — method, path with the endpoint's address, and query string. Kept as long as the operator keeps application logs; uvicorn's `--no-access-log` turns it off. For operations.
+13. **The application server's access log** (uvicorn's, on by default): one line per HTTP request with a client address and the request line — method, path with the endpoint's address, and query string. Kept as long as the operator keeps application logs; uvicorn's `--no-access-log` turns it off. For operations. The address is the TCP peer's, unless that peer is a trusted proxy:
+    - with nothing in front of the server, the visitor's address;
+    - behind a reverse proxy that uvicorn does not trust, the proxy's address;
+    - behind a trusted proxy, the visitor's address as the proxy forwards it (`X-Forwarded-For`). uvicorn trusts the addresses in `FORWARDED_ALLOW_IPS` (or `--forwarded-allow-ips`), by default `127.0.0.1` and `::1`, so a proxy that forwards over the loopback interface is trusted without any setting.
