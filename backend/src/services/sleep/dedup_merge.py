@@ -17,8 +17,8 @@ Algorithm:
 Academic notes:
 - Union-Find transitivity: A~B + B~C clusters all three even if A~C is low.
   Cluster size cap (5) + LLM second gate mitigate runaway merges. Templated
-  corpora collapse into one mega-cluster (Day-5: 782 pairs → 1 cluster);
-  capacity-capped greedy agglomeration (#1184) restores partial progress.
+  corpora can collapse into one mega-cluster; capacity-capped greedy
+  agglomeration (#1184) restores partial progress.
 - Positional bias: batch order is shuffled before LLM calls.
 - ID hallucination: short labels (A, B, C) used in prompts, mapped back to UUIDs.
 """
@@ -245,8 +245,8 @@ def _split_oversize_cluster(
 
     Templated corpora (daily standups, status logs) push cross-unit similarity
     over the candidate threshold, union-find collapses everything into one
-    mega-cluster (Day-5 eval: 782 pairs → 1 cluster), and the old wholesale
-    deferral disabled dedup for exactly the corpora that need it most.
+    mega-cluster, and the old wholesale deferral disabled dedup for exactly
+    the corpora that need it most.
 
     Greedy capacity-capped agglomeration: walk the cluster's internal pairs in
     DESCENDING similarity and union two components only while the merged size
@@ -479,9 +479,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         Eligibility is deterministic and judged on the SCORE, not on cluster
         membership: union-find clusters chain transitively AND candidate
         generation can regress, so the judge can nominate pairs whose true
-        pairwise cosine is far below the threshold — observed 0.43-0.66 under
-        0.92, destroying distinct facts. A merge executes only when the pair's
-        direct similarity meets the configured threshold.
+        pairwise cosine is far below the threshold, which would destroy
+        distinct facts. A merge executes only when the pair's direct
+        similarity meets the configured threshold.
 
         #2584: a loser carrying one of ``exempt_tags`` (exact match) is never
         retired, in either mode. The pair is skipped, not flipped: merge folds

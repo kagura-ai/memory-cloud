@@ -1189,10 +1189,13 @@ class Settings(BaseSettings):
     # holds a pooled connection for its whole duration. Besides them a process
     # holds: on the scheduler leader, the leader's own connection and, while
     # the sweep runs, its session plus the run it does; anywhere, one run per
-    # session rollback in flight. At the defaults (pool 5 + overflow 10) that is at most
-    # 4 + 4 = 8 of 15 on the leader with one rollback in flight: request handlers may run on overflow
-    # connections there, and the overflow is their headroom. Raise
-    # DB_POOL_SIZE / DB_MAX_OVERFLOW together with this value.
+    # session rollback in flight. At the defaults (pool 5 + overflow 10) that
+    # is at most 4 + 4 = 8 of 15 on the leader with one rollback in flight:
+    # request handlers may run on overflow connections there, and the
+    # overflow is their headroom. Scheduled jobs on the leader (the resource
+    # indexer's drain, Sleep) hold a session of their own in addition while
+    # they run. Raise DB_POOL_SIZE / DB_MAX_OVERFLOW together with this value;
+    # a pool smaller than the default needs it below their sum.
     embedding_task_concurrency: int = Field(
         default=4,
         ge=1,

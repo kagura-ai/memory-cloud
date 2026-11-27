@@ -14,6 +14,8 @@
 > Changed by #2918 (**experimental**, may change in a minor release): new `me_workspace_slots.py` models for `/api/v1/me/workspace-slots` (below; the routes 404 unless `WORKSPACE_SLOT_SUSPENSION=enforce`); `WorkspaceResponse` gains `slot_suspended` (filled by `GET /workspaces` on every row, false elsewhere and unless enforced); `/auth/me` gains `user.workspace_selection_required` and `/system/info` gains `features.workspace_slots` (plain dicts, outside this enumeration's scope). The refusals (`SLOT-001`..`SLOT-004`) are in `error-responses.md`.
 > Changed by #2950: `/system/info` gains `kagura_public_return_url` (the deployment's `KAGURA_PUBLIC_RETURN_URL`, or `null`; a plain dict, outside this enumeration's scope). No model changes.
 > Changed by #3038: `IndexerStatusResponse` gains the optional `pending_events` (the resource's events after the indexer's offset, `null` when unknown). The worker's run status (`GET /api/v1/sync/installations/{iid}/runs/{run}`, a plain dict, outside this enumeration's scope) gains `index_progress` (`{indexed, total}`).
+> Changed by #3022: new `NeverDeliveredCountResponse` (`contexts.py`, below) for `GET /api/v1/contexts/{context_id}/never-delivered-count`, how many of the caller's memories in the context were never delivered. The memory list's `never_delivered` filter is a query parameter (no model change).
+> Changed by #3019: `SleepReportSummary` gains the optional `budget_limited_phases` (`{phase: "skipped" | "cut"}`, derived from the stored phase results; `{}` for a report without such a phase), so the list and the detail (`SleepReportDetail` inherits it) carry it. The detail's `*_result` dicts (untyped pipeline internals) gain the per-phase keys `candidates_considered`, `no_action_reasons` and `budget_cut`, and `merge_retention_result` also holds the `forget_retention` and `measurement_retention` results.
 
 Notes:
 
@@ -670,6 +672,12 @@ Notes:
 - `total_pairs: int` — required
 - `threshold: float` — required
 - `memories_scanned: int` — required
+
+### NeverDeliveredCountResponse (BaseModel, L2080)
+> #3022: how many of the caller's memories in a context were never delivered.
+- `count: int` — required (never-delivered memories of the caller in this context)
+- `older_than_days: int` — required (the age threshold the count applied)
+- `exempt_tags: list[str]` — required (tags that keep a memory out of the count, exact match, sorted)
 
 ## cost_aggregation.py
 
