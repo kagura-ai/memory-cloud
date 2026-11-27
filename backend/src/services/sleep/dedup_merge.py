@@ -193,6 +193,22 @@ def _edited_version(version: object) -> bool:
     return isinstance(version, int) and not isinstance(version, bool) and version > 1
 
 
+def _edited_since_fetch(memory: Memory, locked_version: object) -> bool:
+    """The locked row's version is not the one ``memory`` was fetched with (#3019).
+
+    Both must be ints (bool excluded) for the comparison to mean anything; a
+    test double without one reads as unchanged.
+    """
+    fetched = getattr(memory, "version", None)
+    return (
+        isinstance(fetched, int)
+        and not isinstance(fetched, bool)
+        and isinstance(locked_version, int)
+        and not isinstance(locked_version, bool)
+        and fetched != locked_version
+    )
+
+
 # Similarity threshold for auto-merge without LLM (LLM-off mode)
 AUTO_MERGE_THRESHOLD = 0.98
 
@@ -2063,8 +2079,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
         ``update_memory`` can flip ``type`` in the same window, and a merge would
         drop the loser's trigger window from ``recall_upcoming`` — (#2996) a
         row the resource indexer owns (it re-points a ``remember(external_id)``
-        row it matches by natural key), or (#3019) a row whose user or context
-        is no longer the one it was fetched with (moved to another context).
+        row it matches by natural key), (#3019) a row whose user or context
+        is no longer the one it was fetched with (moved to another context), or
+        (#3019) a row whose version moved since the fetch: an edit of its text
+        while the judge ran, so the judge compared text that is gone and the
+        recency the winner rules read is stale.
         """
         rows = (
             await self.db.execute(
@@ -2078,6 +2097,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     # #3019: the partition the row was fetched in.
                     Memory.user_id,
                     Memory.context_id,
+                    # #3019: every versioned edit moves it.
+                    Memory.version,
                 )
                 .where(Memory.id.in_([winner.id, loser.id]))
                 .with_for_update()
@@ -2102,6 +2123,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
             elif row.user_id != memory.user_id or row.context_id != memory.context_id:
                 # #3019: moved to another context (or user) since the fetch.
                 reasons.append(f"{label}_moved")
+            elif _edited_since_fetch(memory, row.version):
+                reasons.append(f"{label}_edited")
         if not reasons:
             return False
         if any(reason.endswith("_resource_owned") for reason in reasons):

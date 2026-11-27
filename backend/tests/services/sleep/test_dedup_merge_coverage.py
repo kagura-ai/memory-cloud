@@ -1016,6 +1016,52 @@ class TestPinRecheckAtExecution:
         assert executed is False
         phase.edge_repo.transfer_edges.assert_not_called()
 
+    @pytest.mark.parametrize("side", ["winner", "loser"])
+    @pytest.mark.parametrize("shadow", [False, True], ids=["remove", "shadow"])
+    async def test_a_row_edited_after_the_fetch_is_refused(self, db_session, side, shadow):
+        """#3019: an edit made while the judge ran moves the row's version. The
+        judge compared the text it fetched, so the locked re-check refuses the
+        pair in both modes and nothing is written."""
+        from sqlalchemy import text
+
+        winner = await _make_db_memory(db_session, summary="w", tags=["a"])
+        loser = await _make_db_memory(db_session, summary="l", tags=["b"])
+        phase = await self._phase_for_db(db_session)
+        edited = winner if side == "winner" else loser
+        # Another session's update_memory; this session's object keeps the
+        # version it was fetched with.
+        await db_session.execute(
+            text("UPDATE memories SET summary = 'edited', version = version + 1 WHERE id = :id"),
+            {"id": edited.id},
+        )
+        assert edited.version == 1
+
+        with patch(
+            "services.sleep.dedup_merge.queue_point_deletes", new_callable=AsyncMock
+        ) as queue:
+            if shadow:
+                executed, _ = await phase._execute_shadow_merge(
+                    winner, loser, "dedup-user", None, None
+                )
+            else:
+                executed = await phase._execute_merge(winner, loser, "dedup-user", None, None)
+
+        assert executed is False
+        rows = (
+            await db_session.execute(
+                select(Memory.id, Memory.deleted_at, Memory.tags).where(
+                    Memory.id.in_([winner.id, loser.id])
+                )
+            )
+        ).all()
+        assert {row.id: (row.deleted_at, list(row.tags)) for row in rows} == {
+            winner.id: (None, ["a"]),
+            loser.id: (None, ["b"]),
+        }
+        queue.assert_not_called()
+        phase.edge_repo.transfer_edges.assert_not_called()
+        phase.edge_repo.create_or_update_edge.assert_not_called()
+
     async def test_unpinned_pair_still_merges_in_both_modes(self, db_session):
         winner = await _make_db_memory(db_session, summary="w", tags=["a"])
         loser = await _make_db_memory(db_session, summary="l", tags=["b"])
