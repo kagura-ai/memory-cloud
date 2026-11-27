@@ -930,7 +930,7 @@ reference(memory_id=M, context_id=C, details_offset=0)          # only details c
 
 - `indexing` — waiting for its embedding or being embedded; `recall()` finds it in a moment. A memory edited since it was last indexed may still be found under its previous text until then.
 - `retrying` — the embedding failed and is retried automatically.
-- `failed` — the embedding failed and nothing retries it on its own (its retry budget is used up, or the memory is kept out of the search index on purpose). An operator can retry it from the admin API.
+- `failed` — the embedding failed and nothing retries it on its own (its retry budget is used up, or the memory is kept out of the search index on purpose). The admin `retry-failed` endpoint resets a memory whose retry budget is used up; a memory kept out of the index on purpose is not reset by default.
 
 The key is absent once the memory is searchable, and on a `version=N` read. It is one of the always-returned light fields, so it survives `fields` and paging. A memory `reference()` returns is stored either way: do not write it again because `recall()` did not find it. The REST `POST /api/v1/memory/reference` response does not carry it.
 
