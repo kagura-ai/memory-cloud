@@ -380,3 +380,8 @@ QUOTA_TYPES: frozenset[str] = frozenset(
 # password, a passkey or a verified sign-in within the last five minutes), so a
 # proof through it inside the window would rest on that session's proof.
 IDENTITY_LINK_SIGN_IN_WINDOW = timedelta(minutes=10)
+
+# #3022: a memory older than this, never delivered and never used, is listed
+# by the never-delivered review filter and counted on the context Overview tab.
+# A fixed server default, not a setting; age counts from ``created_at``.
+NEVER_DELIVERED_AGE_DAYS = 180
