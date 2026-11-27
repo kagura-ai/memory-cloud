@@ -960,7 +960,16 @@ class TestCoverageState:
     learning lock, hands dedup its lanes, and writes the positions the run
     leaves before completing the report. A phase never writes them."""
 
-    async def _run(self, mock_db, *, sleep_mode="full", dedup=None, dedup_raises=False, judge=None):
+    async def _run(
+        self,
+        mock_db,
+        *,
+        sleep_mode="full",
+        dedup=None,
+        dedup_raises=False,
+        judge=None,
+        judge_raises=False,
+    ):
         from services.sleep.coverage import DedupCoverage
 
         events: list[str] = []
@@ -1021,7 +1030,8 @@ class TestCoverageState:
             if judge is not None:
                 MockCP.return_value.coverage_outcome = judge
                 MockCP.return_value.execute = AsyncMock(
-                    return_value=PhaseResult(phase_name="consolidation", details={})
+                    side_effect=RuntimeError("judge crashed") if judge_raises else None,
+                    return_value=PhaseResult(phase_name="consolidation", details={}),
                 )
             MockRI.return_value.execute = AsyncMock(return_value=PhaseResult(phase_name="reindex"))
 
@@ -1090,13 +1100,95 @@ class TestCoverageState:
         window = DedupCoverage(
             changed=[row], sweep=[], floor=None, exhausted=False, outcomes={row[1]: FAILURE}
         )
-        report, _, _, _ = await self._run(mock_db, dedup=window, dedup_raises=True)
+        report, _, reporter, _ = await self._run(mock_db, dedup=window, dedup_raises=True)
 
         state = parse_state(report.coverage_state)
         assert state.dedup.changed.position is None
         assert state.dedup.changed.stalls == 1
         # The phase did not return: the turn stays.
         assert state.dedup.turn == "changed"
+        # What the run did to the lanes is in the stored blob although the
+        # phase raised; its point-5 keys stay absent.
+        results = reporter.complete_report.call_args.args[1]
+        dedup = next(r for r in results if r.phase_name == "dedup_merge")
+        assert dedup.error == "dedup crashed"
+        assert set(dedup.details) == {"coverage"}
+        assert dedup.details["coverage"]["changed"]["taken"] == 1
+        assert dedup.details["coverage"]["changed"]["advanced"] == 0
+        assert dedup.details["coverage"]["skipped_after_stalls"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_raised_phase_reports_the_window_its_stalls_passed(
+        self, mock_db, coverage_lookup
+    ):
+        """Invariant 1's one exception, the stall rule, is counted in the
+        report: on the third run that raises, the window is passed and the
+        stored dedup blob says how many rows were passed that way."""
+        from datetime import timedelta
+
+        from services.sleep.coverage import (
+            STALL_LIMIT,
+            CoverageState,
+            DedupCoverage,
+            DedupLanes,
+            LaneEntry,
+            parse_state,
+        )
+        from utils.datetime import utcnow
+
+        coverage_lookup.return_value = CoverageState(
+            dedup=DedupLanes(
+                changed=LaneEntry(stalls=STALL_LIMIT - 1),
+                sweep=LaneEntry(stalls=STALL_LIMIT - 1),
+            )
+        )
+        changed = (utcnow() - timedelta(days=3), uuid4())
+        sweep = (utcnow() - timedelta(days=30), uuid4())
+        window = DedupCoverage(changed=[changed], sweep=[sweep], floor=None, exhausted=False)
+
+        report, _, reporter, _ = await self._run(mock_db, dedup=window, dedup_raises=True)
+
+        state = parse_state(report.coverage_state)
+        assert state.dedup.changed.position == changed
+        assert state.dedup.sweep.position == sweep
+        assert (state.dedup.changed.stalls, state.dedup.sweep.stalls) == (0, 0)
+        # Set before complete_report stored the blob.
+        assert self.at_complete["dedup_coverage"]["skipped_after_stalls"] == 2
+        results = reporter.complete_report.call_args.args[1]
+        dedup = next(r for r in results if r.phase_name == "dedup_merge")
+        assert set(dedup.details) == {"coverage"}
+        assert dedup.details["coverage"]["skipped_after_stalls"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_raised_judge_reports_the_rows_its_stalls_passed(
+        self, mock_db, coverage_lookup
+    ):
+        from datetime import timedelta
+
+        from services.sleep.coverage import (
+            STALL_LIMIT,
+            CoverageState,
+            JudgeCoverage,
+            LaneEntry,
+            parse_state,
+        )
+        from utils.datetime import utcnow
+
+        coverage_lookup.return_value = CoverageState(judge=LaneEntry(stalls=STALL_LIMIT - 1))
+        rows = [(utcnow() - timedelta(days=d), uuid4()) for d in (8, 7)]
+
+        report, _, reporter, _ = await self._run(
+            mock_db, judge=JudgeCoverage(keys=rows), judge_raises=True
+        )
+
+        state = parse_state(report.coverage_state)
+        assert state.judge.stalls == 0
+        results = reporter.complete_report.call_args.args[1]
+        consolidation = next(r for r in results if r.phase_name == "consolidation")
+        assert consolidation.error == "judge crashed"
+        assert consolidation.details == {
+            "coverage": {"judge": {"taken": 2, "advanced": 2}, "skipped_after_stalls": 2}
+        }
 
     @pytest.mark.asyncio
     async def test_the_judge_gets_its_position_and_leaves_the_next(self, mock_db, coverage_lookup):
@@ -1127,4 +1219,7 @@ class TestCoverageState:
         assert state.dedup == lanes
         results = reporter.complete_report.call_args.args[1]
         consolidation = next(r for r in results if r.phase_name == "consolidation")
-        assert consolidation.details["coverage"] == {"judge": {"taken": 2, "advanced": 1}}
+        assert consolidation.details["coverage"] == {
+            "judge": {"taken": 2, "advanced": 1},
+            "skipped_after_stalls": 0,
+        }

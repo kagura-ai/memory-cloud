@@ -19,8 +19,10 @@ from services.sleep.coverage import (
     CoverageState,
     DedupCoverage,
     DedupLanes,
+    JudgeCoverage,
     LaneEntry,
     advance_dedup,
+    advance_judge,
     dump_state,
     parse_state,
     plan_changed,
@@ -375,3 +377,28 @@ class TestAdvanceDedup:
             },
             "skipped_after_stalls": 0,
         }
+
+
+class TestAdvanceJudge:
+    def test_no_rows_carries_the_entry(self):
+        entry = _entry(_keys(1)[0], stalls=1)
+        assert advance_judge(entry, None, returned=True) == (entry, None)
+
+    def test_report(self):
+        keys = _keys(3)
+        coverage = JudgeCoverage(
+            keys=keys, outcomes={keys[0][1]: SETTLED, keys[1][1]: BUDGET, keys[2][1]: BUDGET}
+        )
+        entry, report = advance_judge(_entry(), coverage, returned=True)
+        assert entry.position == keys[0]
+        assert report == {"judge": {"taken": 3, "advanced": 1}, "skipped_after_stalls": 0}
+
+    def test_the_report_counts_the_rows_a_stall_passed(self):
+        """Invariant 1: the stall rule is the one way past unfinished work, and
+        the report counts it, for the judge as for dedup's lanes."""
+        keys = _keys(2)
+        coverage = JudgeCoverage(keys=keys)
+        entry, report = advance_judge(_entry(stalls=STALL_LIMIT - 1), coverage, returned=False)
+        # Every row was passed: the round is complete, the position starts over.
+        assert entry == LaneEntry()
+        assert report == {"judge": {"taken": 2, "advanced": 2}, "skipped_after_stalls": 2}

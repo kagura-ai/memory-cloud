@@ -322,8 +322,10 @@ class SleepOrchestrator:
         or raised before its read carries its entry unchanged. A run in which
         neither phase produced an outcome leaves the column NULL, and the next
         run reads the state of the run before. The whole state is written: the
-        entries this run advanced and the others as they were. Each phase's
-        ``details["coverage"]`` says what moved.
+        entries this run advanced and the others as they were. Each phase
+        with an outcome gets ``details["coverage"]``, saying what moved and how
+        many rows the stall rule passed; a phase that raised has no details of
+        its own, so its details become that one key.
         """
         results = {r.phase_name: r for r in phase_results}
 
@@ -333,9 +335,11 @@ class SleepOrchestrator:
 
         def report_on(name: str, report_details: dict | None) -> None:
             result = results.get(name)
-            if report_details is not None and result is not None:
-                if isinstance(result.details, dict):
-                    result.details["coverage"] = report_details
+            if report_details is None or result is None:
+                return
+            if not isinstance(result.details, dict):
+                result.details = {}
+            result.details["coverage"] = report_details
 
         dedup_window = getattr(instances.get("dedup_merge"), "coverage_outcome", None)
         if not isinstance(dedup_window, DedupCoverage):

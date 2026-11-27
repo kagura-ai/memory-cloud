@@ -466,6 +466,12 @@ async def test_a_phase_that_raises_stalls_then_passes_its_window(db_session):
     assert states[2].dedup.changed.position == (rows[3].created_at, rows[3].id)
     # The phase never returned: the lanes did not take turns.
     assert {s.dedup.turn for s in states} == {"changed"}
+    # Every run stored what it did to the lanes although the phase raised (its
+    # point-5 keys stay absent); the third counts the rows its stall passed.
+    blobs = [r.dedup_result for r in reports]
+    assert [b["error"] for b in blobs] == ["search down"] * 3
+    assert [set(b["details"]) for b in blobs] == [{"coverage"}] * 3
+    assert [b["details"]["coverage"]["skipped_after_stalls"] for b in blobs] == [0, 0, 2]
 
 
 @pytest.mark.asyncio

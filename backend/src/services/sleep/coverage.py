@@ -594,6 +594,7 @@ def advance_judge(
     The rows it saw this run, in that order, are planned like a sweep that is
     always exhausted: the position moves to the last settled-or-passed row,
     or back to the start when every borderline row was judged. No pass count.
+    The report counts the rows the stall rule passed, as dedup's does.
     """
     if coverage is None:
         return entry, None
@@ -604,4 +605,7 @@ def advance_judge(
             phase="consolidation",
             rows=plan.skipped_after_stalls,
         )
-    return plan.entry, {"judge": {"taken": plan.taken, "advanced": plan.advanced}}
+    return plan.entry, {
+        "judge": {"taken": plan.taken, "advanced": plan.advanced},
+        "skipped_after_stalls": plan.skipped_after_stalls,
+    }

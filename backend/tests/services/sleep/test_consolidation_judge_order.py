@@ -117,7 +117,7 @@ class TestJudgeOrder:
         assert [outcomes[m.id] for m in rows] == [SETTLED] * BATCH_SIZE + [BUDGET] * 7
         entry, report = advance_judge(LaneEntry(), phase.coverage_outcome, returned=True)
         assert entry.position == sweep_key(rows[BATCH_SIZE - 1])
-        assert report == {"judge": {"taken": 12, "advanced": BATCH_SIZE}}
+        assert report == {"judge": {"taken": 12, "advanced": BATCH_SIZE}, "skipped_after_stalls": 0}
         assert result.details["llm_pass_cut_for_budget"] is True
 
         # The next run starts where this one stopped.
