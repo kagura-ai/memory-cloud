@@ -13,6 +13,7 @@
 > Changed by #565: `FileObjectOut` gains the required `scan_status` (`unscanned` | `pending` | `clean` | `infected` | `error`, the file's malware-scan state), returned by the file list, the upload confirm and the dedup 409's `existing_file`. It is the only response change while `FILE_SCAN_ENABLED` is off; the download-url refusals it explains (409 `SCAN-001` / `SCAN-002`) are in `error-responses.md`. The field list below also gains `context_id`, which the model already had.
 > Changed by #2918 (**experimental**, may change in a minor release): new `me_workspace_slots.py` models for `/api/v1/me/workspace-slots` (below; the routes 404 unless `WORKSPACE_SLOT_SUSPENSION=enforce`); `WorkspaceResponse` gains `slot_suspended` (filled by `GET /workspaces` on every row, false elsewhere and unless enforced); `/auth/me` gains `user.workspace_selection_required` and `/system/info` gains `features.workspace_slots` (plain dicts, outside this enumeration's scope). The refusals (`SLOT-001`..`SLOT-004`) are in `error-responses.md`.
 > Changed by #2950: `/system/info` gains `kagura_public_return_url` (the deployment's `KAGURA_PUBLIC_RETURN_URL`, or `null`; a plain dict, outside this enumeration's scope). No model changes.
+> Changed by #3038: `IndexerStatusResponse` gains the optional `pending_events` (the resource's events after the indexer's offset, `null` when unknown). The worker's run status (`GET /api/v1/sync/installations/{iid}/runs/{run}`, a plain dict, outside this enumeration's scope) gains `index_progress` (`{indexed, total}`).
 
 Notes:
 
@@ -1251,6 +1252,7 @@ Notes:
 - `resource_id: str` — required
 - `state: IndexerState | None` — optional
 - `recent_events: list[ResourceEventItem]` — optional (default `list()`)
+- `pending_events: int | None` — optional
 
 ## resource_schema.py
 

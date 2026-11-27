@@ -24,7 +24,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for dete
 # Third-party imports (PEP8)
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import PointStruct, SparseVector
-from sqlalchemy import ColumnElement, and_, case, exists, or_, select, update
+from sqlalchemy import ColumnElement, and_, case, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -133,7 +133,9 @@ class IndexerMetrics:
     no failures keeps it too; only an operator rewind or clear acts on it
     (#2477).
 
-    ``batch_committed`` says the batch's outcome is durable. Not stored.
+    ``batch_committed`` says the batch's outcome is durable, and
+    ``stopped_at_busy_lock`` that the batch ended before an event whose lock
+    was held (#2904; the job's drain stops there, #3038). Neither is stored.
     """
 
     applied_upserts: int = 0
@@ -145,6 +147,7 @@ class IndexerMetrics:
     reason: str | None = None
     failed_events: list[dict[str, Any]] = field(default_factory=list)
     batch_committed: bool = False
+    stopped_at_busy_lock: bool = False
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSONB storage."""
@@ -177,6 +180,58 @@ _KNOWN_SKIPPED_REASONS: frozenset[str] = frozenset(
         "memory_limit_exceeded",  # #1939: workspace memory limit reached
     }
 )
+
+
+def _pending_after_offset(state_id: int) -> ColumnElement[bool]:
+    """Events of one ``indexer_state`` row's resource after its committed offset.
+
+    Read from the row in the same statement, so a caller never compares with
+    an offset it read earlier. The resource is resolved as
+    ``process_incremental`` resolves it (``resolve_resource_pk``: the slug in
+    the context's workspace), so a legacy row whose ``resource_pk`` is NULL
+    sees the events the indexer applies for it.
+    """
+    resolved_pk = (
+        select(Resource.id)
+        .join(Context, Context.workspace_id == Resource.workspace_id)
+        .where(
+            Context.id == IndexerState.context_id,
+            Resource.resource_id == IndexerState.resource_id,
+        )
+        .correlate(IndexerState)
+        .scalar_subquery()
+    )
+    return and_(
+        IndexerState.id == state_id,
+        ResourceEvent.resource_pk == resolved_pk,
+        ResourceEvent.id > IndexerState.last_offset,
+    )
+
+
+async def has_pending_events(db: AsyncSession, state_id: int) -> bool:
+    """Whether the resource of an ``indexer_state`` row has events after its offset (#3038)."""
+    found = await db.scalar(
+        select(exists().where(_pending_after_offset(state_id)).select_from(ResourceEvent))
+    )
+    return bool(found)
+
+
+async def pending_event_count(
+    db: AsyncSession, resource_pk: UUID, state_row: IndexerState | None
+) -> int:
+    """How many events of a resource the target has not applied yet (#3038).
+
+    The events after the target's committed offset; all of the resource's
+    events when the target has no ``indexer_state`` row yet (the indexer
+    starts from offset 0).
+    """
+    offset = 0 if state_row is None else state_row.last_offset
+    count = await db.scalar(
+        select(func.count())
+        .select_from(ResourceEvent)
+        .where(ResourceEvent.resource_pk == resource_pk, ResourceEvent.id > offset)
+    )
+    return int(count or 0)
 
 
 async def get_indexer_status_for_context(
@@ -212,6 +267,8 @@ async def get_indexer_status_for_context(
             ``state``: indexer state dict or ``None`` if indexer never ran
                 for this context.
             ``recent_events``: list of event dicts (up to ``recent_event_limit``).
+            ``pending_events``: the resource's events after the target's
+                offset (#3038), ``None`` when the Resource row is missing.
     """
     resource_id = context.resource_id
     assert resource_id is not None, "resolve_resource_by_slug returns only slugged contexts"
@@ -295,6 +352,9 @@ async def get_indexer_status_for_context(
         "resource_id": resource_id,
         "state": state_dict,
         "recent_events": event_dicts,
+        "pending_events": (
+            None if resource_pk is None else await pending_event_count(db, resource_pk, state_row)
+        ),
     }
 
 
@@ -1332,6 +1392,7 @@ class ResourceIndexer:
                         )
                         ran_through = event.id - 1
                         stopped_at = index
+                        metrics.stopped_at_busy_lock = True
                         break
                     logger.error(
                         "indexer_event_failed",
