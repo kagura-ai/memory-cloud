@@ -959,7 +959,7 @@ class TestCoverageState:
     learning lock, hands dedup its lanes, and writes the positions the run
     leaves before completing the report. A phase never writes them."""
 
-    async def _run(self, mock_db, *, sleep_mode="full", dedup=None, dedup_raises=False):
+    async def _run(self, mock_db, *, sleep_mode="full", dedup=None, dedup_raises=False, judge=None):
         from services.sleep.coverage import DedupCoverage
 
         events: list[str] = []
@@ -1005,12 +1005,18 @@ class TestCoverageState:
 
             instance.execute = dedup_execute
             MockDM.return_value = instance
+            if judge is not None:
+                MockCP.return_value.coverage_outcome = judge
+                MockCP.return_value.execute = AsyncMock(
+                    return_value=PhaseResult(phase_name="consolidation", details={})
+                )
             MockRI.return_value.execute = AsyncMock(return_value=PhaseResult(phase_name="reindex"))
 
             orchestrator = SleepOrchestrator(mock_db)
             orchestrator._get_sleep_mode = AsyncMock(return_value=sleep_mode)
             orchestrator._get_context_embedding_info = AsyncMock(return_value=(None, "c"))
             await orchestrator.run("user-1", "ws-1", str(uuid4()), config=_make_config())
+        self.consolidation_class = MockCP
         return report, MockDM, reporter, events
 
     @pytest.mark.asyncio
@@ -1074,3 +1080,34 @@ class TestCoverageState:
         assert state.dedup.changed.stalls == 1
         # The phase did not return: the turn stays.
         assert state.dedup.turn == "changed"
+
+    @pytest.mark.asyncio
+    async def test_the_judge_gets_its_position_and_leaves_the_next(self, mock_db, coverage_lookup):
+        from datetime import timedelta
+
+        from services.sleep.coverage import (
+            SETTLED,
+            CoverageState,
+            DedupLanes,
+            JudgeCoverage,
+            LaneEntry,
+            parse_state,
+        )
+        from utils.datetime import utcnow
+
+        entry = LaneEntry(at=utcnow() - timedelta(days=9), id=uuid4())
+        lanes = DedupLanes(sweep=LaneEntry(passes=2))
+        coverage_lookup.return_value = CoverageState(dedup=lanes, judge=entry)
+        rows = [(utcnow() - timedelta(days=d), uuid4()) for d in (8, 7)]
+        judge = JudgeCoverage(keys=rows, outcomes={rows[0][1]: SETTLED})
+
+        report, _, reporter, _ = await self._run(mock_db, judge=judge)
+
+        assert self.consolidation_class.call_args.kwargs["coverage"] == entry
+        state = parse_state(report.coverage_state)
+        assert state.judge.position == rows[0]
+        # Dedup produced no window: its lanes are carried as they were.
+        assert state.dedup == lanes
+        results = reporter.complete_report.call_args.args[1]
+        consolidation = next(r for r in results if r.phase_name == "consolidation")
+        assert consolidation.details["coverage"] == {"judge": {"taken": 2, "advanced": 1}}

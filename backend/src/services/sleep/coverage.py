@@ -297,6 +297,31 @@ class DedupCoverage:
         return [(key, self.outcomes.get(key[1], FAILURE)) for key in keys]
 
 
+@dataclass
+class JudgeCoverage:
+    """The consolidation judge's rows of one run, in the order it saw them,
+    and each row's outcome (``failure`` until the pass finished)."""
+
+    keys: list[Key]
+    outcomes: dict[UUID, str] = field(default_factory=dict)
+
+    def rows(self, *, returned: bool = True) -> list[tuple[Key, str]]:
+        if not returned:
+            return [(key, FAILURE) for key in self.keys]
+        return [(key, self.outcomes.get(key[1], FAILURE)) for key in self.keys]
+
+
+def rotate(memories: list[Memory], position: Key | None) -> list[Memory]:
+    """``memories`` in ``(created_at, id)`` order, starting after ``position``
+    and wrapping (from the oldest when ``position`` is None)."""
+    ordered = sorted(memories, key=sweep_key)
+    if position is None:
+        return ordered
+    return [m for m in ordered if sweep_key(m) > position] + [
+        m for m in ordered if sweep_key(m) <= position
+    ]
+
+
 async def fetch_window(
     db: AsyncSession,
     eligible: ColumnElement[bool],
@@ -553,3 +578,27 @@ def advance_dedup(
             rows=report["skipped_after_stalls"],
         )
     return DedupLanes(changed=changed.entry, sweep=sweep.entry, turn=turn), report
+
+
+def advance_judge(
+    entry: LaneEntry,
+    coverage: JudgeCoverage | None,
+    *,
+    returned: bool,
+) -> tuple[LaneEntry, dict[str, Any] | None]:
+    """The consolidation judge's next position and its ``details["coverage"]``.
+
+    The rows it saw this run, in that order, are planned like a sweep that is
+    always exhausted: the position moves to the last settled-or-passed row,
+    or back to the start when every borderline row was judged. No pass count.
+    """
+    if coverage is None:
+        return entry, None
+    plan = plan_sweep(entry, coverage.rows(returned=returned), exhausted=True, count_passes=False)
+    if plan.skipped_after_stalls:
+        logger.info(
+            "sleep_coverage_passed_after_stalls",
+            phase="consolidation",
+            rows=plan.skipped_after_stalls,
+        )
+    return plan.entry, {"judge": {"taken": plan.taken, "advanced": plan.advanced}}

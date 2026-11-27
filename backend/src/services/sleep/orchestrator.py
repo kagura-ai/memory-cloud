@@ -34,7 +34,9 @@ from services.sleep.consolidation import ConsolidationPhase
 from services.sleep.coverage import (
     CoverageState,
     DedupCoverage,
+    JudgeCoverage,
     advance_dedup,
+    advance_judge,
     current_state,
     dump_state,
 )
@@ -212,7 +214,10 @@ class SleepOrchestrator:
             ("forget_retention", lambda: ForgetRetentionPhase(self.db)),
             ("measurement_retention", lambda: MeasurementRetentionPhase(self.db)),
             ("importance_reeval", lambda: ImportanceReevalPhase(self.db, self.llm_service, cn)),
-            ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service, cn)),
+            (
+                "consolidation",
+                lambda: ConsolidationPhase(self.db, self.llm_service, cn, coverage=coverage.judge),
+            ),
         ]
         if index_enabled():
             # Capture discovery's evidence before the dedup merge stamps a
@@ -321,20 +326,34 @@ class SleepOrchestrator:
         ``details["coverage"]`` says what moved.
         """
         results = {r.phase_name: r for r in phase_results}
+
+        def returned(name: str) -> bool:
+            result = results.get(name)
+            return result is not None and result.success
+
+        def report_on(name: str, report_details: dict | None) -> None:
+            result = results.get(name)
+            if report_details is not None and result is not None:
+                if isinstance(result.details, dict):
+                    result.details["coverage"] = report_details
+
         dedup_window = getattr(instances.get("dedup_merge"), "coverage_outcome", None)
         if not isinstance(dedup_window, DedupCoverage):
             dedup_window = None
-        if dedup_window is None:
+        judge_window = getattr(instances.get("consolidation"), "coverage_outcome", None)
+        if not isinstance(judge_window, JudgeCoverage):
+            judge_window = None
+        if dedup_window is None and judge_window is None:
             return
-        dedup_result = results.get("dedup_merge")
-        returned = dedup_result is not None and dedup_result.success
         lanes, dedup_report = advance_dedup(
-            coverage.dedup, dedup_window, returned=returned, now=now
+            coverage.dedup, dedup_window, returned=returned("dedup_merge"), now=now
         )
-        report.coverage_state = dump_state(CoverageState(dedup=lanes, judge=coverage.judge))
-        if dedup_report is not None and dedup_result is not None:
-            if isinstance(dedup_result.details, dict):
-                dedup_result.details["coverage"] = dedup_report
+        judge, judge_report = advance_judge(
+            coverage.judge, judge_window, returned=returned("consolidation")
+        )
+        report.coverage_state = dump_state(CoverageState(dedup=lanes, judge=judge))
+        report_on("dedup_merge", dedup_report)
+        report_on("consolidation", judge_report)
 
     async def delete_committed_points(self) -> None:
         """Delete the points this run queued; call only after the caller's commit.
