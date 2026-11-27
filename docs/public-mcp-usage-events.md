@@ -139,3 +139,4 @@ For a request to the REST public search:
 For either:
 
 12. A request that carries a valid web sign-in cookie of the same deployment is also recorded as that signed-in user's request (path, method, status, response time), like any request of a signed-in user; the public endpoint itself does not read the cookie.
+13. **The application server's access log** (uvicorn's, on by default): one line per HTTP request with the client address the server sees (a reverse proxy's address, unless `FORWARDED_ALLOW_IPS` trusts that proxy) and the request line — method, path with the endpoint's address, and query string. Kept as long as the operator keeps application logs; uvicorn's `--no-access-log` turns it off. For operations.
