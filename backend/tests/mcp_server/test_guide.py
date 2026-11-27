@@ -280,4 +280,7 @@ def test_list_never_delivered_topic_is_indexed_and_names_the_rule():
     assert f"{NEVER_DELIVERED_AGE_DAYS} days" in text
     assert "public context" in text
     assert "limit=1" in text and "total" in text
+    # A merge carries delivery history but not supersede links (no edge is
+    # copied), so a merged newer side can be listed: the topic says so.
+    assert "not their supersede links" in text
     assert "never_delivered" in GUIDE_TOPICS["list.filters"]

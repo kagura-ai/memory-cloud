@@ -847,7 +847,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "with limit=1 and read total for the count. Nothing is deleted or hidden: the "
         "list is a review aid. A reference read or a recall that returns the content "
         "takes the memory off the list; a context merge carries the copied memories' "
-        "delivery history."
+        "delivery history but not their supersede links, so a merged copy of a memory "
+        "that superseded an older one can be listed."
     ),
     # ------------------------------------------------------- changes_since
     "changes_since.usage": (
