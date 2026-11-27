@@ -148,6 +148,8 @@ async def test_busy_batch_that_applied_nothing_ends_cleanly_and_is_requeued(feed
         await holder.rollback()
     assert metrics.batch_committed and metrics.reason is None, metrics.to_dict()
     assert metrics.applied_upserts == metrics.applied_deletes == 0
+    # The job's drain stops on this flag (#3038).
+    assert metrics.stopped_at_busy_lock is True
     async with feeds.factory() as db:
         await maintain_sync_runs(db)
         state = await _state(feeds, db)
@@ -190,9 +192,11 @@ async def test_released_lock_lets_the_next_run_apply_every_event_and_report_comp
         first = await _run(feeds, maintain=False)
         await holder.rollback()
     assert first.applied_upserts == applied_first and first.failed_events == []
+    assert first.stopped_at_busy_lock is True
     assert await _index_status(feeds, row["run_id"]) == "pending"
     metrics = await _run(feeds)
     assert metrics.applied_upserts == 3 - applied_first and metrics.failed_events == []
+    assert metrics.stopped_at_busy_lock is False
     offset, failed = await _offset(feeds)
     assert offset == events[-1].id and failed == []
     assert await _index_status(feeds, row["run_id"]) == "complete"
@@ -215,6 +219,8 @@ async def test_busy_lock_after_an_applied_prefix_commits_the_prefix_and_stops(fe
         metrics = await _run(feeds, maintain=False)
         await holder.rollback()
     assert metrics.batch_committed and metrics.applied_upserts == 1
+    # The job's drain stops on this flag (#3038).
+    assert metrics.stopped_at_busy_lock is True
     offset, failed = await _offset(feeds)
     assert offset == events[0].id
     assert failed == []
