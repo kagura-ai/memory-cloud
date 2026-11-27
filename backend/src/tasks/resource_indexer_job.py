@@ -107,6 +107,14 @@ DRAIN_YIELD_SECONDS = 1.0
 DRAIN_CONTINUES_KEY = "drain_continues"
 # Stops that leave events pending only because the time ran out.
 BUDGET_STOPS = frozenset({"target_budget", "tick_budget"})
+# Stops after which a target with events still pending is queued again as an
+# ordinary run (``drained`` too: events can arrive while the row is
+# ``running``). A hold keeps its own re-queue time; a skipped batch (no schema,
+# no context, no resource entity) cannot progress by retrying and waits for
+# the next ingest as before.
+RETRY_STOPS = frozenset(
+    {"drained", "lock_busy", "event_failures", "not_committed", "nothing_applied", "error"}
+)
 
 DrainStop = Literal[
     "drained",
@@ -497,10 +505,10 @@ async def run_queued_indexers() -> JobResult:
 
             if not states:
                 logger.debug("indexer_no_queued_jobs")
-                return {"picked": 0, "failed": 0, "rate_limited": 0}
+                return {"picked": 0, "deferred": 0, "failed": 0, "rate_limited": 0}
 
             logger.info("indexer_processing_queued_jobs", count=len(states))
-            failed = rate_limited = 0
+            failed = rate_limited = deferred = 0
 
             for index, state in enumerate(states):
                 # #3038: the rows not started once the tick budget is used (or
@@ -508,7 +516,8 @@ async def run_queued_indexers() -> JobResult:
                 # tick) stay queued as they are, ahead of later rows at the
                 # next pick.
                 if not tick.room_for_a_batch(tick.started, DRAIN_TICK_BUDGET_SECONDS):
-                    logger.info("indexer_tick_budget_used", deferred=len(states) - index)
+                    deferred = len(states) - index
+                    logger.info("indexer_tick_budget_used", deferred=deferred)
                     break
 
                 # The row was read at the pick: an operator rewind may have
@@ -595,6 +604,18 @@ async def run_queued_indexers() -> JobResult:
                         state.next_run_at = utcnow() + HELD_BACK_RETRY_BY_REASON.get(
                             metrics.reason, HELD_BACK_RETRY
                         )
+                    elif drain.stop in RETRY_STOPS and await has_pending_events(db, state.id):
+                        # #3038: events are still pending after a stop that
+                        # is not a hold (a busy lock, failed events, a batch
+                        # that did not commit or applied nothing), or arrived
+                        # while the row was ``running`` (an ingest queues only
+                        # an ``idle`` row). Queued as an ordinary run, without
+                        # the continuation key: the per-target interval and
+                        # hourly cap pace it, so a batch that fails every time
+                        # runs at most once per MIN_INTERVAL_SECONDS and
+                        # MAX_RUNS_PER_HOUR times an hour, never in a loop.
+                        state.job_status = "queued"
+                        state.next_run_at = utcnow()
                     else:
                         state.job_status = "idle"
                     state.metrics = new_metrics
@@ -643,7 +664,14 @@ async def run_queued_indexers() -> JobResult:
                     await db.commit()
 
             # Exit async for loop
-            return {"picked": len(states), "failed": failed, "rate_limited": rate_limited}
+            # ``picked``: the rows this tick took on (run or refused by the
+            # rate limit); ``deferred``: the rows the tick budget left queued.
+            return {
+                "picked": len(states) - deferred,
+                "deferred": deferred,
+                "failed": failed,
+                "rate_limited": rate_limited,
+            }
 
         except Exception as e:
             logger.error("indexer_job_failed", error=str(e))

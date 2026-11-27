@@ -186,12 +186,24 @@ def _pending_after_offset(state_id: int) -> ColumnElement[bool]:
     """Events of one ``indexer_state`` row's resource after its committed offset.
 
     Read from the row in the same statement, so a caller never compares with
-    an offset it read earlier. A legacy row without ``resource_pk`` matches no
-    event (``NULL = ...`` is never true).
+    an offset it read earlier. The resource is resolved as
+    ``process_incremental`` resolves it (``resolve_resource_pk``: the slug in
+    the context's workspace), so a legacy row whose ``resource_pk`` is NULL
+    sees the events the indexer applies for it.
     """
+    resolved_pk = (
+        select(Resource.id)
+        .join(Context, Context.workspace_id == Resource.workspace_id)
+        .where(
+            Context.id == IndexerState.context_id,
+            Resource.resource_id == IndexerState.resource_id,
+        )
+        .correlate(IndexerState)
+        .scalar_subquery()
+    )
     return and_(
         IndexerState.id == state_id,
-        ResourceEvent.resource_pk == IndexerState.resource_pk,
+        ResourceEvent.resource_pk == resolved_pk,
         ResourceEvent.id > IndexerState.last_offset,
     )
 

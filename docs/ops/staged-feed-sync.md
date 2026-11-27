@@ -315,19 +315,26 @@ job queues the target again at its next tick and the rest of the backlog is
 applied; that holds for a resource that is not a sync target too.
 
 What ends a drain before its backlog is applied, with the same skip reason
-and retry as a single batch:
+as a single batch:
 
 - the workspace memory limit: the batch applies the prefix that fits, the
   rest waits and is retried hourly (`memory_limit_exceeded`);
 - the daily Memory-creation quota: the batch is left untouched and retried
   after the next UTC midnight (`memories_per_day_exceeded`);
 - a suspended plan: retried daily (`plan_suspended`);
-- a busy lock: the batch stops before the event, which stays pending; the
-  outbox replay queues the target at the next tick and the per-target limits
-  apply to that run;
+- a busy lock: the batch stops before the event, which stays pending;
 - a batch that recorded failed events (a provider outage or the embedding
-  spend cap would fail the next batches too), or one that did not commit:
-  the target is retried under the per-target limits.
+  spend cap would fail the next batches too), one that did not commit, or one
+  that applied nothing.
+
+After a busy lock or one of these batches, a target with events still
+pending is queued again at once, as an ordinary run (a sync target or a plain
+ingest resource alike): the per-target limits (10 minutes apart, 6 runs an hour) refuse it
+until they admit it, so a batch that fails every time is retried at that pace
+and never in a loop. The same check queues a target whose events arrived while
+it was running (an ingest queues only a target that is not running). An event
+the indexer records as failed is passed by the cursor; the rest of the
+backlog is applied by the retries.
 
 Each drain logs one `indexer_completed` line with `batches`, `events`,
 `duration_ms` and `stop` (`drained`, `held_back`, `lock_busy`,

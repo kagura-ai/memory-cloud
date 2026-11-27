@@ -20,8 +20,8 @@ import structlog
 from sqlalchemy import update
 
 from models.auth import Context
-from models.resource import IndexerState
-from services.resource_indexer import IndexerMetrics
+from models.resource import IndexerState, ResourceEvent
+from services.resource_indexer import IndexerMetrics, has_pending_events
 from tasks import resource_indexer_job as job
 from tasks.resource_indexer_job import (
     DRAIN_CONTINUES_KEY,
@@ -270,12 +270,12 @@ class TestDrain:
             ),
             (
                 IndexerMetrics(applied_upserts=5, batch_committed=True, stopped_at_busy_lock=True),
-                "idle",
-                None,
+                "queued",
+                "now",
                 "lock_busy",
             ),
-            (IndexerMetrics(errors=1, reason="commit failed"), "idle", None, "error"),
-            (IndexerMetrics(), "idle", None, "not_committed"),
+            (IndexerMetrics(errors=1, reason="commit failed"), "queued", "now", "error"),
+            (IndexerMetrics(), "queued", "now", "not_committed"),
             (
                 IndexerMetrics(
                     applied_upserts=99,
@@ -283,11 +283,11 @@ class TestDrain:
                     batch_committed=True,
                     failed_events=[{"event_id": 150, "doc_id": "d", "error_class": "QdrantError"}],
                 ),
-                "idle",
-                None,
+                "queued",
+                "now",
                 "event_failures",
             ),
-            (IndexerMetrics(batch_committed=True), "idle", None, "nothing_applied"),
+            (IndexerMetrics(batch_committed=True), "queued", "now", "nothing_applied"),
         ],
         ids=[
             "daily-quota",
@@ -324,9 +324,60 @@ class TestDrain:
             assert first.next_run_at <= utcnow() + HELD_BACK_RETRY
         elif due == "day":
             assert before + timedelta(hours=23) <= first.next_run_at
+        elif due == "now":
+            # Events are still pending: due now, without the continuation
+            # marker, so the per-target limits pace the retry.
+            assert before <= first.next_run_at <= utcnow()
         [line] = _completed(logs, first)
         assert line["stop"] == stop
         assert line["batches"] == 2
+
+    @pytest.mark.parametrize(
+        "metrics",
+        [
+            IndexerMetrics(applied_upserts=50, errors=1, batch_committed=True),
+            IndexerMetrics(applied_upserts=50, batch_committed=True, stopped_at_busy_lock=True),
+            IndexerMetrics(applied_upserts=50, reason="commit failed"),
+        ],
+        ids=["failed-events", "lock-busy", "error"],
+    )
+    async def test_a_stop_with_nothing_left_pending_is_idle(self, db_session, first, metrics):
+        targets = _Targets()
+        targets.add(first, 150)
+        key = first.resource_id + str(first.context_id)
+        targets.script[(key, 2)] = metrics
+
+        await _tick(db_session, targets)
+
+        assert targets.pending[key] == 0
+        await db_session.refresh(first)
+        assert first.job_status == "idle"
+
+    async def test_events_that_arrived_during_the_drain_queue_the_target(self, db_session, first):
+        """An ingest during the run sees the row ``running`` and does not queue
+        it; the job's own check at the end does."""
+        targets = _Targets()
+        targets.add(first, 50)
+        key = first.resource_id + str(first.context_id)
+        has_pending = targets.has_pending
+        checks: list[bool] = []
+
+        async def _arrives_after_the_drain_check(db, state_id):
+            found = await has_pending(db, state_id)
+            checks.append(found)
+            if state_id == first.id and len(checks) == 1:
+                # The drain saw nothing pending; an ingest lands right after.
+                targets.pending[key] = 7
+            return found
+
+        targets.has_pending = _arrives_after_the_drain_check
+
+        _result, logs = await _tick(db_session, targets)
+
+        assert _completed(logs, first)[0]["stop"] == "drained"
+        await db_session.refresh(first)
+        assert first.job_status == "queued"
+        assert DRAIN_CONTINUES_KEY not in first.metrics
 
     async def test_a_run_with_nothing_pending_is_one_batch(self, db_session, first):
         targets = _Targets()
@@ -458,7 +509,7 @@ class TestFairness:
         targets.add(first, 1000)
         targets.add(second, 100)
 
-        _result, logs = await _tick(
+        result, logs = await _tick(
             db_session, targets, DRAIN_TARGET_BUDGET_SECONDS=DRAIN_TICK_BUDGET_SECONDS + 90
         )
 
@@ -473,6 +524,9 @@ class TestFairness:
         assert second.next_run_at == due
         [deferred] = [e for e in logs if e["event"] == "indexer_tick_budget_used"]
         assert deferred["deferred"] >= 1
+        # The job result counts the rows it did not start apart.
+        assert result["deferred"] == deferred["deferred"]
+        assert result["picked"] >= 1
 
 
 def _hour_key(state: IndexerState) -> str:
@@ -562,6 +616,7 @@ class TestSlowBatches:
         assert second.job_status == "queued"
         assert second.next_run_at == due
         assert [e["deferred"] for e in logs if e["event"] == "indexer_tick_budget_used"] == [1]
+        assert _result["deferred"] == 1
 
 
 class TestFailures:
@@ -587,13 +642,69 @@ class TestFailures:
 
         result, logs = await _tick(db_session, targets)
 
-        assert result == {"picked": 2, "failed": 1, "rate_limited": 0}
+        assert result == {"picked": 2, "deferred": 0, "failed": 1, "rate_limited": 0}
         await db_session.refresh(first)
         assert first.job_status == "failed"
         assert "error" in first.metrics
         await db_session.refresh(second)
         assert second.job_status == "idle"
         assert targets.batches(second) == 1
+
+
+class TestRetryAfterAStop:
+    """A drain that stopped with events pending (not on a time budget) is
+    queued again as an ordinary run: the interval and the hourly cap pace it,
+    so an event that fails every time cannot loop (#3038)."""
+
+    async def test_the_retry_is_refused_by_the_interval(self, db_session, first):
+        targets = _Targets()
+        targets.add(first, 500)
+        key = first.resource_id + str(first.context_id)
+        failing = IndexerMetrics(
+            errors=1,
+            reason="commit failed",
+            failed_events=[{"event_id": 1, "doc_id": "d", "error_class": "QdrantError"}],
+        )
+        targets.script[(key, 1)] = failing
+        redis = _Redis()
+
+        await _tick(db_session, targets, redis)
+        await db_session.refresh(first)
+        assert first.job_status == "queued"
+        assert first.next_run_at <= utcnow()
+
+        _result, logs = await _tick(db_session, targets, redis)
+
+        assert targets.batches(first) == 1
+        [line] = [e for e in logs if e.get("resource_id") == first.resource_id]
+        assert line["event"] == "indexer_waiting_for_interval"
+        await db_session.refresh(first)
+        assert first.job_status == "queued"
+        assert first.next_run_at > utcnow()
+
+    async def test_the_retry_counts_in_the_hourly_cap(self, db_session, first):
+        import time
+
+        targets = _Targets()
+        targets.add(first, 500)
+        key = first.resource_id + str(first.context_id)
+        for n in range(1, MAX_RUNS_PER_HOUR + 2):
+            targets.script[(key, n)] = IndexerMetrics(errors=1, reason="commit failed")
+        redis = _Redis()
+
+        for _ in range(MAX_RUNS_PER_HOUR):
+            await _tick(db_session, targets, redis)
+            # Let the interval pass; only the hourly cap is left to pace it.
+            redis.store[_last_run_key(first)] = str(time.time() - MIN_INTERVAL_SECONDS)
+            await _queue_again(db_session, first)
+
+        _result, logs = await _tick(db_session, targets, redis)
+
+        assert targets.batches(first) == MAX_RUNS_PER_HOUR
+        assert redis.store[_hour_key(first)] == str(MAX_RUNS_PER_HOUR)
+        [line] = [e for e in logs if e.get("resource_id") == first.resource_id]
+        assert line["event"] == "indexer_skipped"
+        assert line["reason"].startswith("hourly_quota_exceeded")
 
 
 class TestStaleRunning:
@@ -629,3 +740,59 @@ class TestStaleRunning:
 
     def test_the_stale_limit_is_well_above_a_tick(self):
         assert job.STALE_RUNNING_AFTER.total_seconds() >= 5 * DRAIN_TICK_BUDGET_SECONDS
+
+
+class TestPendingCheck:
+    """``has_pending_events`` reads the events of the resource the indexer
+    resolves for the row, the way ``process_incremental`` does (#3038)."""
+
+    async def _event(self, db_session, state: IndexerState) -> int:
+        await db_session.refresh(state)
+        event = ResourceEvent(
+            resource_pk=state.resource_pk,
+            resource_id=state.resource_id,
+            op="upsert",
+            doc_id=f"doc-{uuid.uuid4().hex[:8]}",
+            payload={},
+        )
+        db_session.add(event)
+        await db_session.flush()
+        event_id = event.id
+        await db_session.commit()
+        return event_id
+
+    async def test_a_row_sees_the_events_after_its_offset(self, db_session, first):
+        state_id = first.id
+        assert await has_pending_events(db_session, state_id) is False
+        event_id = await self._event(db_session, first)
+        assert await has_pending_events(db_session, state_id) is True
+        await db_session.execute(
+            update(IndexerState).where(IndexerState.id == state_id).values(last_offset=event_id)
+        )
+        await db_session.commit()
+        assert await has_pending_events(db_session, state_id) is False
+
+    async def test_a_legacy_row_without_resource_pk_sees_its_events(self, db_session, first):
+        """The indexer processes such a row through its slug: the check must
+        see the same events, or a drain stops after one batch."""
+        state_id, resource_pk = first.id, first.resource_pk
+        event_id = await self._event(db_session, first)
+        await db_session.execute(
+            update(IndexerState).where(IndexerState.id == state_id).values(resource_pk=None)
+        )
+        await db_session.commit()
+        try:
+            assert await has_pending_events(db_session, state_id) is True
+            await db_session.execute(
+                update(IndexerState).where(IndexerState.id == state_id).values(last_offset=event_id)
+            )
+            await db_session.commit()
+            assert await has_pending_events(db_session, state_id) is False
+        finally:
+            await db_session.rollback()
+            await db_session.execute(
+                update(IndexerState)
+                .where(IndexerState.id == state_id)
+                .values(resource_pk=resource_pk)
+            )
+            await db_session.commit()

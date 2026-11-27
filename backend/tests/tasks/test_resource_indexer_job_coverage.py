@@ -374,7 +374,7 @@ class TestRunQueuedIndexers:
         ):
             result = await run_queued_indexers()
 
-        assert result == {"picked": 1, "failed": 0, "rate_limited": 0}
+        assert result == {"picked": 1, "deferred": 0, "failed": 0, "rate_limited": 0}
         indexer_instance.process_incremental.assert_awaited_once()
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "idle"

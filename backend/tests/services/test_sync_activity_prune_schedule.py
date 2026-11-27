@@ -109,10 +109,12 @@ async def test_failing_prune_is_logged_and_the_same_tick_still_processes_queued_
             AsyncMock(return_value=IndexerRateLimit(True, "ok")),
         ),
         patch("tasks.resource_indexer_job.record_indexer_run", AsyncMock()),
+        # Nothing left pending after the run: the row goes back to idle.
+        patch("tasks.resource_indexer_job.has_pending_events", AsyncMock(return_value=False)),
         structlog.testing.capture_logs() as logs,
     ):
         result = await run_queued_indexers()
-    assert result == {"picked": 1, "failed": 0, "rate_limited": 0}
+    assert result == {"picked": 1, "deferred": 0, "failed": 0, "rate_limited": 0}
     indexer.process_incremental.assert_awaited_once()
     assert state.job_status == "idle"
     assert [entry["event"] for entry in logs if entry["event"].startswith("sync_activity")] == [
