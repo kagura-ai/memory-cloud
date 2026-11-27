@@ -685,7 +685,10 @@ async def _undo_update_importance(
             not_pinned_predicate(),
             not_tool_triggered_predicate(),
         )
-        .values(importance=old_importance, updated_at=utcnow())
+        # #3019: a rollback of a re-evaluation is not an edit either: it
+        # writes the re-evaluation marker, not ``updated_at``, so the row is
+        # left alone for the next STALENESS_DAYS as before.
+        .values(importance=old_importance, importance_reevaluated_at=utcnow())
         # #2065: what tells a resource-indexer row apart, read by the UPDATE.
         .returning(
             Memory.summary_embedding_id,

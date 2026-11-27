@@ -223,3 +223,54 @@ async def test_switch_requeues_rows_restored_after_verify(db_session):
         failed_archive.id: "pending",
         untouched.id: "success",
     }
+
+
+@pytest.mark.asyncio
+async def test_switch_requeues_a_row_reevaluated_after_the_reembed_started(db_session):
+    """#3019: importance re-evaluation writes ``importance_reevaluated_at``, not
+    ``updated_at``. A row re-evaluated after the re-embed copied it is re-queued,
+    so the new collection's point gets the new importance; a row re-evaluated
+    before is left alone."""
+    owner = f"mig-user-{uuid4().hex[:8]}"
+    ws, ctx = await _scope(db_session, owner)
+    written = utcnow() - timedelta(days=30)
+    requeue_since = utcnow() - timedelta(hours=1)
+    rescored = _row(owner, ws, ctx, written=written, importance_reevaluated_at=utcnow())
+    rescored_before = _row(
+        owner, ws, ctx, written=written, importance_reevaluated_at=written + timedelta(days=1)
+    )
+    untouched = _row(owner, ws, ctx, written=written)
+    db_session.add_all([rescored, rescored_before, untouched])
+    await db_session.commit()
+
+    assert await _count(db_session, [rescored.id], svc._requeued_by_switch(requeue_since)) == 1
+    assert await _count(db_session, [rescored.id], svc._left_by_switch(requeue_since)) == 0
+    left = [rescored_before.id, untouched.id]
+    assert await _count(db_session, left, svc._left_by_switch(requeue_since)) == 2
+    assert await _count(db_session, left, svc._requeued_by_switch(requeue_since)) == 0
+
+    with (
+        patch.object(svc, "delete_points_from_qdrant", AsyncMock()),
+        patch.object(svc, "delete_chunk_points", AsyncMock()),
+    ):
+        result = await svc.switch_context_embedding(
+            db_session, ctx.id, TARGET, TARGET_DIMENSIONS, requeue_since=requeue_since
+        )
+
+    assert result.requeued == 1
+    statuses = dict(
+        (
+            await db_session.execute(
+                select(Memory.id, Memory.embedding_status).where(
+                    Memory.id.in_([rescored.id, *left])
+                )
+            )
+        )
+        .tuples()
+        .all()
+    )
+    assert statuses == {
+        rescored.id: "pending",
+        rescored_before.id: "success",
+        untouched.id: "success",
+    }

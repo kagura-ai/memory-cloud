@@ -391,7 +391,8 @@ class TestImportanceReevalOutcome:
         refused.rowcount = 0
         written = MagicMock()
         written.rowcount = 1
-        reeval_phase.db.execute = AsyncMock(side_effect=[written, refused])
+        # The batch's re-evaluation marker, then the two importance writes.
+        reeval_phase.db.execute = AsyncMock(side_effect=[MagicMock(), written, refused])
         with patch("services.sleep.importance_reeval.update_memory_payload_in_qdrant", AsyncMock()):
             result = await reeval_phase.execute(_reeval_config(), "u", None, None, SleepBudget())
         assert _outcome(result.details) == phase_outcome(

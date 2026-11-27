@@ -29,6 +29,7 @@ from services.sleep.importance_reeval import (
     BATCH_SIZE,
     IMPORTANCE_MAX,
     IMPORTANCE_MIN,
+    REEVALUATED_STATEMENT,
     STALENESS_DAYS,
     ImportanceReevalPhase,
 )
@@ -184,6 +185,91 @@ class TestFetchCandidates:
         candidates = await phase._fetch_candidates(user_id, None, None)
 
         assert candidates == []
+
+    async def test_recent_reevaluation_is_not_due(self, db_session):
+        """#3019: the re-evaluation marker restarts the clock like an edit does."""
+        user_id = f"u-{uuid4()}"
+        fresh = _mem_kwargs(user_id=user_id)
+        fresh["importance_reevaluated_at"] = utcnow() - timedelta(days=1)
+        old = _mem_kwargs(user_id=user_id)
+        old["importance_reevaluated_at"] = utcnow() - timedelta(days=STALENESS_DAYS + 1)
+        db_session.add_all([Memory(**fresh), Memory(**old)])
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        candidates = await phase._fetch_candidates(user_id, None, None)
+
+        assert [c.id for c in candidates] == [old["id"]]
+
+    async def test_never_judged_first_then_longest_unjudged(self, db_session):
+        """#3019: NULL marker first (oldest created first), then the oldest marker."""
+        user_id = f"u-{uuid4()}"
+        now = utcnow()
+        judged_long_ago = _mem_kwargs(user_id=user_id)
+        judged_long_ago["importance_reevaluated_at"] = now - timedelta(days=60)
+        judged_recently = _mem_kwargs(user_id=user_id)
+        judged_recently["importance_reevaluated_at"] = now - timedelta(days=10)
+        never_newer = _mem_kwargs(user_id=user_id)
+        never_newer["created_at"] = now - timedelta(days=20)
+        never_older = _mem_kwargs(user_id=user_id)
+        never_older["created_at"] = now - timedelta(days=40)
+        db_session.add_all(
+            [Memory(**kw) for kw in (judged_recently, never_newer, judged_long_ago, never_older)]
+        )
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        candidates = await phase._fetch_candidates(user_id, None, None)
+
+        assert [c.id for c in candidates] == [
+            never_older["id"],
+            never_newer["id"],
+            judged_long_ago["id"],
+            judged_recently["id"],
+        ]
+        limited = await phase._fetch_candidates(user_id, None, None, limit=2)
+        assert [c.id for c in limited] == [never_older["id"], never_newer["id"]]
+
+    async def test_answered_batch_marks_rows_and_leaves_updated_at(self, db_session):
+        """#3019: an answered batch sets the marker on every row (a row with no
+        score included); the importance write does not touch ``updated_at``."""
+        user_id = f"u-{uuid4()}"
+        scored = _mem_kwargs(user_id=user_id, importance=0.5)
+        scored["updated_at"] = None
+        scored["created_at"] = utcnow() - timedelta(days=STALENESS_DAYS + 3)
+        unscored = _mem_kwargs(user_id=user_id, importance=0.5)
+        db_session.add_all([Memory(**scored), Memory(**unscored)])
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        phase._evaluate_batch = AsyncMock(return_value={scored["id"]: 0.9})
+        with patch(
+            "services.sleep.importance_reeval.update_memory_payload_in_qdrant",
+            new_callable=AsyncMock,
+        ):
+            result = await phase.execute(_make_config(), user_id, None, None, SleepBudget())
+
+        assert result.details["updated"] == 1
+        rows = {
+            row.id: row
+            for row in (
+                await db_session.execute(
+                    select(
+                        Memory.id,
+                        Memory.importance,
+                        Memory.updated_at,
+                        Memory.importance_reevaluated_at,
+                    ).where(Memory.id.in_([scored["id"], unscored["id"]]))
+                )
+            ).all()
+        }
+        assert rows[scored["id"]].updated_at is None
+        assert rows[scored["id"]].importance == pytest.approx(0.3 * 0.9 + 0.7 * 0.5)
+        assert rows[unscored["id"]].updated_at == unscored["updated_at"]
+        assert rows[scored["id"]].importance_reevaluated_at is not None
+        assert rows[unscored["id"]].importance_reevaluated_at is not None
+        # Neither is due again inside the window.
+        assert await phase._fetch_candidates(user_id, None, None) == []
 
     async def test_excludes_pinned_memory(self, db_session):
         """#1523: pinned rows keep the importance their owner set — load_pinned()
@@ -593,8 +679,12 @@ class TestExecuteIntegration:
 class TestExecuteBudget:
     """Batching + budget-exhaustion branches."""
 
-    async def test_budget_exhausted_before_first_batch_breaks(self, reeval_phase_mockdb):
-        """can_afford False on entry → loop breaks, zero updates."""
+    async def test_budget_exhausted_before_first_batch_judges_nothing(self, reeval_phase_mockdb):
+        """No call left on entry → nothing fetched to judge, zero updates.
+
+        #3019: the fetch is limited to what the calls can judge, so with no
+        call left only the probe row comes back and says more rows are due.
+        """
         phase = reeval_phase_mockdb
         candidates = [_make_mock_memory() for _ in range(3)]
         phase._fetch_candidates = AsyncMock(return_value=candidates)
@@ -605,9 +695,12 @@ class TestExecuteBudget:
         result = await phase.execute(_make_config(), "u", None, None, budget)
 
         phase._evaluate_batch.assert_not_called()
+        assert phase._fetch_candidates.await_args.kwargs["limit"] == 1
         assert result.memories_processed == 0
-        assert result.details["candidates"] == 3
+        assert result.details["candidates"] == 0
         assert result.details["updated"] == 0
+        assert result.details["more_due"] is True
+        assert result.details["budget_cut"] is True
 
     async def test_multiple_batches_processed(self, reeval_phase_mockdb):
         """More than BATCH_SIZE candidates → multiple _evaluate_batch calls."""
@@ -634,7 +727,9 @@ class TestExecuteBudget:
         budget = SleepBudget()
         result = await phase.execute(_make_config(), "u", None, None, budget)
 
-        phase.db.execute.assert_not_called()
+        # #3019: only the batch's re-evaluation marker is written; no
+        # importance write for the stranger id.
+        assert [c.args[0] for c in phase.db.execute.await_args_list] == [REEVALUATED_STATEMENT]
         assert result.memories_processed == 0
 
 

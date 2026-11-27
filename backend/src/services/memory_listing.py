@@ -583,10 +583,12 @@ async def changes_since(
     """The context's memory-level change log in ``[since, until)``, oldest first.
 
     created: ``created_at`` in the window. updated: ``updated_at`` in the window
-    and later than ``created_at`` — an edit, a scope promotion or a Sleep
-    maintenance change (importance re-evaluation, dedup tag merge, rollback);
-    never the initial write or an embedding retry: the embedding pipeline keeps
-    its own clock (``embedding_attempted_at``) and does not stamp ``updated_at``.
+    and later than ``created_at`` — an edit, the tag union of a Sleep merge
+    winner or the rollback of a promotion; never the initial write, an
+    embedding retry, a promotion, or an importance re-evaluation or its
+    rollback: the embedding pipeline keeps its own clock
+    (``embedding_attempted_at``) and so does re-evaluation
+    (``importance_reevaluated_at``, #3019); neither stamps ``updated_at``.
     Nor does ``forget``: a forgotten memory has an updated event only for an edit
     made before its ``deleted_at`` (#1924).
     superseded: a ``supersedes`` edge in the window whose live source is the

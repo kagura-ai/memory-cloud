@@ -193,8 +193,9 @@ class SleepOrchestrator:
             ("consolidation", lambda: ConsolidationPhase(self.db, self.llm_service, cn)),
         ]
         if index_enabled():
-            # Capture discovery's evidence before metadata-only maintenance
-            # updates updated_at. Later source edits still fail the fingerprint.
+            # Capture discovery's evidence before the dedup merge stamps a
+            # winner's updated_at (importance re-evaluation no longer stamps
+            # it, #3019). Later source edits still fail the fingerprint.
             phases.insert(1, ("related_index", lambda: RelatedIndexPhase(self.db)))
 
         # #3019: one budget per phase, the LLM calls shared among the phases
