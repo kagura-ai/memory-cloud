@@ -51,6 +51,10 @@ import {
   type PublicAPIStatsResponse,
 } from "@/lib/api/workspaces";
 import { PublicAPIStats } from "@/components/dashboard/PublicAPIStats";
+import {
+  PublicEndpointUsage,
+  shouldShowPublicEndpointUsage,
+} from "@/components/dashboard/PublicEndpointUsage";
 import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
@@ -79,6 +83,8 @@ export function OverviewTabPanel({
   const [publicAPIStats, setPublicAPIStats] =
     useState<PublicAPIStatsResponse | null>(null);
   const [timelineDays, setTimelineDays] = useState<7 | 30>(7);
+  // #3035: bumped by Refresh so the owner's endpoint card reloads too.
+  const [refreshKey, setRefreshKey] = useState(0);
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
   // Issue #398: User Activity is admin/owner only. Backend 403's the
   // /user-activity endpoint for non-admins; gating here both hides the
@@ -143,6 +149,7 @@ export function OverviewTabPanel({
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
+    setRefreshKey((key) => key + 1);
     try {
       await overviewRef.current?.refresh();
       await fetchUsageStats();
@@ -260,6 +267,18 @@ export function OverviewTabPanel({
           <PublicAPIStats stats={publicAPIStats} days={timelineDays} />
         </div>
       )}
+
+      {/* #3035: the public MCP endpoint's statistics, workspace owner only */}
+      {context.resource_id &&
+        shouldShowPublicEndpointUsage(
+          context,
+          currentWorkspace?.current_user_role,
+        ) && (
+          <PublicEndpointUsage
+            resourceId={context.resource_id}
+            refreshKey={refreshKey}
+          />
+        )}
 
       {/* Memory Health & Neural Activity */}
       <RichMemoryOverview ref={overviewRef} contextId={contextId} />

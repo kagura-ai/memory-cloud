@@ -2551,6 +2551,43 @@
       "total": "合計",
       "anonymous": "匿名",
       "authenticated": "認証済み"
+    },
+    "publicEndpoint": {
+      "title": "公開 MCP エンドポイントの利用状況",
+      "description": "このリソースの公開 MCP エンドポイントへの呼び出し（UTC の日単位）",
+      "calls": "呼び出し",
+      "searches": "検索",
+      "searchesAnswered": "応答した検索",
+      "chartTitle": "日ごとの呼び出しと検索（UTC）",
+      "outcomesTitle": "結果別の検索",
+      "noSearches": "この期間の検索はありません。",
+      "outcomes": {
+        "success": "応答",
+        "degraded": "応答（機能縮退）",
+        "denied": "拒否",
+        "rate_limited": "レート制限",
+        "invalid_request": "不正なリクエスト",
+        "error": "サーバーエラー",
+        "cancelled": "キャンセル"
+      },
+      "documentsTitle": "よく返されたドキュメント",
+      "document": "ドキュメント",
+      "bestRank": "最高順位",
+      "noLongerPublished": "公開終了",
+      "noDocuments": "この期間にドキュメントを返した検索はありません。",
+      "documentsUnavailable": "よく返されたドキュメントを現在読み込めません。上の件数は欠けていません。",
+      "notServing": "エンドポイントが現在公開されていないため、ドキュメントのタイトルは表示されません。",
+      "scanLimitReached": "この一覧は期間内の直近 {count, number} 件の検索に基づいています。",
+      "recordingOff": "このサーバーでは利用状況の記録がオフになっているため、新しい呼び出しは計上されません。",
+      "emptyTitle": "この期間の呼び出しはありません",
+      "emptyDescription": "選択した期間に、このエンドポイントへの呼び出しはありませんでした。",
+      "loadFailed": "エンドポイントの利用統計を読み込めませんでした。",
+      "rateLimited": "この統計へのリクエストが多すぎます。1 分ほど待ってから再度お試しください。",
+      "scopeNote": "この数値は、このリソースの公開 MCP エンドポイントへの呼び出しです。REST の公開検索による検索は含まれず、「{section}」に計上されます。",
+      "cacheNote": "数値は、このエンドポイント自身が応答した呼び出しの件数です。エンドポイントの手前にあるキャッシュが返した応答は含まれません。",
+      "callsNote": "件数は呼び出しの数であり、人数ではありません。1 人の訪問者が何度も呼び出すことがあります。",
+      "retentionNote": "利用イベントの保持期間は {days} 日です。それより前の利用は表示されません。日付は UTC の日単位です。",
+      "undercountNote": "サーバーが記録できなかった呼び出しは含まれないため、実際の件数はこれより多いことがあります。"
     }
   },
   "searchSettings": {
