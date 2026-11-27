@@ -11,7 +11,10 @@ embedding, no Hebbian write, so both are cheap enough for a session start.
 
 Scoping is the REST list's: the caller must read the context; in a private
 context only the owner's rows (identity-link aware, ``owned_by``) are visible;
-the agent-binding predicate applies as everywhere else.
+the agent-binding predicate applies as everywhere else. ``listing_scope`` is
+that scope, shared by the MCP list, the REST list of one context and the
+never-delivered count (#3022), whose filter (``never_delivered``) comes from
+``services.never_delivered``.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import base64
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +46,7 @@ from models.memory import (
 )
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
+from services.never_delivered import never_delivered_predicates
 from services.write_provenance import SessionPrincipal, principal_predicate
 from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 from utils.event_dates import parse_event_bound
@@ -112,6 +116,7 @@ _KNOWN_FILTERS = {
     "importance",
     "source_uri_prefix",
     "trust_tier",
+    "never_delivered",
     *_TIME_FILTERS,
     *_OBSERVED_FILTERS,
     *_EVENT_FILTERS,
@@ -228,7 +233,9 @@ def _details_equals(sub: str, value: bool | int | float | str) -> ColumnElement[
     return and_(func.json_typeof(stored) == json_type, stored.as_string() == text)
 
 
-def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement[bool]]:
+def compile_memory_filters(
+    filters: dict[str, Any] | None, *, viewer_user_id: str | None = None
+) -> list[ColumnElement[bool]]:
     """Translate recall's filter vocabulary into SQL predicates on ``Memory``.
 
     Supported: type, scope, source_type, delivery_mode (string or list → IN);
@@ -244,11 +251,20 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
     exclusive; a datetime event_after is its UTC day, a datetime event_before
     past midnight the day after it; a memory without an event date never
     matches); source_uri_prefix; trust_tier='trusted';
+    never_delivered=true (#3022: the viewer's own memories past the age
+    threshold that were never delivered, ``services.never_delivered``; it
+    needs ``viewer_user_id``, so a caller that passes none, recall's related
+    index among them, refuses the key);
     ``details.<key>`` equality for a scalar value (see ``_details_equals``: same
     JSON type, and for a number the same spelling). ``near`` / ``within`` are
     recall_nearby's job and are refused by name. ``updated_after`` / ``updated_before`` read the
     ``updated_at`` column and therefore never match a never-edited memory, while
     ``order_by="updated_at"`` falls back to ``created_at`` for those rows.
+
+    Args:
+        filters: The filter object, or None.
+        viewer_user_id: The caller, for ``never_delivered``; None where the
+            filter is not offered.
 
     Raises:
         ValueError: an unknown key, a wrong type or an unsupported filter —
@@ -317,6 +333,12 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
             if value != "trusted":
                 raise ValueError("trust_tier accepts 'trusted' only")
             out.append(_trusted_predicate())
+        elif key == "never_delivered":
+            if viewer_user_id is None:
+                raise ValueError("never_delivered is not supported here")
+            if value is not True:
+                raise ValueError("never_delivered accepts true only")
+            out.extend(never_delivered_predicates(viewer_user_id))
     if (tags_match_given or tags_normalize) and not tags:
         raise ValueError("tags_match / tags_normalize need a tags filter to apply to")
     if tags:
@@ -451,6 +473,54 @@ def recall_trust_predicates(filters: Mapping[str, Any] | None) -> list[ColumnEle
     return []
 
 
+def listing_scope(
+    *,
+    context_id: UUID,
+    owner_user_id: str | None,
+    binding: ColumnElement[bool] | None,
+) -> list[ColumnElement[bool]]:
+    """The rows a list of one context may show, before any filter (#3022).
+
+    Live rows of ``context_id``; in a private context (``owner_user_id`` set)
+    only the owner's, identity-link aware; and the agent-binding predicate
+    when the caller is bound (the caller awaits
+    ``binding_memory_sql_predicate`` and passes the result). The MCP list, the
+    REST list of one context and the never-delivered count all scope with it.
+    """
+    where: list[ColumnElement[bool]] = [
+        Memory.deleted_at.is_(None),
+        Memory.context_id == context_id,
+    ]
+    if owner_user_id is not None:
+        where.append(owned_by(Memory.user_id, owner_user_id))
+    if binding is not None:
+        where.append(binding)
+    return where
+
+
+async def count_never_delivered(
+    db: AsyncSession,
+    *,
+    context_id: UUID,
+    owner_user_id: str | None,
+    viewer_user_id: str,
+    now: datetime | None = None,
+    exempt: Collection[str] | None = None,
+) -> int:
+    """How many memories of ``context_id`` are never delivered for ``viewer_user_id`` (#3022).
+
+    One ``count(*)`` over :func:`listing_scope` and
+    :func:`services.never_delivered.never_delivered_predicates`: the number
+    equals the ``total`` of a list with ``never_delivered`` for the same
+    viewer, context and instant. Live: nothing caches it.
+    """
+    binding = await binding_memory_sql_predicate(db)
+    where = listing_scope(context_id=context_id, owner_user_id=owner_user_id, binding=binding)
+    where.extend(never_delivered_predicates(viewer_user_id, now=now, exempt=exempt))
+    total = (await db.execute(select(func.count()).select_from(Memory).where(*where))).scalar_one()
+    return int(total)
+
+
 @dataclass(frozen=True)
 class ListPage:
     rows: list[Memory]
@@ -469,11 +539,13 @@ async def list_memories(
     direction: str = "desc",
     offset: int = 0,
     limit: int = DEFAULT_LIMIT,
+    viewer_user_id: str | None = None,
 ) -> ListPage:
     """Every live memory of ``context_id`` matching ``filters``, ordered and paged.
 
     ``owner_user_id`` is the caller in a private context (identity-link aware)
-    and ``None`` in a shared one. Order is ``(order_by, id)`` so pages are
+    and ``None`` in a shared one. ``viewer_user_id`` is the caller, handed to
+    :func:`compile_memory_filters` when ``filters`` is passed raw. Order is ``(order_by, id)`` so pages are
     stable; ``total`` is the full match count for the same predicates, read in
     its own statement — under concurrent writes an offset page can shift, which
     is inherent to offset paging (``changes_since`` has the keyset cursor).
@@ -482,15 +554,17 @@ async def list_memories(
         raise ValueError(f"order_by must be one of {', '.join(ORDER_COLUMNS)}")
     if direction not in DIRECTIONS:
         raise ValueError("direction must be 'asc' or 'desc'")
-    where: list[Any] = [Memory.deleted_at.is_(None), Memory.context_id == context_id]
-    if owner_user_id is not None:
-        where.append(owned_by(Memory.user_id, owner_user_id))
     binding = await binding_memory_sql_predicate(db)
-    if binding is not None:
-        where.append(binding)
+    where: list[Any] = listing_scope(
+        context_id=context_id, owner_user_id=owner_user_id, binding=binding
+    )
     # The handler compiles before it opens a session, so a bad filter costs no
     # database round trip; other callers may still pass the raw dict.
-    where.extend(predicates if predicates is not None else compile_memory_filters(filters))
+    where.extend(
+        predicates
+        if predicates is not None
+        else compile_memory_filters(filters, viewer_user_id=viewer_user_id)
+    )
     column = ORDER_COLUMNS[order_by]
     if order_by in _NULLABLE_ORDER:
         # #2330: the nullable sort keys — NULLS LAST both ways (Postgres

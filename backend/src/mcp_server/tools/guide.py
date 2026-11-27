@@ -21,6 +21,7 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+from config.constants import NEVER_DELIVERED_AGE_DAYS
 from mcp_server.tools._helpers import _error_response, _success_response
 
 MAX_TOPICS = 20
@@ -816,13 +817,30 @@ GUIDE_TOPICS: dict[str, str] = {
         "({'details.status': 'open'}; key ^[A-Za-z0-9_]{1,64}$): the stored value must "
         "have the same JSON type (the string 'true' is not the boolean true, the "
         "string '2' is not the number 2) and a number the same spelling (2 is not "
-        "2.0); null, objects and arrays never match. near / within are not "
+        "2.0); null, objects and arrays never match. never_delivered=true lists your "
+        "own memories that were never delivered (list.never_delivered). near / within are not "
         "accepted — recall_nearby, outside the core profile (describe_tools("
         '["recall_nearby"]) has its schema), is the deterministic place query. total is the full '
         "match count; include_details=true adds details and is dropped first "
         "(details_omitted) when the reply exceeds max_chars. In a private context "
         "only the owner's (identity-link set's) rows are listed; shared contexts list "
         "every member's. No ranking, no embedding, no Hebbian write."
+    ),
+    "list.never_delivered": (
+        "filters={'never_delivered': true} narrows list to your own memories (yours and "
+        "those of accounts linked to you, in a shared context too) created more than "
+        f"{NEVER_DELIVERED_AGE_DAYS} days ago whose content was never delivered: no "
+        "recall returned their content, no reference read them, and they show no "
+        "earlier use (access count, reference count and last use are all empty). Age "
+        "counts from creation; an edit does not reset it. Left out: pinned memories, "
+        "time memories, tool guardrails, rows indexed from a connected source, rows "
+        "carrying an exempt tag (the deployment's Sleep archive exempt tags, default "
+        "status:open), every memory of a public context, and a memory that superseded "
+        "an older one. Only true is accepted; it ANDs with every other filter. Call "
+        "with limit=1 and read total for the count. Nothing is deleted or hidden: the "
+        "list is a review aid. A reference read or a recall that returns the content "
+        "takes the memory off the list; a context merge carries the copied memories' "
+        "delivery history."
     ),
     # ------------------------------------------------------- changes_since
     "changes_since.usage": (
@@ -969,7 +987,7 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
         "ids",
     ),
     "list_tags": ("list_tags.usage",),
-    "list": ("list.filters", "ids"),
+    "list": ("list.filters", "list.never_delivered", "ids"),
     "changes_since": ("changes_since.usage", "ids"),
     "bootstrap": ("bootstrap.usage", "default-context", "guardrails", "ids"),
 }

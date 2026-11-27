@@ -256,3 +256,18 @@ async def test_a_tool_without_a_manual_gets_no_pointer():
 async def test_an_empty_topics_list_is_the_index():
     (block,) = await handle_guide({"topics": []}, "u", None)
     assert json.loads(block.text)["topics"][0]["topic"] == "index"
+
+
+def test_list_never_delivered_topic_is_indexed_and_names_the_rule():
+    """#3022: the never_delivered list filter is documented in the guide, not in the tool text."""
+    from config.constants import NEVER_DELIVERED_AGE_DAYS
+
+    assert "list.never_delivered" in GUIDE_INDEX["list"]
+    text = GUIDE_TOPICS["list.never_delivered"]
+    assert "never_delivered" in text
+    assert "your own" in text
+    assert "linked to you" in text
+    assert f"{NEVER_DELIVERED_AGE_DAYS} days" in text
+    assert "public context" in text
+    assert "limit=1" in text and "total" in text
+    assert "never_delivered" in GUIDE_TOPICS["list.filters"]
