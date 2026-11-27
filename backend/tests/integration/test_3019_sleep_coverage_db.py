@@ -165,6 +165,7 @@ class _Partition:
         self.vectors: dict[str, list[float]] = {}
         self.rows: list[Memory] = []
         self.windows: list[list] = []
+        self.sweeps: list[list] = []
 
     def axis(self, index: int) -> list[float]:
         vector = [0.0] * self.dims
@@ -182,7 +183,11 @@ class _Partition:
     def _embedding_service(self):
         from unittest.mock import MagicMock
 
-        by_summary = {row.summary: self.vectors[str(row.id)] for row in self.rows}
+        by_summary = {
+            row.summary: self.vectors[str(row.id)]
+            for row in self.rows
+            if str(row.id) in self.vectors
+        }
         service = MagicMock()
         service.provider = "test"
         service.model = "test"
@@ -226,6 +231,7 @@ class _Partition:
         async def recording_fetch(db, eligible, lanes, limit):
             window, coverage = await fetch_window(db, eligible, lanes, limit)
             self.windows.append([m.id for m in window])
+            self.sweeps.append([key[1] for key in coverage.sweep])
             return window, coverage
 
         config = NeuralMemoryConfig(
@@ -357,6 +363,90 @@ async def test_acceptance_every_row_is_read_in_bounded_runs(db_session):
     assert {m.id for m in original} <= first_pass
     assert [_state(r).dedup.sweep.passes for r in reports] == [0] * 10 + [1]
     assert sweeps[10]["pass_completed"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_oversize_cluster_that_keeps_merging_cannot_hold_the_sweep(db_session):
+    """Templated memories about 0.95 apart form one oversize cluster with every
+    new memory. A near-duplicate (0.998) of the previous new one arrives every
+    night, so a merge runs in that cluster every night and its rows are left
+    for the next run. The sweep's head is such a row every night: it is held
+    for at most STALL_LIMIT runs, then passed, and every row below it is
+    swept within the pass (rule path, allowance 2, so the sweep reads one row
+    a run)."""
+    import math
+
+    from services.sleep.coverage import STALL_LIMIT
+
+    owner, ws, ctx = await _full_context(db_session)
+    part = _Partition(db_session, owner, ws, ctx)
+    shared, rest = math.sqrt(0.95), math.sqrt(0.05)
+
+    def template(i: int) -> list[float]:
+        vector = [0.0] * part.dims
+        vector[0], vector[1 + i] = shared, rest
+        return vector
+
+    def inflow(j: int) -> list[float]:
+        # 0.95 to every template, 0.95 + 0.05 * 0.96 = 0.998 to every other
+        # new memory: only the new memories merge on the rule path (>= 0.98).
+        vector = [0.0] * part.dims
+        vector[0] = shared
+        vector[part.dims - 1] = rest * math.sqrt(0.96)
+        vector[20 + j] = rest * math.sqrt(0.04)
+        return vector
+
+    start = utcnow() - timedelta(days=60)
+    templates = [
+        await part.add(created_at=start + timedelta(days=i), vector=template(i)) for i in range(6)
+    ]
+    reports = []
+    for night in range(1 + STALL_LIMIT * (len(templates) + 1)):
+        await part.add(
+            created_at=utcnow() - timedelta(days=1) + timedelta(minutes=night),
+            vector=inflow(night),
+        )
+        reports.append(
+            await part.run(2, started_at=utcnow() - timedelta(hours=30) + timedelta(minutes=night))
+        )
+        # A merge deletes the loser's point after the run commits.
+        gone = await db_session.execute(
+            select(Memory.id).where(
+                Memory.id.in_([m.id for m in part.rows]), Memory.deleted_at.is_not(None)
+            )
+        )
+        for mid in gone.scalars():
+            part.vectors.pop(str(mid), None)
+        if _state(reports[-1]).dedup.sweep.passes:
+            break
+
+    states = [_state(r) for r in reports]
+    positions = [s.dedup.sweep.position for s in states]
+    sweeps = [r.dedup_result["details"]["coverage"]["sweep"] for r in reports]
+    # (night, merged, sweep taken, sweep advanced, sweep stalls), for a failure.
+    trace = "; ".join(
+        f"{night}: {r.memories_merged} {s['taken']} {s['advanced']} {st.dedup.sweep.stalls}"
+        for night, (r, s, st) in enumerate(zip(reports, sweeps, states, strict=True))
+    )
+    # The inflow keeps the cluster merging every night once two new memories exist.
+    assert all(r.memories_merged == 1 for r in reports[1:]), trace
+    # The sweep never waits STALL_LIMIT runs in a row on the same head.
+    unchanged = longest = 0
+    for before, after in zip(positions, positions[1:], strict=False):
+        unchanged = unchanged + 1 if after == before else 0
+        longest = max(longest, unchanged)
+    assert longest <= STALL_LIMIT - 1, trace
+    # Every templated row below the first head was swept, and the pass ended.
+    swept = {mid for lane in part.sweeps for mid in lane}
+    assert {t.id for t in templates} <= swept, trace
+    assert states[-1].dedup.sweep.passes == 1, trace
+    # The report tells a head held by a merge from a failure.
+    assert any(s["held_by_oversize_merge"] and not s["advanced"] for s in sweeps), trace
+    coverage = [r.dedup_result["details"]["coverage"] for r in reports]
+    passed = [c["skipped_after_stalls_reasons"] for c in coverage]
+    assert sum(p.get("oversize_merge", 0) for p in passed) >= len(templates) - 1, trace
+    assert all("failure" not in p for p in passed), trace
+    assert [c["skipped_after_stalls"] for c in coverage] == [sum(p.values()) for p in passed], trace
 
 
 @pytest.mark.asyncio

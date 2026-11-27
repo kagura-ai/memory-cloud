@@ -13,6 +13,7 @@ from services.sleep.coverage import (
     CHANGED_LANE_OVERLAP,
     FAILURE,
     NIL_UUID,
+    OVERSIZE_MERGE,
     PASSED,
     SETTLED,
     STALL_LIMIT,
@@ -146,6 +147,32 @@ class TestPlanChanged:
         plan = plan_changed(_entry(), _rows(keys[2:], SETTLED, BUDGET), floor=keys[1], now=NOW)
         assert plan.entry.position == keys[2]
 
+    def test_a_head_held_by_an_oversize_merge_is_no_stall_here(self):
+        """The changed lane cannot be held for good (new rows push a held row
+        out as a backlog), so a row held by a merge waits like a budget row."""
+        keys = _keys(2)
+        old = (T0 - timedelta(days=1), uuid4())
+        plan = plan_changed(
+            _entry(old, stalls=STALL_LIMIT - 1),
+            _rows(keys, OVERSIZE_MERGE, SETTLED),
+            floor=None,
+            now=NOW,
+        )
+        assert plan.entry.position == old
+        assert plan.entry.stalls == STALL_LIMIT - 1
+        assert (plan.skipped_after_stalls, plan.skipped_reasons) == (0, {})
+
+    def test_a_failure_stall_does_not_pass_a_held_row_here(self):
+        keys = _keys(3)
+        plan = plan_changed(
+            _entry(stalls=STALL_LIMIT - 1),
+            _rows(keys, FAILURE, OVERSIZE_MERGE, SETTLED),
+            floor=None,
+            now=NOW,
+        )
+        assert plan.entry.position == keys[0]
+        assert plan.skipped_reasons == {"failure": 1}
+
 
 class TestPlanSweep:
     def test_all_settled_moves_to_the_last_row(self):
@@ -197,6 +224,75 @@ class TestPlanSweep:
             entry = plan.entry
         assert entry.position == keys[1]
         assert plan.skipped_after_stalls == 1
+        assert plan.skipped_reasons == {"failure": 1}
+
+
+class TestSweepHeldByOversizeMerge:
+    """A sweep head left because a merge ran in its oversize cluster counts
+    toward STALL_LIMIT (round 3 of #3019): near-duplicates that keep arriving
+    would otherwise hold the sweep for good."""
+
+    def test_a_held_head_counts_as_a_stall(self):
+        keys = list(reversed(_keys(2)))
+        old = (T0 + timedelta(days=1), uuid4())
+        plan = plan_sweep(
+            _entry(old, stalls=1), _rows(keys, OVERSIZE_MERGE, SETTLED), exhausted=False
+        )
+        assert plan.entry.position == old
+        assert plan.entry.stalls == 2
+        assert (plan.advanced, plan.skipped_after_stalls, plan.skipped_reasons) == (0, 0, {})
+        assert plan.held_by_oversize_merge == 1
+
+    def test_the_head_is_passed_on_the_run_that_reaches_the_limit(self):
+        keys = list(reversed(_keys(4)))
+        entry = _entry()
+        stalls = []
+        for _ in range(STALL_LIMIT):
+            plan = plan_sweep(
+                entry, _rows(keys, OVERSIZE_MERGE, SETTLED, OVERSIZE_MERGE, BUDGET), exhausted=True
+            )
+            entry = plan.entry
+            stalls.append(entry.stalls)
+        assert stalls == [*range(1, STALL_LIMIT), 0]
+        # Every held row is passed up to the first row left for budget.
+        assert entry.position == keys[2]
+        assert plan.advanced == 3
+        assert plan.skipped_after_stalls == 2
+        assert plan.skipped_reasons == {"oversize_merge": 2}
+        assert not plan.pass_completed
+
+    def test_a_run_in_which_the_head_settles_resets_the_count(self):
+        keys = list(reversed(_keys(2)))
+        held = plan_sweep(_entry(), _rows(keys, OVERSIZE_MERGE, SETTLED), exhausted=False)
+        assert held.entry.stalls == 1
+        settled = plan_sweep(held.entry, _rows(keys, SETTLED, OVERSIZE_MERGE), exhausted=False)
+        assert settled.entry.stalls == 0
+        assert settled.entry.position == keys[0]
+
+    def test_an_ordinary_budget_head_is_never_a_stall(self):
+        """Calls that ran out leave the count as it is, however long."""
+        keys = list(reversed(_keys(2)))
+        old = (T0 + timedelta(days=1), uuid4())
+        entry = _entry(old, stalls=STALL_LIMIT - 1)
+        for _ in range(STALL_LIMIT + 1):
+            plan = plan_sweep(entry, _rows(keys, BUDGET, OVERSIZE_MERGE), exhausted=False)
+            entry = plan.entry
+            assert (entry.position, entry.stalls) == (old, STALL_LIMIT - 1)
+            assert plan.skipped_after_stalls == 0
+
+    def test_held_and_failed_heads_share_the_count(self):
+        """Any run whose head neither moved nor waited for calls counts, so
+        no sequence of the two reasons holds the sweep longer than the limit."""
+        keys = list(reversed(_keys(3)))
+        entry = _entry()
+        heads = [FAILURE, OVERSIZE_MERGE, OVERSIZE_MERGE][:STALL_LIMIT]
+        for head in heads:
+            plan = plan_sweep(entry, _rows(keys, head, FAILURE, SETTLED), exhausted=False)
+            entry = plan.entry
+        assert entry.stalls == 0
+        assert entry.position == keys[2]
+        assert plan.skipped_reasons == {"oversize_merge": 1, "failure": 1}
+        assert plan.skipped_after_stalls == 2
 
 
 class TestShares:
@@ -374,9 +470,51 @@ class TestAdvanceDedup:
                 "pass_completed": True,
                 "passes": 1,
                 "passed_with_failure": 0,
+                "held_by_oversize_merge": 0,
             },
             "skipped_after_stalls": 0,
+            "skipped_after_stalls_reasons": {},
         }
+
+    def test_report_tells_a_head_held_by_a_merge_from_a_failure(self):
+        changed = _keys(1)
+        sweep = [(T0 - timedelta(days=10 - i), uuid4()) for i in range(2)][::-1]
+        outcomes = {
+            changed[0][1]: FAILURE,
+            sweep[0][1]: OVERSIZE_MERGE,
+            sweep[1][1]: OVERSIZE_MERGE,
+        }
+        coverage = DedupCoverage(
+            changed=changed, sweep=sweep, floor=None, exhausted=False, outcomes=outcomes
+        )
+        lanes = DedupLanes()
+        reports = []
+        for _ in range(STALL_LIMIT):
+            lanes, report = advance_dedup(lanes, coverage, returned=True, now=NOW)
+            reports.append(report)
+
+        assert [r["sweep"]["held_by_oversize_merge"] for r in reports] == [2] * STALL_LIMIT
+        assert [r["sweep"]["advanced"] for r in reports] == [0] * (STALL_LIMIT - 1) + [2]
+        assert reports[0]["skipped_after_stalls_reasons"] == {}
+        assert reports[-1]["skipped_after_stalls"] == 3
+        assert reports[-1]["skipped_after_stalls_reasons"] == {"failure": 1, "oversize_merge": 2}
+        assert lanes.sweep.position == sweep[1]
+        assert (lanes.changed.stalls, lanes.sweep.stalls) == (0, 0)
+
+    def test_a_phase_that_did_not_return_holds_nothing_by_a_merge(self):
+        sweep = [(T0 - timedelta(days=3), uuid4())]
+        coverage = DedupCoverage(
+            changed=[],
+            sweep=sweep,
+            floor=None,
+            exhausted=False,
+            outcomes={sweep[0][1]: OVERSIZE_MERGE},
+        )
+        lanes, report = advance_dedup(
+            DedupLanes(sweep=_entry(stalls=STALL_LIMIT - 1)), coverage, returned=False, now=NOW
+        )
+        assert report["sweep"]["held_by_oversize_merge"] == 0
+        assert report["skipped_after_stalls_reasons"] == {"failure": 1}
 
 
 class TestAdvanceJudge:

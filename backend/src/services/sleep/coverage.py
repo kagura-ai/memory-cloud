@@ -17,12 +17,12 @@ changed lane reads what changed since its position, the sweep reads every row
 on each pass, so together they read every row.
 
 A position moves only over rows whose outcome in the run is ``settled`` or
-``passed`` (the prefix rule), never past a row left for budget or held by a
-failure, except through the stall rule. The state lives on the run's report
-(``sleep_reports.coverage_state``): the orchestrator reads the latest one after
-taking the graph learning lock and writes the new one before completing the
-report; a phase never writes it. An older state can only make rows be read
-again, never skip one.
+``passed`` (the prefix rule), never past a row left for budget, held by a
+failure or held by an oversize merge, except through the stall rule. The
+state lives on the run's report (``sleep_reports.coverage_state``): the
+orchestrator reads the latest one after taking the graph learning lock and
+writes the new one before completing the report; a phase never writes it. An
+older state can only make rows be read again, never skip one.
 """
 
 from __future__ import annotations
@@ -54,9 +54,24 @@ NIL_UUID = UUID(int=0)
 # Row outcomes: what happened to a window row in one run.
 SETTLED = "settled"  # done for this pass (judged, nothing to judge, ...)
 PASSED = "passed"  # a failure of its own while the same kind of work succeeded
-BUDGET = "budget"  # not reached for lack of calls, or a merge left more to do
+BUDGET = "budget"  # not reached for lack of calls
+# A merge ran in the row's oversize cluster: the pairs the split left out are
+# compared next run, after the merge shrank the cluster.
+OVERSIZE_MERGE = "oversize_merge"
 FAILURE = "failure"  # nothing of its kind succeeded (or the phase raised)
 _MOVES_PAST = frozenset({SETTLED, PASSED})
+
+# The head outcomes that count as a stall, per lane kind. A row left for lack
+# of calls never does. A sweep head held by an oversize merge does: while
+# near-duplicates keep arriving, a merge runs in that cluster every night, and
+# the head would hold the sweep for good. Counting it bounds the wait at
+# STALL_LIMIT runs per head. What is given up: the pairs the split left out of
+# a head passed this way are compared when the changed lane or the sweep's
+# next pass reaches it again. The changed lane needs no such rule: a held row
+# there keeps no other row out (when more rows changed than fit, the newest
+# are taken and the position moves to the backlog's floor).
+_CHANGED_STALLS = frozenset({FAILURE})
+_SWEEP_STALLS = frozenset({FAILURE, OVERSIZE_MERGE})
 
 LANE_CHANGED = "changed"
 LANE_SWEEP = "sweep"
@@ -385,13 +400,21 @@ async def fetch_window(
 
 @dataclass(frozen=True)
 class LanePlan:
-    """A lane's new entry and what the run did to it."""
+    """A lane's new entry and what the run did to it.
+
+    ``skipped_reasons`` counts the rows the stall rule passed by the outcome
+    that held them (``failure``, ``oversize_merge``); ``skipped_after_stalls``
+    is their sum. ``held_by_oversize_merge`` counts the lane's rows held by an
+    oversize merge in this run.
+    """
 
     entry: LaneEntry
     taken: int = 0
     advanced: int = 0
     passed_with_failure: int = 0
     skipped_after_stalls: int = 0
+    skipped_reasons: dict[str, int] = field(default_factory=dict)
+    held_by_oversize_merge: int = 0
     pass_completed: bool = False
 
 
@@ -405,27 +428,31 @@ def _prefix_len(rows: list[tuple[Key, str]]) -> int:
 
 
 def _apply_stall_rule(
-    entry: LaneEntry, rows: list[tuple[Key, str]]
-) -> tuple[list[tuple[Key, str]], int, int]:
+    entry: LaneEntry, rows: list[tuple[Key, str]], stall_on: frozenset[str]
+) -> tuple[list[tuple[Key, str]], int, dict[str, int]]:
     """The rows to plan with, the new stall count, and the rows passed by it.
 
-    A lane whose prefix is empty and whose head row is a ``failure`` stalls;
-    on the run that brings the count to ``STALL_LIMIT`` its failure rows count
-    as passed for this run. A non-empty prefix resets the count; a head row
-    left for budget keeps it.
+    A lane whose prefix is empty and whose head row's outcome is one of
+    ``stall_on`` stalls; on the run that brings the count to ``STALL_LIMIT``
+    its rows with those outcomes count as passed for this run. A non-empty
+    prefix resets the count; a head row left for budget keeps it. The passed
+    rows are counted per outcome.
     """
     if not rows:
-        return rows, entry.stalls, 0
+        return rows, entry.stalls, {}
     if _prefix_len(rows) > 0:
-        return rows, 0, 0
-    if rows[0][1] != FAILURE:
-        return rows, entry.stalls, 0
+        return rows, 0, {}
+    if rows[0][1] not in stall_on:
+        return rows, entry.stalls, {}
     stalls = entry.stalls + 1
     if stalls < STALL_LIMIT:
-        return rows, stalls, 0
-    passed = [(key, PASSED if outcome == FAILURE else outcome) for key, outcome in rows]
-    skipped = sum(1 for _key, before in rows[: _prefix_len(passed)] if before == FAILURE)
-    return passed, 0, skipped
+        return rows, stalls, {}
+    passed = [(key, PASSED if outcome in stall_on else outcome) for key, outcome in rows]
+    reasons: dict[str, int] = {}
+    for _key, before in rows[: _prefix_len(passed)]:
+        if before in stall_on:
+            reasons[before] = reasons.get(before, 0) + 1
+    return passed, 0, reasons
 
 
 def _max_key(a: Key | None, b: Key | None) -> Key | None:
@@ -455,12 +482,12 @@ def plan_changed(
     The position moves to the last row of the settled-or-passed prefix — or,
     when the lane had a backlog, at least to its floor (what is at or below it
     is the sweep's) — but never closer than ``CHANGED_LANE_OVERLAP`` to the
-    run's start, and never back.
+    run's start, and never back. Only a failure at its head is a stall.
     """
     if not rows:
         return LanePlan(entry=entry)
     passed_with_failure = sum(1 for _key, outcome in rows if outcome == PASSED)
-    planned, stalls, skipped = _apply_stall_rule(entry, rows)
+    planned, stalls, reasons = _apply_stall_rule(entry, rows, _CHANGED_STALLS)
     prefix = _prefix_len(planned)
     old = entry.position
     base = _max_key(old, floor) if floor is not None else old
@@ -478,7 +505,9 @@ def plan_changed(
         taken=len(rows),
         advanced=advanced,
         passed_with_failure=passed_with_failure,
-        skipped_after_stalls=skipped,
+        skipped_after_stalls=sum(reasons.values()),
+        skipped_reasons=reasons,
+        held_by_oversize_merge=sum(1 for _key, outcome in rows if outcome == OVERSIZE_MERGE),
     )
 
 
@@ -495,10 +524,12 @@ def plan_sweep(
     position moves to the last row of the settled-or-passed prefix. When the
     lane was exhausted and every row it took is in the prefix (or it took none
     while its position was set) the pass is complete: the position goes back to
-    the start and, with ``count_passes``, ``passes`` grows by one.
+    the start and, with ``count_passes``, ``passes`` grows by one. A head held
+    by a failure or by an oversize merge is a stall (only dedup's rows can be
+    held by a merge).
     """
     passed_with_failure = sum(1 for _key, outcome in rows if outcome == PASSED)
-    planned, stalls, skipped = _apply_stall_rule(entry, rows)
+    planned, stalls, reasons = _apply_stall_rule(entry, rows, _SWEEP_STALLS)
     prefix = _prefix_len(planned)
     position = planned[prefix - 1][0] if prefix else entry.position
     completed = (
@@ -520,7 +551,9 @@ def plan_sweep(
         taken=len(rows),
         advanced=prefix,
         passed_with_failure=passed_with_failure,
-        skipped_after_stalls=skipped,
+        skipped_after_stalls=sum(reasons.values()),
+        skipped_reasons=reasons,
+        held_by_oversize_merge=sum(1 for _key, outcome in rows if outcome == OVERSIZE_MERGE),
         pass_completed=completed,
     )
 
@@ -558,6 +591,9 @@ def advance_dedup(
     turn = lanes.turn
     if returned:
         turn = LANE_SWEEP if turn == LANE_CHANGED else LANE_CHANGED
+    reasons = dict(changed.skipped_reasons)
+    for outcome, count in sweep.skipped_reasons.items():
+        reasons[outcome] = reasons.get(outcome, 0) + count
     report = {
         LANE_CHANGED: {
             "taken": changed.taken,
@@ -571,14 +607,19 @@ def advance_dedup(
             "pass_completed": sweep.pass_completed,
             "passes": sweep.entry.passes,
             "passed_with_failure": sweep.passed_with_failure,
+            "held_by_oversize_merge": sweep.held_by_oversize_merge,
         },
         "skipped_after_stalls": changed.skipped_after_stalls + sweep.skipped_after_stalls,
+        # What held the rows the stall rule passed: ``failure`` or (sweep
+        # only) ``oversize_merge``. Zero counts are left out.
+        "skipped_after_stalls_reasons": reasons,
     }
     if report["skipped_after_stalls"]:
         logger.info(
             "sleep_coverage_passed_after_stalls",
             phase="dedup_merge",
             rows=report["skipped_after_stalls"],
+            reasons=reasons,
         )
     return DedupLanes(changed=changed.entry, sweep=sweep.entry, turn=turn), report
 

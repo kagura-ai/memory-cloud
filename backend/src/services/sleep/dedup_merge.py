@@ -62,6 +62,7 @@ from services.resource_indexer import unshared_point_id
 from services.sleep.coverage import (
     BUDGET,
     FAILURE,
+    OVERSIZE_MERGE,
     PASSED,
     SETTLED,
     DedupCoverage,
@@ -1064,11 +1065,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
         ``settled``: its search succeeded and it has no eligible pair, or its
         cluster was judged (the judge answered, or the rule path), or could not
         be judged because fewer than two members loaded. ``budget``: its cluster
-        was not reached for lack of calls, or a merge executed in the original
-        oversize cluster it belongs to (the rest is judged next run). A failure
-        of the row's own — its search, or its cluster's judge call — is
-        ``passed`` when the same kind of work succeeded for another row in this
-        run, else ``failure`` (an outage holds the lane). For a failed search
+        was not reached for lack of calls. ``oversize_merge``: a merge executed
+        in the original oversize cluster it belongs to, so the pairs the split
+        left out are compared next run (a head of the sweep held this way
+        counts toward the stall limit; one whose own subcluster the calls did
+        not reach is ``budget``, which never does). A failure of the row's
+        own — its search, or its cluster's judge call — is ``passed`` when the
+        same kind of work succeeded for another row in this run, else
+        ``failure`` (an outage holds the lane). For a failed search
         the kind is the step that raised: an embed needs another embed the
         provider answered (a vector from the cache proves nothing about the
         provider), a vector search another search that answered. A refusal that
@@ -1093,7 +1097,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
             if searched is not None and mid not in searched:
                 outcome = PASSED if evidence.get(failed_at.get(mid, ""), False) else FAILURE
             elif oversize_of.get(mid) in merged:
-                outcome = BUDGET
+                unreached = mid in cluster_of and states.get(cluster_of[mid]) is None
+                outcome = BUDGET if unreached else OVERSIZE_MERGE
             elif mid in cluster_of:
                 state = states.get(cluster_of[mid])
                 if state in ("judged", "dropped"):

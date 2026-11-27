@@ -16,6 +16,7 @@ import pytest
 from services.sleep.coverage import (
     BUDGET,
     FAILURE,
+    OVERSIZE_MERGE,
     PASSED,
     SETTLED,
     DedupCoverage,
@@ -423,6 +424,8 @@ class TestOversize:
 
     @pytest.mark.asyncio
     async def test_a_merge_in_the_original_cluster_leaves_its_rows_for_next_run(self):
+        """Its rows are held by the merge, an outcome of its own: the sweep
+        counts a head held this way toward the stall limit."""
         rows, pairs = self._mega()
         phase = _phase()
         _window(phase, rows, [])
@@ -432,7 +435,37 @@ class TestOversize:
         result = await _run(phase, provider="")
 
         assert result.details["merged"] >= 1
-        assert set(phase.coverage_outcome.outcomes.values()) == {BUDGET}
+        assert set(phase.coverage_outcome.outcomes.values()) == {OVERSIZE_MERGE}
+
+    @pytest.mark.asyncio
+    async def test_a_subcluster_the_calls_did_not_reach_is_left_for_budget(self):
+        """With a merge in the original cluster, a subcluster that was not
+        judged because the calls ran out is an ordinary budget cut, which never
+        counts as a stall; the judged subcluster's rows are held by the merge."""
+        rows = [_row(1 - i * 0.01) for i in range(10)]
+        pairs = [(a.id, b.id, 0.99) for i, a in enumerate(rows) for b in rows[i + 1 :]]
+        phase = _phase()
+        _window(phase, rows, [])
+        phase._find_similar_pairs = AsyncMock(return_value=pairs)
+        phase._execute_merge = AsyncMock(return_value=True)
+        judged: list[set] = []
+
+        async def judge(cluster_memories, pair_scores, llm_enabled, *args):
+            budget = args[3]
+            budget.consume(llm_calls=1)
+            judged.append({m.id for m in cluster_memories})
+            return phase._rule_based_judge(cluster_memories, pair_scores)
+
+        phase._judge_cluster = judge
+
+        result = await _run(phase, calls=1)
+
+        assert result.details["merged"] >= 1
+        assert result.details["split_subclusters"] == 2
+        assert len(judged) == 1
+        outcomes = phase.coverage_outcome.outcomes
+        assert {outcomes[mid] for mid in judged[0]} == {OVERSIZE_MERGE}
+        assert {outcomes[m.id] for m in rows if m.id not in judged[0]} == {BUDGET}
 
     @pytest.mark.asyncio
     async def test_no_merge_in_the_original_cluster_settles_its_rows(self):
