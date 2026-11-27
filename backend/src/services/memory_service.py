@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Collection, Iterable, Mapping, Sequen
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
@@ -3933,6 +3933,12 @@ class MemoryService:
         # dialog's "Updated At" reflects the last real change, not "now".
         snapshot_updated_at = memory.updated_at or memory.created_at
         snapshot_version = memory.version  # #2043, read with the row (as updated_at)
+        # #3033: read with the row too, so the state matches the version read.
+        snapshot_index_state = embedding_index_state(
+            memory.embedding_status,
+            memory.embedding_retry_count,
+            memory.embedding_suppressed_at,
+        )
 
         # Update access stats. reference() is the canonical *adoption* signal
         # (#1046): the agent deliberately fetched Layer-3 detail, so this bumps
@@ -3991,6 +3997,7 @@ class MemoryService:
             observed_at=observed_at_from_details(memory.details),  # #2330
             **event_row_kwargs(memory.details),
             version=snapshot_version,
+            index_state=snapshot_index_state,
             client=memory.client,
             source_uri=memory.source_uri,
             source_type=memory.source_type,
@@ -11049,6 +11056,30 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     elif is_unrebuildable_resource_failure(exc):
         values["embedding_retry_count"] = MAX_EMBEDDING_RETRIES
     return values
+
+
+def embedding_index_state(
+    status: str | None, retry_count: int | None, suppressed_at: datetime | None
+) -> Literal["indexing", "retrying", "failed"] | None:
+    """Why a memory's current version is not searchable yet (#3033).
+
+    None when its embedding succeeded (or the status is not one the pipeline
+    writes). Otherwise: ``failed`` when nothing retries it on its own (the
+    erasure suppression marker is set, or a failed row has used its retry
+    budget, ``MAX_EMBEDDING_RETRIES``: the sweep's eligibility rules);
+    ``retrying`` for a failed row the sweep retries; ``indexing`` for a row
+    waiting for, or in, its embedding run. A memory edited since it was last
+    indexed may still be found under its previous text until the run ends.
+    """
+    from config.constants import MAX_EMBEDDING_RETRIES
+
+    if status not in ("pending", "processing", "failed"):
+        return None
+    if suppressed_at is not None:
+        return "failed"
+    if status == "failed":
+        return "failed" if (retry_count or 0) >= MAX_EMBEDDING_RETRIES else "retrying"
+    return "indexing"
 
 
 def embedding_retry_eligible_clause(now: datetime):
