@@ -83,6 +83,7 @@ async def test_failing_prune_is_logged_and_the_same_tick_still_processes_queued_
 ):
     prune.side_effect = RuntimeError("prune failed")
     state = SimpleNamespace(
+        id=1,
         resource_id="products",
         context_id="ctx",
         metrics={},

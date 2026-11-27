@@ -2,9 +2,11 @@
 
 Issue #238: APScheduler job for incremental indexing.
 
-Runs every 5 minutes to process queued indexer jobs.
+Runs every 5 minutes to process queued indexer jobs. A target with a backlog
+is drained batch after batch within a time budget (#3038).
 """
 
+import asyncio
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,12 +16,19 @@ from uuid import UUID
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import exists, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.base import get_db
 from db.redis import get_redis_client, increment_counter
 from models.auth import Context
 from models.resource import IndexerState
-from services.resource_indexer import ResourceIndexer, recorded_failed_events
+from services.resource_indexer import (
+    _KNOWN_SKIPPED_REASONS,
+    IndexerMetrics,
+    ResourceIndexer,
+    has_pending_events,
+    recorded_failed_events,
+)
 from services.sync_feed_index import maintain_sync_runs
 from services.workspace_slot_gate import active_workspace_predicate
 from tasks.job_runs import JobResult, job_failed
@@ -63,6 +72,157 @@ RATE_LIMITED_RETRY = timedelta(minutes=5)
 # moment the limit admits it, so the first tick at or after that moment picks it
 # even when the skip was written a few seconds into its tick.
 RATE_LIMITED_RETRY_SLACK = timedelta(seconds=30)
+
+# #238: events per ``process_incremental`` call. Each batch is its own
+# transaction, quota charge and lock hold; the drain below runs more batches,
+# never a larger one.
+BATCH_SIZE = 100
+
+# #3038: the drain. After a batch that committed and left events pending, the
+# job runs the next batch for the same target, until nothing is pending, a
+# batch stops it (held back, a busy lock, failed events, no commit, nothing
+# applied) or a time budget is used.
+#
+# Per target: a backlog of thousands of events is applied a few hundred at a
+# time per tick while other targets still get their turn. A batch of 100 takes
+# well under a minute, so a drain runs several batches.
+DRAIN_TARGET_BUDGET_SECONDS = 180.0
+# Per tick, counted from its start (sync maintenance included): a target that
+# could not start before this is used stays queued for the next tick. It leaves
+# 90 s of the 5-minute interval for the batch in progress to end, so the tick
+# ends before the next one is due (max_instances=1 would skip that one).
+DRAIN_TICK_BUDGET_SECONDS = 210.0
+# A pause between two batches of a drain: the batch released its locks at its
+# commit, and a status poll or a feed transition waiting on them takes them now
+# instead of meeting the next batch's.
+DRAIN_YIELD_SECONDS = 1.0
+# The ``indexer_state.metrics`` key a drain stopped by a time budget leaves
+# (see ``continues_drain``). The next batch's commit replaces the metrics, so
+# it admits one run.
+DRAIN_CONTINUES_KEY = "drain_continues"
+# Stops that leave events pending only because the time ran out.
+BUDGET_STOPS = frozenset({"target_budget", "tick_budget"})
+
+DrainStop = Literal[
+    "drained",
+    "held_back",
+    "skipped",
+    "error",
+    "not_committed",
+    "lock_busy",
+    "event_failures",
+    "nothing_applied",
+    "target_budget",
+    "tick_budget",
+]
+
+
+def drain_clock() -> float:
+    """The clock the drain's budgets are measured on (monotonic seconds)."""
+    return time.monotonic()
+
+
+def batch_stop(metrics: IndexerMetrics) -> DrainStop | None:
+    """Why the drain must not run another batch after this one, or ``None``.
+
+    A batch that is held back (daily quota, memory limit, plan) or skipped
+    ends the drain with the reason and re-queue time a single run has. So does
+    a batch that did not commit, stopped at a busy lock or applied nothing.
+    A batch that recorded failed events ends it too: the failures may be a
+    provider outage or the spend cap, which more batches would only hit again.
+    """
+    if metrics.reason == "memories_per_day_exceeded" or metrics.reason in HELD_BACK_REASONS:
+        return "held_back"
+    if metrics.skipped:
+        return "skipped"
+    if metrics.reason is not None:
+        return "error"
+    if not metrics.batch_committed:
+        return "not_committed"
+    if metrics.stopped_at_busy_lock:
+        return "lock_busy"
+    if metrics.errors:
+        return "event_failures"
+    if not metrics.applied_upserts + metrics.applied_deletes:
+        return "nothing_applied"
+    return None
+
+
+async def continues_drain(db: AsyncSession, state: IndexerState) -> bool:
+    """Whether this run continues a drain the rate limit must not refuse (#3038).
+
+    Invariant: a run skips the per-target interval and hourly cap only when
+    the last run of the target ended on a time budget with events pending
+    (it left ``DRAIN_CONTINUES_KEY``) and events are still pending now. The
+    key admits one run: that run's batch commit replaces the metrics, and only
+    another budget stop with events pending sets it again. Every continuation
+    applies at least one batch, so the exemption lasts while the backlog does.
+    A target with nothing pending is limited as before.
+    """
+    metrics = state.metrics
+    if not isinstance(metrics, dict) or metrics.get(DRAIN_CONTINUES_KEY) is not True:
+        return False
+    return await has_pending_events(db, state.id)
+
+
+@dataclass
+class Drain:
+    """What a drain did so far: the last batch, the failure record, the counts."""
+
+    failed_events: list[dict[str, Any]]
+    metrics: IndexerMetrics | None = None
+    batches: int = 0
+    events: int = 0
+    stop: DrainStop | None = None
+
+
+async def drain_target(
+    db: AsyncSession,
+    state: IndexerState,
+    drain: Drain,
+    *,
+    tick_started: float,
+) -> None:
+    """Run batches for one target until ``batch_stop``, nothing pending or a budget (#3038).
+
+    Each batch is one ``process_incremental`` call with its own commit, quota
+    charge and lock release. ``drain`` is updated after every batch, so the
+    caller still has the record of the last committed batch if a later call
+    raises.
+    """
+    started = drain_clock()
+    resource_id, context_id, state_id = state.resource_id, state.context_id, state.id
+    indexer = ResourceIndexer(db)
+    while True:
+        metrics = await indexer.process_incremental(
+            resource_id,
+            context_id,
+            batch_size=BATCH_SIZE,
+            failed_events=drain.failed_events,
+        )
+        drain.metrics = metrics
+        drain.batches += 1
+        drain.failed_events = metrics.failed_events
+        drain.events += metrics.applied_upserts + metrics.applied_deletes + metrics.errors
+        stop = batch_stop(metrics)
+        if stop is None and not await has_pending_events(db, state_id):
+            stop = "drained"
+        now = drain_clock()
+        if stop is None and now - tick_started >= DRAIN_TICK_BUDGET_SECONDS:
+            stop = "tick_budget"
+        if stop is None and now - started >= DRAIN_TARGET_BUDGET_SECONDS:
+            stop = "target_budget"
+        if stop is not None:
+            drain.stop = stop
+            return
+        await asyncio.sleep(DRAIN_YIELD_SECONDS)
+
+
+def _logged_reason(reason: str | None) -> str | None:
+    """A batch's reason for the log: a known skip reason, ``error`` for any other text."""
+    if reason is None or reason in _KNOWN_SKIPPED_REASONS:
+        return reason
+    return "error"
 
 
 @dataclass(frozen=True)
@@ -197,9 +357,11 @@ async def record_indexer_run(resource_id: str, context_id: UUID) -> None:
 async def run_queued_indexers() -> JobResult:
     """Process all queued indexers (APScheduler job).
 
-    Runs every 5 minutes, processes up to 10 queued indexers per cycle.
+    Runs every 5 minutes, picks up to 10 queued indexers per cycle and drains
+    each in turn (#3038) while the tick budget lasts.
     """
     logger.debug("indexer_job_started")
+    tick_started = drain_clock()
 
     async for db in get_db():
         try:
@@ -243,14 +405,23 @@ async def run_queued_indexers() -> JobResult:
             logger.info("indexer_processing_queued_jobs", count=len(states))
             failed = rate_limited = 0
 
-            for state in states:
+            for index, state in enumerate(states):
+                # #3038: the rows not started once the tick budget is used stay
+                # queued as they are, ahead of later rows at the next pick.
+                if drain_clock() - tick_started >= DRAIN_TICK_BUDGET_SECONDS:
+                    logger.info("indexer_tick_budget_used", deferred=len(states) - index)
+                    break
+
                 # The row was read at the pick: an operator rewind may have
                 # landed since (a stale last_offset would write over it), and a
                 # rollback in the previous row's run expired it.
                 await db.refresh(state)
 
-                # Check rate limit
-                verdict = await check_indexer_rate_limit(state.resource_id, state.context_id)
+                # Check rate limit; a drain cut short by its time budget goes on.
+                if await continues_drain(db, state):
+                    verdict = IndexerRateLimit(True, "drain_continues")
+                else:
+                    verdict = await check_indexer_rate_limit(state.resource_id, state.context_id)
 
                 if not verdict.allowed:
                     wait_seconds = (
@@ -292,23 +463,27 @@ async def run_queued_indexers() -> JobResult:
                 # skipped events it names are the rewind target. #2477: the run
                 # takes the record, so its batch commit already holds it merged
                 # with the batch's outcome, and returns it on every path.
-                failed_events = recorded_failed_events(state.metrics)
+                drain = Drain(failed_events=recorded_failed_events(state.metrics))
+                drain_started = drain_clock()
 
                 # Run indexer
                 try:
-                    indexer = ResourceIndexer(db)
-                    metrics = await indexer.process_incremental(
-                        state.resource_id,
-                        state.context_id,
-                        batch_size=100,
-                        failed_events=failed_events,
-                    )
+                    await drain_target(db, state, drain, tick_started=tick_started)
+                    metrics = drain.metrics
+                    assert metrics is not None, "a drain runs at least one batch"
 
                     # Update state. Only an ingest event re-queues an idle row,
                     # so a batch the #1549 daily memory quota refused (nothing
                     # applied, offset unchanged) is re-queued here for the UTC
                     # reset instead of parking until the next event arrives.
-                    if metrics.reason == "memories_per_day_exceeded":
+                    new_metrics = metrics.to_dict()
+                    if drain.stop in BUDGET_STOPS:
+                        # #3038: events are pending and only the time ran out:
+                        # due at the next tick, which continues the drain.
+                        state.job_status = "queued"
+                        state.next_run_at = utcnow()
+                        new_metrics[DRAIN_CONTINUES_KEY] = True
+                    elif metrics.reason == "memories_per_day_exceeded":
                         state.job_status = "queued"
                         state.next_run_at = _next_utc_midnight()
                     elif metrics.reason in HELD_BACK_REASONS:
@@ -319,19 +494,27 @@ async def run_queued_indexers() -> JobResult:
                         )
                     else:
                         state.job_status = "idle"
-                    new_metrics = metrics.to_dict()
                     state.metrics = new_metrics
-                    failed_events = new_metrics.get("failed_events", failed_events)
                     await db.commit()
 
-                    # Record run for rate limiting
+                    # Record run for rate limiting: a drain is one run.
                     await record_indexer_run(state.resource_id, state.context_id)
 
+                    # One line per drain (#3038): counts and known reasons
+                    # only, no error text.
                     logger.info(
                         "indexer_completed",
                         resource_id=state.resource_id,
                         context_id=state.context_id,
-                        metrics=metrics.to_dict(),
+                        batches=drain.batches,
+                        events=drain.events,
+                        duration_ms=int((drain_clock() - drain_started) * 1000),
+                        stop=drain.stop,
+                        reason=_logged_reason(metrics.reason),
+                        applied_upserts=metrics.applied_upserts,
+                        applied_deletes=metrics.applied_deletes,
+                        errors=metrics.errors,
+                        failed_events=len(drain.failed_events),
                     )
 
                 except Exception as e:
@@ -344,8 +527,8 @@ async def run_queued_indexers() -> JobResult:
                     failed += 1
                     state.job_status = "failed"
                     error_metrics: dict[str, Any] = {"error": str(e)}
-                    if failed_events:
-                        error_metrics["failed_events"] = failed_events
+                    if drain.failed_events:
+                        error_metrics["failed_events"] = drain.failed_events
                     state.metrics = error_metrics
                     await db.commit()
 
