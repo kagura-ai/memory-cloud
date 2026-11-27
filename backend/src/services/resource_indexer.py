@@ -255,6 +255,8 @@ async def get_indexer_status_for_context(
             ``state``: indexer state dict or ``None`` if indexer never ran
                 for this context.
             ``recent_events``: list of event dicts (up to ``recent_event_limit``).
+            ``pending_events``: the resource's events after the target's
+                offset (#3038), ``None`` when the Resource row is missing.
     """
     resource_id = context.resource_id
     assert resource_id is not None, "resolve_resource_by_slug returns only slugged contexts"
@@ -338,6 +340,9 @@ async def get_indexer_status_for_context(
         "resource_id": resource_id,
         "state": state_dict,
         "recent_events": event_dicts,
+        "pending_events": (
+            None if resource_pk is None else await pending_event_count(db, resource_pk, state_row)
+        ),
     }
 
 

@@ -374,3 +374,27 @@ async def index_status(db: AsyncSession, row: SyncRun, feed: SyncFeed) -> str:
     if not await canonical_index_complete(db, installation, feed_id=feed.id):
         return "failed"
     return "unchanged" if outbox is None else "complete"
+
+
+async def index_progress(db: AsyncSession, row: SyncRun) -> dict[str, int]:
+    """How many of a run's index events the indexer has passed (#3038).
+
+    ``total`` is the run's events in its outbox receipt and ``indexed`` those
+    at or below the target's offset. They are equal once the cursor passed the
+    run, which ``index_status`` requires for ``complete``; an event the
+    indexer recorded as failed is passed too (``index_status`` says
+    ``failed`` then). A run without index events (not committed, or a commit
+    that changed nothing) reads ``0`` of ``0``.
+    """
+    outbox = await db.get(SyncIndexOutbox, row.id)
+    if outbox is None:
+        return {"indexed": 0, "total": 0}
+    event_ids = {event_id for event_id in outbox.event_ids or () if type(event_id) is int}
+    offset = await db.scalar(
+        select(IndexerState.last_offset).where(
+            IndexerState.resource_pk == outbox.resource_pk,
+            IndexerState.context_id == outbox.context_id,
+        )
+    )
+    indexed = 0 if offset is None else sum(event_id <= offset for event_id in event_ids)
+    return {"indexed": indexed, "total": len(event_ids)}
