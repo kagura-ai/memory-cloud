@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
@@ -142,6 +142,13 @@ class ReindexPhase:
                 if resource_indexer is None and owns_resource_point(memory):
                     resource_indexer = ResourceIndexer(self.db)
                 usage: dict[str, int] = {}
+                # #3036: the keyword lengths come back here and are stored by
+                # a Core UPDATE; set on the ORM row they made it dirty, the
+                # next savepoint flushed it and expired its generated
+                # columns, and a later read of one in this loop was a lazy
+                # load from plain async code. Nothing in this loop writes
+                # through the ORM row.
+                keyword_lengths: dict[str, int | None] = {}
                 try:
                     written = await write_memory_point(
                         self.db,
@@ -153,10 +160,12 @@ class ReindexPhase:
                         context_id=context_id,
                         usage=usage,
                         resource_indexer=resource_indexer,
+                        keyword_lengths=keyword_lengths,
                     )
                 finally:
                     if "tokens" in usage:
                         self._account_embedding(result, usage["tokens"])
+                await self._store_keyword_lengths(memory_id, keyword_lengths)
                 if written is None:
                     reindexed += 1
                     continue
@@ -208,6 +217,12 @@ class ReindexPhase:
         if failed > 0 and reindexed == 0:
             result.success = False
             result.error = f"All {failed} reindex operations failed"
+        elif failed > 0:
+            # #3036: a partly failed reindex grades the run 'degraded'
+            # (``SleepReporter.complete_report`` writes the count). The phase
+            # itself succeeded, so ``error`` stays None: a phase with an error
+            # reads as failed on the run page.
+            result.operation_failures = failed
 
         logger.info(
             "reindex_phase_completed",
@@ -217,6 +232,25 @@ class ReindexPhase:
         )
 
         return result
+
+    async def _store_keyword_lengths(self, memory_id: UUID, lengths: dict[str, int | None]) -> None:
+        """Store the written point's keyword lengths on the row (#3036).
+
+        A Core UPDATE that leaves the session's ORM row as it is (not dirty,
+        nothing expired), and only when a stored value differs.
+        """
+        if not lengths:
+            return
+        columns = {name: getattr(Memory, name) for name in lengths}
+        await self.db.execute(
+            update(Memory)
+            .where(
+                Memory.id == memory_id,
+                or_(*(columns[name].is_distinct_from(value) for name, value in lengths.items())),
+            )
+            .values(**lengths)
+            .execution_options(synchronize_session=False)
+        )
 
     async def _write_chunks(
         self,

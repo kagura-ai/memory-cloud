@@ -9,6 +9,8 @@ from utils.content_chunks import (
     CONTENT_CHUNK_MIN_CONTENT_CHARS,
     CONTENT_CHUNK_OVERLAP_CHARS,
     RERANK_CHUNK_TEXT_MAX_CHARS,
+    RERANK_EMPTY_DOCUMENT,
+    RERANK_RESOURCE_TEXT_MAX_CHARS,
     build_chunk_payload,
     chunk_point_id,
     collapse_chunk_hits,
@@ -153,6 +155,12 @@ class TestRerankDocument:
         doc = rerank_document({"payload": {"summary": "S", "context_summary": "C"}})
         assert doc == "S C"
 
+    def test_a_null_context_summary_reads_as_missing(self):
+        # The memory point writes the key with None when there is no context summary.
+        with_null = rerank_document({"payload": {"summary": "S", "context_summary": None}})
+        assert with_null == rerank_document({"payload": {"summary": "S"}})
+        assert "None" not in with_null
+
     def test_missing_context_summary(self):
         assert rerank_document({"payload": {"summary": "S"}}) == "S "
 
@@ -164,6 +172,40 @@ class TestRerankDocument:
         assert doc.startswith("S C\n")
         assert doc.endswith("q" * RERANK_CHUNK_TEXT_MAX_CHARS)
         assert len(doc) == len("S C\n") + RERANK_CHUNK_TEXT_MAX_CHARS
+
+    # #3031: a resource-indexed point (build_resource_point) has no summary.
+    def test_resource_payload_uses_its_content_cut_to_the_maximum(self):
+        long = "title: " + "r" * (RERANK_RESOURCE_TEXT_MAX_CHARS + 100)
+        doc = rerank_document({"payload": {"content": long}})
+        assert doc == long[:RERANK_RESOURCE_TEXT_MAX_CHARS]
+
+    def test_resource_payload_appends_context_summary(self):
+        doc = rerank_document({"payload": {"content": "title: Q3 plan", "context_summary": "why"}})
+        assert doc == "title: Q3 plan why"
+
+    def test_resource_payload_with_a_matched_chunk(self):
+        doc = rerank_document(
+            {"payload": {"content": "title: Q3 plan"}, "matched_chunk_text": "chunk body"}
+        )
+        assert doc == "title: Q3 plan\nchunk body"
+
+    def test_empty_summary_falls_back_to_content(self):
+        assert rerank_document({"payload": {"summary": "", "content": "body"}}) == "body"
+
+    def test_payload_without_text_gives_a_non_empty_document(self):
+        for candidate in (
+            {"payload": {}},
+            {"payload": None},
+            {},
+            {"payload": {"summary": None, "content": None, "context_summary": None}},
+            {"payload": {"content": "   "}},
+        ):
+            doc = rerank_document(candidate)
+            assert doc == RERANK_EMPTY_DOCUMENT
+            assert doc.strip()
+
+    def test_context_summary_alone_is_the_document(self):
+        assert rerank_document({"payload": {"context_summary": "why"}}) == "why"
 
 
 def test_chunk_payload_keeps_every_field_of_the_real_summary_point():

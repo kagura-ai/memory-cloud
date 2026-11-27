@@ -158,6 +158,12 @@ class TestReindexPhase:
         assert result.success is True  # Partial success
         assert result.details["reindexed"] == 1
         assert result.details["failed"] == 1
+        # #3036: the run is graded 'degraded' from these; the phase itself
+        # succeeded, so it carries no error (the run page draws a phase with
+        # an error as failed).
+        assert result.operation_failures == 1
+        assert result.memories_processed == 2
+        assert result.error is None
 
     @pytest.mark.asyncio
     @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
@@ -179,6 +185,40 @@ class TestReindexPhase:
 
         assert result.success is False
         assert "All" in result.error
+        assert result.operation_failures == 0  # the phase failure says it
+
+    @pytest.mark.asyncio
+    @patch("services.memory_service.add_memory_to_qdrant", new_callable=AsyncMock)
+    async def test_keyword_lengths_are_stored_by_a_core_update_not_on_the_row(
+        self, mock_qdrant, reindex_phase, mock_db
+    ):
+        """#3036: the writer hands the lengths back; the row object is left
+        untouched (a dirty row was flushed by the next savepoint, which
+        expired its generated columns)."""
+        from sqlalchemy.sql.dml import Update
+
+        from services.keyword_stats import MEMORY_LENGTH_COLUMNS
+
+        mem = _make_memory()
+        for column in MEMORY_LENGTH_COLUMNS.values():
+            setattr(mem, column, None)
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 5))
+
+        result = await reindex_phase.execute(
+            changed_memory_ids={mem.id}, user_id="user-1", workspace_id="ws-1"
+        )
+
+        assert result.details["reindexed"] == 1
+        assert all(getattr(mem, c) is None for c in MEMORY_LENGTH_COLUMNS.values())
+        updates = [
+            c.args[0] for c in mock_db.execute.await_args_list if isinstance(c.args[0], Update)
+        ]
+        assert len(updates) == 1
+        stmt = updates[0]
+        assert stmt.table.name == "memories"
+        assert stmt.get_execution_options()["synchronize_session"] is False
+        assert set(stmt.compile().params) >= set(MEMORY_LENGTH_COLUMNS.values())
 
 
 class TestReindexContentChunks:
