@@ -7,6 +7,10 @@ embedding task, the Redis quota and day counter, ``hybrid_search`` (a fixed
 candidate order), the judge config read and the provider call. Hydration, the
 page builder, the selection, the access-stat write and the ``llm_call_log``
 row run on the database.
+
+These tests commit (the recall commits before the provider call), so every
+test deletes what it wrote: a later file in the same CI shard reads whole
+tables (``llm_call_log`` in the cost aggregation) and expects them empty.
 """
 
 from __future__ import annotations
@@ -17,11 +21,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.llm_call_log import LLMCallLog
 from models.memory import Memory
+from models.operation_history import OperationHistory
 from models.schemas import RecallRequest, RememberRequest
 from repositories.config_repository import ContextSearchConfigRepository
 from services import recall_selector as rs
@@ -34,6 +39,33 @@ BODY = (
     "Rollbacks use the previous image tag and never rebuild from source code. "
     "Database migrations run before the new containers start serving traffic. "
 )
+
+
+# (owner user id, workspace id) of every scope the running test committed.
+_created: list[tuple[str, UUID]] = []
+
+
+@pytest.fixture(autouse=True)
+async def _delete_committed_rows(db_session):
+    """Delete every row the test committed, by its own owners and workspaces."""
+    _created.clear()
+    yield
+    owners = [owner for owner, _ in _created]
+    workspaces = [ws_id for _, ws_id in _created]
+    await db_session.rollback()
+    await db_session.execute(delete(LLMCallLog).where(LLMCallLog.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(OperationHistory).where(OperationHistory.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(Memory).where(Memory.workspace_id.in_(workspaces)))
+    await db_session.execute(delete(Context).where(Context.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(Workspace).where(Workspace.id.in_(workspaces)))
+    await db_session.execute(delete(User).where(User.user_id.in_(owners)))
+    await db_session.commit()
+    _created.clear()
 
 
 @pytest.fixture
@@ -67,6 +99,7 @@ async def _scope(db, *, selector_on: bool = True) -> tuple[str, Workspace, Conte
     )
     db.add(ws)
     await db.flush()
+    _created.append((owner, ws.id))
     db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
     ctx = Context(
         id=uuid4(),

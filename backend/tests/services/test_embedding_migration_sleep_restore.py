@@ -11,26 +11,57 @@ the row under the new routing. ``updated_at`` is not touched: Sleep dedup reads
 it as the fact's currency.
 
 Real Postgres: the restore UPDATE, the switch predicates and the re-queue
-UPDATE all run as SQL.
+UPDATE all run as SQL. The tests commit, so each deletes the rows it wrote:
+other files on the same database read whole tables (``sleep_reports``) and
+expect them empty.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE, Memory
+from models.operation_history import OperationHistory
 from models.sleep import SleepAction, SleepReport
 from services import embedding_migration_service as svc
 from utils.datetime import utcnow
 
 TARGET = "qwen3-embedding:4b"
 TARGET_DIMENSIONS = 2560
+
+# (owner user id, workspace id) of every scope the running test committed.
+_created: list[tuple[str, UUID]] = []
+
+
+@pytest.fixture(autouse=True)
+async def _delete_committed_rows(db_session):
+    """Delete every row the test committed, by its own owners and workspaces."""
+    _created.clear()
+    yield
+    owners = [owner for owner, _ in _created]
+    workspaces = [ws_id for _, ws_id in _created]
+    await db_session.rollback()
+    reports = select(SleepReport.id).where(SleepReport.workspace_id.in_(workspaces))
+    await db_session.execute(delete(SleepAction).where(SleepAction.report_id.in_(reports)))
+    await db_session.execute(delete(SleepReport).where(SleepReport.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(OperationHistory).where(OperationHistory.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(Memory).where(Memory.workspace_id.in_(workspaces)))
+    await db_session.execute(delete(Context).where(Context.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(Workspace).where(Workspace.id.in_(workspaces)))
+    await db_session.execute(delete(User).where(User.user_id.in_(owners)))
+    await db_session.commit()
+    _created.clear()
 
 
 async def _scope(db, owner: str) -> tuple[Workspace, Context]:
@@ -46,6 +77,7 @@ async def _scope(db, owner: str) -> tuple[Workspace, Context]:
     )
     db.add(ws)
     await db.flush()
+    _created.append((owner, ws.id))
     db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
     ctx = Context(
         id=uuid4(),
