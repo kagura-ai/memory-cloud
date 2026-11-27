@@ -60,7 +60,10 @@ WHERE resource_id = '<resource_id>' AND context_id = '<context_id>';
 ```
 
 The next scheduled indexer run (or manual trigger) will process the pending
-events. Watch the logs for `qdrant_upsert_success` and verify the metrics:
+events, batch after batch within its time budget (#3038, see
+[Search reflection pace](staged-feed-sync.md#search-reflection-pace));
+`indexer-status` reports what is left as `pending_events`. Watch the logs for
+`qdrant_upsert_success` and verify the metrics:
 
 ```sql
 SELECT

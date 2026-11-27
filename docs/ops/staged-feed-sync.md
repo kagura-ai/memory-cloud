@@ -135,6 +135,9 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
    together once. Failure rolls them all back. Changed baseline/config/schema
    or authority refuses the stale run. Another feed's records are unaffected.
 8. Worker `GET .../runs/{run}` (`results:read`) recovers lost responses.
+   Besides `index_status` it returns `index_progress`
+   (`{"indexed": n, "total": m}`, see
+   [Search reflection pace](#search-reflection-pace)).
    `POST .../runs/{run}/abort` clears uncommitted payloads, retaining receipts;
    it cannot undo committed data. Repeating an identical successful commit
    returns the stored receipt; a changed commit body returns 409.
@@ -254,8 +257,9 @@ are applied. `failed` can still change to `complete`: the
 scheduler re-queues the target, and a retry that applies the event moves the
 cursor past the run. An event stopped by a busy lock is not a failure; its run
 stays `pending`.
-Existing indexer batch size and per-target scheduling limits still apply;
-consumers must poll status rather than infer readiness from a successful commit.
+Search reflection is paced by the indexer job (see
+[Search reflection pace](#search-reflection-pace)); consumers must poll status
+rather than infer readiness from a successful commit.
 
 The outbox is persisted in the canonical transaction. The five-minute scheduler
 coalesces wakeups per target, keeps quota-held targets from starving others,
@@ -274,6 +278,59 @@ Within a committed replacement, owned deletion events precede new-ID upserts.
 This lets a full workspace free its own capacity in one batch before a later
 batch creates the replacement rows. The existing scheduler retry policy still
 applies; this ordering does not promise immediate search reflection.
+
+## Search reflection pace
+
+The indexer job runs every five minutes on the scheduler leader and picks up to
+10 queued targets, the longest-waiting first. It applies a target's events in
+batches of 100 (each batch its own transaction, daily-quota charge and lock
+hold) and, since v0.186.0, keeps going while events are pending: a committed
+snapshot of a few thousand records is applied over a few ticks instead of one
+batch every ten minutes. Each target gets up to three minutes per tick
+(`DRAIN_TARGET_BUDGET_SECONDS` in `tasks/resource_indexer_job.py`) and the tick
+stops starting targets after three and a half minutes
+(`DRAIN_TICK_BUDGET_SECONDS`), so other queued targets keep their turn; a
+target that could not start stays queued for the next tick. These are
+constants, not settings.
+
+A target whose drain used its time budget with events still pending is due at
+the next tick, and that run is not refused by the per-target limits (10
+minutes apart, 6 runs an hour): a drain counts as one run, and the exemption
+holds only while events remain. A target with nothing pending is limited as
+before. During a drain each batch holds the target's locks until its commit
+and releases them before the next one, with a one-second pause in between
+(`DRAIN_YIELD_SECONDS`), so a status poll or feed transition waiting on them
+gets its turn; a batch that meets a lock such a request holds stops there
+(see below).
+
+What ends a drain before its backlog is applied, with the same skip reason
+and retry as a single batch:
+
+- the workspace memory limit: the batch applies the prefix that fits, the
+  rest waits and is retried hourly (`memory_limit_exceeded`);
+- the daily Memory-creation quota: the batch is left untouched and retried
+  after the next UTC midnight (`memories_per_day_exceeded`);
+- a suspended plan: retried daily (`plan_suspended`);
+- a busy lock: the batch stops before the event, which stays pending; the
+  outbox replay queues the target at the next tick and the per-target limits
+  apply to that run;
+- a batch that recorded failed events (a provider outage or the embedding
+  spend cap would fail the next batches too), or one that did not commit:
+  the target is retried under the per-target limits.
+
+Each drain logs one `indexer_completed` line with `batches`, `events`,
+`duration_ms` and `stop` (`drained`, `held_back`, `lock_busy`,
+`event_failures`, `not_committed`, `target_budget`, `tick_budget`, ...).
+
+Progress is readable at two places. The worker's run status carries
+`index_progress`: `total` is the number of index events the run committed
+(its outbox receipt) and `indexed` how many of them the indexer's cursor has
+passed. They are equal once the cursor passed the run, which `complete`
+requires; an event the indexer recorded as failed is passed too, so
+`index_status` stays the verdict. A run without index events reads `0` of `0`.
+The owner's `GET /api/v1/resources/{resource_id}/indexer-status` carries
+`pending_events`: the resource's events after the target's cursor (all of
+them before the first run), `0` once the indexer has caught up.
 
 ## Retention and rollback
 
