@@ -3,6 +3,7 @@
 Issue #101/#103: Phase execution order, budget enforcement, error isolation.
 """
 
+import copy
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -981,9 +982,21 @@ class TestCoverageState:
         ):
             reporter = AsyncMock()
             reporter.create_report = AsyncMock(return_value=report)
+            # What complete_report saw when it ran (the report and the phase
+            # results are shared objects; reading them after run() returns
+            # cannot tell whether the state was set before or after the call).
+            self.at_complete: dict = {}
 
             async def complete(rep, results):
                 events.append("complete")
+                dedup_result = next((r for r in results if r.phase_name == "dedup_merge"), None)
+                details = dedup_result.details if dedup_result is not None else None
+                self.at_complete = {
+                    "coverage_state": copy.deepcopy(rep.coverage_state),
+                    "dedup_coverage": copy.deepcopy(
+                        details.get("coverage") if isinstance(details, dict) else None
+                    ),
+                }
 
             reporter.complete_report = AsyncMock(side_effect=complete)
             MockReporter.return_value = reporter
@@ -1054,13 +1067,17 @@ class TestCoverageState:
         )
         report, _, reporter, events = await self._run(mock_db, dedup=window)
 
-        state = parse_state(report.coverage_state)
+        assert events.index("lock") < events.index("complete")
+        # Both were already set when complete_report ran, and nothing changed
+        # them afterwards.
+        state = parse_state(self.at_complete["coverage_state"])
         assert state.dedup.changed.position == row
         assert state.dedup.turn == "sweep"
-        assert events.index("lock") < events.index("complete")
+        assert self.at_complete["dedup_coverage"]["changed"]["advanced"] == 1
+        assert report.coverage_state == self.at_complete["coverage_state"]
         results = reporter.complete_report.call_args.args[1]
         dedup = next(r for r in results if r.phase_name == "dedup_merge")
-        assert dedup.details["coverage"]["changed"]["advanced"] == 1
+        assert dedup.details["coverage"] == self.at_complete["dedup_coverage"]
 
     @pytest.mark.asyncio
     async def test_a_phase_that_raised_after_its_read_stalls(self, mock_db):

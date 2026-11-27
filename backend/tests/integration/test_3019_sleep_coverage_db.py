@@ -400,12 +400,15 @@ async def test_the_lookup_takes_the_latest_report_with_a_state(db_session):
         return CoverageState(dedup=DedupLanes(sweep=LaneEntry(passes=passes)))
 
     def report(user, started_at, coverage=None, **fields):
+        # Every run completed a few minutes after it started, so a lookup
+        # ordered by completed_at would see the rollback below.
         return SleepReport(
             user_id=user,
             workspace_id=ws.id,
             context_id=ctx.id,
             status="completed",
             started_at=started_at,
+            completed_at=started_at + timedelta(minutes=5),
             coverage_state=dump_state(coverage) if coverage else None,
             **fields,
         )
@@ -429,10 +432,12 @@ async def test_the_lookup_takes_the_latest_report_with_a_state(db_session):
     assert (await current_state(db_session, other, str(ctx.id))).dedup.sweep.passes == 9
     assert await current_state(db_session, f"none_{uuid4().hex[:6]}", str(ctx.id)) is None
 
-    # Rolling back the OLDER run rewrites its completed_at, not started_at.
+    # Rolling back the OLDER run rewrites its completed_at (now the latest of
+    # all), not started_at: the current state does not change.
     older.status = "rolled_back"
     older.completed_at = utcnow()
     await db_session.flush()
+    assert older.completed_at > current.completed_at
     assert (await current_state(db_session, owner, str(ctx.id))).dedup.sweep.passes == 2
 
 
