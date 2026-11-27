@@ -52,6 +52,15 @@ CONTENT_CHUNK_DENSE_MAX_FETCH = 600
 #: How much of the matched chunk the reranker sees, after the summary.
 RERANK_CHUNK_TEXT_MAX_CHARS = 1500
 
+#: How much of a payload's ``content`` the reranker sees when the payload has
+#: no ``summary`` (a resource-indexed point: its indexed ``<field>: <value>``
+#: lines, the text it is embedded and keyword-indexed by).
+RERANK_RESOURCE_TEXT_MAX_CHARS = 1500
+
+#: Stand-in document for a candidate whose payload carries no text at all, so
+#: every candidate gets a non-empty document.
+RERANK_EMPTY_DOCUMENT = "(no text)"
+
 # Fixed namespace for chunk point ids (never change: ids must stay stable so a
 # re-embed overwrites the same points).
 _CHUNK_NAMESPACE = UUID("6f1c2a4e-2015-4c0b-9a5e-c0a7e1c4b1d5")
@@ -219,10 +228,29 @@ def rerank_document(candidate: dict[str, Any]) -> str:
     matched), followed by the matched chunk's text when a chunk point is what
     found the memory — put after the summary so a provider that truncates the
     document never cuts the summary.
+
+    No payload key is required (#3031): a payload without a ``summary`` (the
+    point the resource indexer writes) is scored on its ``content`` cut to
+    ``RERANK_RESOURCE_TEXT_MAX_CHARS``, then its ``context_summary``. A
+    candidate with no text at all gets ``RERANK_EMPTY_DOCUMENT``, so one
+    candidate never fails the whole pool and no document is empty.
     """
-    payload = candidate["payload"]
-    doc = f"{payload['summary']} {payload.get('context_summary', '')}"
+    payload = candidate.get("payload") or {}
+    summary = payload.get("summary")
+    if isinstance(summary, str) and summary:
+        doc = f"{summary} {payload.get('context_summary', '')}"
+    else:
+        content = payload.get("content")
+        context_summary = payload.get("context_summary")
+        parts = [
+            content[:RERANK_RESOURCE_TEXT_MAX_CHARS] if isinstance(content, str) else "",
+            context_summary if isinstance(context_summary, str) else "",
+        ]
+        doc = " ".join(p for p in parts if p.strip())
     chunk_text = candidate.get("matched_chunk_text")
     if chunk_text:
-        doc = f"{doc}\n{chunk_text[:RERANK_CHUNK_TEXT_MAX_CHARS]}"
+        cut = chunk_text[:RERANK_CHUNK_TEXT_MAX_CHARS]
+        doc = f"{doc}\n{cut}" if doc else cut
+    if not doc.strip():
+        return RERANK_EMPTY_DOCUMENT
     return doc
