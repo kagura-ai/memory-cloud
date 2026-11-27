@@ -60,9 +60,10 @@ from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
 from services.memory_versions import (
     TextEditEvent,
-    last_text_edit_at,
+    revision_log_began_query,
     text_edit_event,
     text_edit_events_query,
+    text_edit_times,
 )
 from services.resource_indexer import unshared_point_id
 from services.sleep.coverage import (
@@ -182,6 +183,11 @@ def _fmt_minute(dt: datetime | None) -> str | None:
     the post-hoc verification honest.
     """
     return f"{dt:%Y-%m-%d %H:%M}" if dt else None
+
+
+def _to_minute(dt: datetime) -> datetime:
+    """``dt`` at the minute precision the winner rules compare at."""
+    return dt.replace(second=0, microsecond=0)
 
 
 def _edited_version(version: object) -> bool:
@@ -378,6 +384,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
     # the provider, so it is no evidence that a failed embed was the row's own.
     _search_failures: dict[UUID, str] | None = None
     _provider_embeds: int = 0
+    # #3019: when the deployment's revision log began, read at most once a
+    # run and only when a pair needs it (``_revision_log_began``), and the
+    # pairs kept because the log cannot tell which row is newer.
+    _log_began_at: datetime | None = None
+    _log_began_read: bool = False
+    _ambiguous_pairs: int = 0
 
     def __init__(
         self,
@@ -416,8 +428,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #3019: when each judged member's text was last edited, read from the
         # revision log once a run (``_load_text_edit_times``); None for a
         # member the log names no edit for. Newer-wins compares this with
-        # ``created_at`` and never reads ``updated_at``.
+        # ``created_at`` and never reads ``updated_at``; the stamp only says
+        # whether the log can tell the pair apart (``_recency_unknowable``).
         self._text_edited_at: dict[UUID, datetime | None] = {}
+        # #3019: members whose revision read failed (their logged edits are
+        # unknown), and the doubt a rollback that names no block left
+        # (``TextEditTimes.unsure_until``). Both feed ``_recency_unknowable``.
+        self._text_edit_unread: set[UUID] = set()
+        self._text_edit_unsure: dict[UUID, datetime] = {}
         # #1209: per-reason override breakdown ("recency" | "source") and
         # per-decision audit metadata (merge_reason from the judge, override
         # info), keyed by the FINAL (winner_id, loser_id). Kept beside the
@@ -721,8 +739,13 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #1209: reset the per-reason breakdown + per-decision audit metadata.
         self._override_reasons = {}
         self._decision_meta = {}
-        # #3019: edit times are read again each run.
+        # #3019: edit times and the log start are read again each run.
         self._text_edited_at = {}
+        self._text_edit_unread = set()
+        self._text_edit_unsure = {}
+        self._log_began_at = None
+        self._log_began_read = False
+        self._ambiguous_pairs = 0
         # #471: per-(provider, model) accumulator (lazy-init).
         self._llm_breakdown: LLMCallBreakdown | None = None
         # #475: reset embedding accumulators between sleep cycles.
@@ -899,7 +922,33 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 await self._load_text_edit_times(cluster_memories)
                 self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
 
+                # #3019 (owner decision 2026-11-27): a pair the revision log
+                # cannot order is kept both (``_recency_unknowable``). When no
+                # judge answer could merge any pair of the cluster, it is not
+                # sent to the judge. Coverage: such a cluster, like a judged
+                # one, is "kept", so its window rows are settled and the lanes
+                # move past them; nothing is written to either row, so neither
+                # comes back through the changed lane. Kept pairs are not
+                # remembered between runs (a judge's keep_both is not either):
+                # the pair is looked at again when the sweep's next pass, or a
+                # nearby row's window, brings either row back, or when either
+                # is written. Each time that costs the rows' search (spent on
+                # every window row anyway), a revision read for an edited
+                # member and the one log start read of the run, and no judge
+                # call. A cluster that also holds a pair that can merge is
+                # judged (one call) and its kept pair is dropped again.
+                if llm_enabled:
+                    unknowable = await self._unknowable_cluster_pairs(
+                        cluster_memories, pair_scores, threshold
+                    )
+                    if unknowable:
+                        self._ambiguous_pairs += unknowable
+                        cluster_state[index] = "kept"
+                        result.memories_processed += len(cluster_memories)
+                        continue
+
                 failures_before = self._llm_failures
+                ambiguous_before = self._ambiguous_pairs
                 merge_decisions = await self._judge_cluster(
                     cluster_memories,
                     pair_scores,
@@ -916,7 +965,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 else:
                     judge_answered = True
                     cluster_state[index] = "judged"
-                    if not merge_decisions:
+                    if not merge_decisions and self._ambiguous_pairs == ambiguous_before:
                         kept_both += 1
 
                 merge_jobs = self._plan_cluster_merges(
@@ -1024,6 +1073,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     "exempt_tag": tally.skipped_exempt,
                     "changed_since_fetch": tally.skipped_pinned,
                     "resource_owned": tally.skipped_resource_owned,
+                    # #3019: pairs kept because the revision log cannot tell
+                    # which row is newer (``_recency_unknowable``).
+                    "ambiguous_recency": self._ambiguous_pairs,
                 },
                 budget_cut=unjudged_clusters > 0,
             ),
@@ -1104,11 +1156,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
         """Each window row's outcome in this run (#3019), on ``coverage_outcome``.
 
         ``settled``: its search succeeded and it has no eligible pair, or its
-        cluster was judged (the judge answered, or the rule path), or could not
-        be judged because fewer than two members loaded. ``budget``: its cluster
-        was not reached for lack of calls. ``oversize_merge``: a merge executed
-        in the original oversize cluster it belongs to, so the pairs the split
-        left out are compared next run (a head of the sweep held this way
+        cluster was judged (the judge answered, or the rule path), was kept
+        without a call because the revision log cannot order any pair that
+        could merge, or could not be judged because fewer than two members
+        loaded. ``budget``: its cluster was not reached for lack of calls.
+        ``oversize_merge``: a merge executed in the original oversize cluster
+        it belongs to, so the pairs the split left out are compared next run (a head of the sweep held this way
         counts toward the stall limit; one whose own subcluster the calls did
         not reach is ``budget``, which never does). A failure of the row's
         own — its search, or its cluster's judge call — is ``passed`` when the
@@ -1142,7 +1195,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 outcome = BUDGET if unreached else OVERSIZE_MERGE
             elif mid in cluster_of:
                 state = states.get(cluster_of[mid])
-                if state in ("judged", "dropped"):
+                if state in ("judged", "kept", "dropped"):
                     outcome = SETTLED
                 elif state == "failed":
                     outcome = PASSED if judge_answered else FAILURE
@@ -1494,11 +1547,17 @@ class DedupMergePhase(EmbeddingSpendTracker):
             # deterministically (rule-based path is correct by construction
             # and needs no post-check).
             decisions = self._enforce_winner_rules(decisions, cluster_memories)
+            importance_decides = False
         else:
             # Rule-based fallback
             decisions = self._rule_based_judge(cluster_memories, pair_scores)
+            importance_decides = True
 
-        return decisions
+        # #3019: on both paths, and so in shadow mode too (no edge is written
+        # for a pair dropped here).
+        return await self._keep_both_when_unknowable(
+            decisions, cluster_memories, importance_decides=importance_decides
+        )
 
     async def _llm_judge(
         self,
@@ -1697,9 +1756,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
         context-merge copy and the other writes that stamp ``updated_at``
         without an edit never move the version. The other members' ``updated``
         revisions are read in one statement for the cluster and walked by
-        ``last_text_edit_at``. Each id is read once a run. A read that fails
+        ``text_edit_times``. Each id is read once a run. A read that fails
         is rolled back to its savepoint and leaves those members at their
-        creation time: the direction that never makes an old row look newer.
+        creation time, the direction that never makes an old row look newer,
+        and marks them unread: their logged edits are unknown, so
+        ``_recency_unknowable`` keeps a pair they lose when their stamp says an
+        edit could make them the newer row.
         """
         self._ensure_audit_state()
         known = self._text_edited_at
@@ -1716,11 +1778,155 @@ class DedupMergePhase(EmbeddingSpendTracker):
         except Exception as e:
             logger.warning("dedup_text_edit_times_unavailable", count=len(ids), error=str(e))
             rows = []
+            self._text_edit_unread.update(ids)
         events: dict[UUID, list[TextEditEvent]] = {}
         for row in rows:
             events.setdefault(row.memory_id, []).append(text_edit_event(row))
         for memory_id in ids:
-            known[memory_id] = last_text_edit_at(events.get(memory_id, ()))
+            times = text_edit_times(events.get(memory_id, ()))
+            known[memory_id] = times.last
+            if times.unsure_until is not None:
+                self._text_edit_unsure[memory_id] = times.unsure_until
+
+    async def _revision_log_began(self) -> datetime | None:
+        """When the deployment's revision log began, read once a run (#3019).
+
+        ``revision_log_began_query`` in a savepoint, made only when a pair
+        needs it. A log with no row yet, or a read that fails, is None: nothing
+        tells when logging began, so it tells no pair apart.
+        """
+        if not self._log_began_read:
+            self._log_began_read = True
+            value: object = None
+            try:
+                async with self.db.begin_nested():
+                    value = (await self.db.execute(revision_log_began_query())).scalar()
+            except Exception as e:
+                logger.warning("dedup_revision_log_start_unavailable", error=str(e))
+            self._log_began_at = value if isinstance(value, datetime) else None
+        return self._log_began_at
+
+    async def _recency_unknowable(self, winner: Memory, loser: Memory) -> bool:
+        """Could an edit of ``loser``'s text that the revision log does not
+        show make it the newer row? Then the pair is kept (#3019, owner
+        decision 2026-11-27).
+
+        ``loser`` is the row the winner rules make lose. The log holds every
+        text edit made since it began (``revision_log_began_query``), so an
+        edit it does not show was made before that. At the minute precision
+        the rules compare at, the pair is kept when:
+
+        - no logged edit wrote the loser's current text (a logged one is its
+          recency already, and an edit the log does not show is older);
+        - its ``updated_at`` is later than the winner's recency (every text
+          write stamps it, so an edit is never later than the stamp; Sleep's
+          bookkeeping stamps it without an edit, so the stamp alone tells
+          nothing);
+        - the log began after the winner's recency, or nothing tells when it
+          began. Otherwise an edit later than the winner's recency would be in
+          the log.
+
+        A loser whose revision read failed skips the last condition (its
+        logged edits are unknown). One a session rollback naming no block put
+        older text back on is kept when the latest edit it may have restored
+        (``TextEditTimes.unsure_until``) is later than the winner's recency.
+        The documented exception: a context-merge copy starts at version 1 and
+        its source's edits are logged under the source's id, so an edit made
+        there before the merge is not seen even after the log began.
+        """
+        self._ensure_audit_state()
+        winner_minute = self._recency_minute(winner)
+        if winner_minute is None or self._text_edited_at.get(loser.id) is not None:
+            return False
+        unsure = self._text_edit_unsure.get(loser.id)
+        if unsure is not None and _to_minute(unsure) > winner_minute:
+            return True
+        stamped = getattr(loser, "updated_at", None)
+        if not isinstance(stamped, datetime) or _to_minute(stamped) <= winner_minute:
+            return False
+        if loser.id in self._text_edit_unread:
+            return True
+        began = await self._revision_log_began()
+        return began is None or _to_minute(began) > winner_minute
+
+    async def _keep_both_when_unknowable(
+        self,
+        decisions: list[tuple[UUID, UUID]],
+        cluster_memories: list[Memory],
+        *,
+        importance_decides: bool,
+    ) -> list[tuple[UUID, UUID]]:
+        """Drop the decisions ``_recency_unknowable`` keeps both for (#3019).
+
+        Each is counted under ``ambiguous_recency``. On the rule path
+        (``importance_decides``) a pair decided on importance is never
+        dropped: an edit of the loser would not change that decision.
+
+        A kept row is never absorbed through a third one: every decision that
+        stays has a winner whose recency is at least its loser's at minute
+        precision (the newer-wins rule; the rule path's equal-importance
+        tie-break), or one that outranks the loser on importance. So along a
+        chain of merges L -> C -> ... -> S the survivor S is at least as recent
+        as C, or outranks L on importance, and C passed this check against L:
+        the direct pair (S, L) would pass it too.
+        """
+        id_to_mem = {m.id: m for m in cluster_memories}
+        kept: list[tuple[UUID, UUID]] = []
+        for winner_id, loser_id in decisions:
+            winner = id_to_mem.get(winner_id)
+            loser = id_to_mem.get(loser_id)
+            if (
+                winner is not None
+                and loser is not None
+                and not (importance_decides and winner.importance != loser.importance)
+                and await self._recency_unknowable(winner, loser)
+            ):
+                self._ambiguous_pairs += 1
+                self._decision_meta.pop((winner_id, loser_id), None)
+                logger.info(
+                    "dedup_merge_kept_both_recency_unknown",
+                    winner_id=str(winner_id),
+                    loser_id=str(loser_id),
+                )
+                continue
+            kept.append((winner_id, loser_id))
+        return kept
+
+    async def _unknowable_cluster_pairs(
+        self,
+        cluster_memories: list[Memory],
+        pair_scores: dict[tuple[UUID, UUID], float],
+        threshold: float,
+    ) -> int:
+        """The cluster's pairs that could merge, when every one of them would be
+        kept by ``_recency_unknowable`` whatever the judge answered (#3019).
+
+        A pair could merge when its score is at or above the threshold and no
+        supersedes edge settles it (anything else ``_plan_cluster_merges``
+        refuses). The winner rules fix its direction whatever the judge picks
+        unless both rows share their recency minute and source
+        (``_rule_winner``); every direction left must be one that is kept.
+        Returns 0 when the judge is needed: some pair could merge, or none is
+        at the threshold (the judge's answer is then recorded as before).
+        """
+        pairs = 0
+        for i, mem_x in enumerate(cluster_memories):
+            for mem_y in cluster_memories[i + 1 :]:
+                key = _pair_key(mem_x.id, mem_y.id)
+                score = pair_scores.get(key)
+                if key in self._settled_pair_keys or score is None or score < threshold:
+                    continue
+                forced = self._rule_winner(mem_x, mem_y)
+                if forced is None:
+                    directions = [(mem_x, mem_y), (mem_y, mem_x)]
+                else:
+                    winner = forced[0]
+                    directions = [(winner, mem_y if winner is mem_x else mem_x)]
+                for winner, loser in directions:
+                    if not await self._recency_unknowable(winner, loser):
+                        return 0
+                pairs += 1
+        return pairs
 
     def _is_newer(self, candidate: Memory, other: Memory) -> bool:
         """True iff both carry a recency key and candidate's is strictly newer."""
@@ -1748,6 +1954,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
             self._winner_overrides = 0
         if not hasattr(self, "_text_edited_at"):
             self._text_edited_at = {}
+        if not hasattr(self, "_text_edit_unread"):
+            self._text_edit_unread = set()
+        if not hasattr(self, "_text_edit_unsure"):
+            self._text_edit_unsure = {}
 
     def _record_override(
         self,
@@ -1778,7 +1988,20 @@ class DedupMergePhase(EmbeddingSpendTracker):
         trigger the newer-wins flip nor defeat the source tie-break (#1209).
         """
         key = self._recency_key(mem)
-        return key.replace(second=0, microsecond=0) if key else None
+        return _to_minute(key) if key else None
+
+    def _rule_winner(self, a: Memory, b: Memory) -> tuple[Memory, str] | None:
+        """The row the winner rules make win a merge of ``a`` and ``b`` whichever
+        the judge picked, with the rule ("recency" | "source"); None when the
+        judge's pick stands (#1198/#1209). See ``_enforce_winner_rules``.
+        """
+        key_a, key_b = self._recency_minute(a), self._recency_minute(b)
+        if key_a is not None and key_b is not None and key_a != key_b:
+            return (a if key_a > key_b else b), "recency"
+        manual_a, manual_b = self._is_user_authored(a), self._is_user_authored(b)
+        if key_a == key_b and manual_a != manual_b:
+            return (a if manual_a else b), "source"
+        return None
 
     def _enforce_winner_rules(
         self,
@@ -1811,17 +2034,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
             if winner is None or loser is None:
                 corrected.append((winner_id, loser_id))
                 continue
-            winner_key = self._recency_minute(winner)
-            loser_key = self._recency_minute(loser)
-            if winner_key is not None and loser_key is not None and loser_key > winner_key:
-                self._record_override((winner_id, loser_id), (loser_id, winner_id), "recency")
-                corrected.append((loser_id, winner_id))
-            elif (
-                winner_key == loser_key
-                and self._is_user_authored(loser)
-                and not self._is_user_authored(winner)
-            ):
-                self._record_override((winner_id, loser_id), (loser_id, winner_id), "source")
+            forced = self._rule_winner(winner, loser)
+            if forced is not None and forced[0] is loser:
+                self._record_override((winner_id, loser_id), (loser_id, winner_id), forced[1])
                 corrected.append((loser_id, winner_id))
             else:
                 corrected.append((winner_id, loser_id))

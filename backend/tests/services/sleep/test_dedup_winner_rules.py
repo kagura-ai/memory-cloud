@@ -231,8 +231,23 @@ def _rev(
     )
 
 
-def _with_revisions(phase: DedupMergePhase, rows=(), error: Exception | None = None) -> MagicMock:
-    """Give ``phase`` a session whose revision read returns ``rows``."""
+_UNREAD: Any = object()
+
+
+def _with_revisions(
+    phase: DedupMergePhase,
+    rows=(),
+    error: Exception | None = None,
+    *,
+    log_began: Any = _UNREAD,
+    log_row: datetime | None = None,
+) -> MagicMock:
+    """Give ``phase`` a session whose revision read returns ``rows``.
+
+    ``log_began``: when the revision log began, as if already read this run
+    (no query is made for it); left out, the log start query is answered by
+    ``log_row`` (None: the log has no row).
+    """
     db = MagicMock()
     savepoint = MagicMock()
     savepoint.__aenter__ = AsyncMock(return_value=None)
@@ -240,8 +255,12 @@ def _with_revisions(phase: DedupMergePhase, rows=(), error: Exception | None = N
     db.begin_nested = MagicMock(return_value=savepoint)
     result = MagicMock()
     result.all.return_value = list(rows)
+    result.scalar.return_value = log_row
     db.execute = AsyncMock(side_effect=error) if error else AsyncMock(return_value=result)
     phase.db = db
+    if log_began is not _UNREAD:
+        phase._log_began_at = log_began
+        phase._log_began_read = True
     return db
 
 
@@ -253,10 +272,12 @@ def _config() -> MagicMock:
 
 
 def _judge_picks(phase: DedupMergePhase, winner_label: str) -> None:
+    _judge_answers(phase, [{"pair": ["A", "B"], "verdict": "merge", "winner": winner_label}])
+
+
+def _judge_answers(phase: DedupMergePhase, judgments: list[dict[str, Any]]) -> None:
     response = MagicMock()
-    response.parsed = {
-        "judgments": [{"pair": ["A", "B"], "verdict": "merge", "winner": winner_label}]
-    }
+    response.parsed = {"judgments": judgments}
     response.total_tokens = 10
     response.input_tokens = 6
     response.output_tokens = 4
@@ -286,10 +307,17 @@ def _prompt(phase: DedupMergePhase) -> str:
     return phase.llm_service.complete_json.call_args.kwargs["prompt"]
 
 
+def _log_began_before_b() -> datetime:
+    """The revision log began three months ago, before B was written."""
+    return _now() - timedelta(days=90)
+
+
 class TestRecencyIgnoresUpdatedAt:
     """The scenario of the owner decision (2026-11-27): A is six months old and
     was stamped last week without an edit; B was written two months ago and
-    never stamped (``updated_at`` NULL). B holds the newer fact."""
+    never stamped (``updated_at`` NULL). The revision log began before B was
+    written, so an edit of A after B would be in it: none is, A's stamp is no
+    edit, and B holds the newer fact."""
 
     def _pair(self) -> tuple[MagicMock, MagicMock]:
         now = _now()
@@ -299,7 +327,7 @@ class TestRecencyIgnoresUpdatedAt:
 
     async def test_judge_picking_the_stamped_old_row_is_flipped(self) -> None:
         phase = _phase()
-        db = _with_revisions(phase)
+        db = _with_revisions(phase, log_began=_log_began_before_b())
         a, b = self._pair()
 
         decisions = await _judge(phase, a, b, "A")
@@ -310,7 +338,7 @@ class TestRecencyIgnoresUpdatedAt:
 
     async def test_judge_picking_the_newer_row_is_kept(self) -> None:
         phase = _phase()
-        _with_revisions(phase)
+        _with_revisions(phase, log_began=_log_began_before_b())
         a, b = self._pair()
 
         decisions = await _judge(phase, a, b, "B")
@@ -320,7 +348,7 @@ class TestRecencyIgnoresUpdatedAt:
 
     async def test_rule_path_at_equal_importance_keeps_the_newer_row(self) -> None:
         phase = _phase()
-        db = _with_revisions(phase)
+        db = _with_revisions(phase, log_began=_log_began_before_b())
         a, b = self._pair()
 
         await phase._load_text_edit_times([a, b])
@@ -331,7 +359,7 @@ class TestRecencyIgnoresUpdatedAt:
 
     async def test_prompt_shows_the_creation_minute_of_the_stamped_row(self) -> None:
         phase = _phase()
-        _with_revisions(phase)
+        _with_revisions(phase, log_began=_log_began_before_b())
         a, b = self._pair()
 
         await _judge(phase, a, b, "B")
@@ -345,7 +373,7 @@ class TestRecencyIgnoresUpdatedAt:
         """A merge winner's tag union stamps ``updated_at`` without a version."""
         now = _now()
         phase = _phase()
-        _with_revisions(phase)
+        _with_revisions(phase, log_began=_log_began_before_b())
         winner_before = _mem(created=now - timedelta(days=100), updated=now - timedelta(days=1))
         later = _mem(created=now - timedelta(days=50))
 
@@ -413,7 +441,11 @@ class TestTextEditTimes:
         phase = _phase()
         a = _mem(created=now - timedelta(days=180), updated=now - timedelta(days=7), version=2)
         b = self._b()
-        _with_revisions(phase, [_rev(a.id, 2, at=now - timedelta(days=7), text=False)])
+        _with_revisions(
+            phase,
+            [_rev(a.id, 2, at=now - timedelta(days=7), text=False)],
+            log_began=_log_began_before_b(),
+        )
 
         decisions = await _judge(phase, a, b, "A")
 
@@ -575,18 +607,33 @@ class TestTextEditTimes:
         await phase._load_text_edit_times([members[0], newcomer])
         assert db.execute.await_count == 2
 
-    async def test_a_read_that_fails_leaves_the_creation_time(self) -> None:
+    @pytest.mark.parametrize(
+        ("stamp_days_ago", "kept"),
+        [(0, True), (100, False)],
+        ids=["stamped_after_b", "stamped_before_b"],
+    )
+    async def test_a_read_that_fails_leaves_the_creation_time(self, stamp_days_ago, kept) -> None:
+        """The member is compared by its creation time. Its logged edits are
+        unknown, so when its stamp is later than B the log cannot tell whether
+        it is an edit: both are kept, however early the log began."""
         now = _now()
         phase = _phase()
-        a = _mem(created=now - timedelta(days=180), updated=now, version=2)
+        a = _mem(
+            created=now - timedelta(days=180),
+            updated=now - timedelta(days=stamp_days_ago),
+            version=2,
+        )
         b = self._b()
-        db = _with_revisions(phase, error=RuntimeError("statement timeout"))
+        db = _with_revisions(
+            phase, error=RuntimeError("statement timeout"), log_began=_log_began_before_b()
+        )
 
         decisions = await _judge(phase, a, b, "A")
 
         assert db.execute.await_count == 1
         assert phase._recency_key(a) == a.created_at
-        assert decisions == [(b.id, a.id)]
+        assert decisions == ([] if kept else [(b.id, a.id)])
+        assert phase._ambiguous_pairs == (1 if kept else 0)
 
     async def test_the_cache_is_per_run(self) -> None:
         """``execute`` starts every run with no edit time known."""
@@ -606,3 +653,306 @@ class TestTextEditTimes:
         a = _mem(created=datetime(2026, 1, 1), updated=datetime(2026, 6, 1), version=2)
 
         assert phase._recency_key(a) == datetime(2026, 1, 1)
+
+
+# ---------------------------------------------------------------------------
+# #3019, owner decision 2026-11-27: keep both when the log cannot tell
+# ---------------------------------------------------------------------------
+
+
+def _days_ago(days: float) -> datetime:
+    return _now() - timedelta(days=days)
+
+
+class TestKeepBothWhenTheLogCannotTell:
+    """A: six months old, version 1, stamped last week. B: two months old,
+    never stamped. A's stamp is a text edit or Sleep bookkeeping; when the
+    revision log cannot tell which, and an edit then would make A the newer
+    row, the pair is not merged in either direction and counted apart."""
+
+    def _pair(self, **a_fields: Any) -> tuple[MagicMock, MagicMock]:
+        fields: dict[str, Any] = {"created": _days_ago(180), "updated": _days_ago(7)}
+        fields.update(a_fields)
+        return _mem(**fields), _mem(created=_days_ago(60))
+
+    @pytest.mark.parametrize("log_began", [None, 30], ids=["no_log", "log_began_after_b"])
+    @pytest.mark.parametrize("pick", ["A", "B"])
+    async def test_the_judge_path_keeps_both(self, log_began, pick) -> None:
+        phase = _phase()
+        _with_revisions(phase, log_began=None if log_began is None else _days_ago(log_began))
+        a, b = self._pair()
+
+        decisions = await _judge(phase, a, b, pick)
+
+        assert decisions == []
+        assert phase._ambiguous_pairs == 1
+        assert phase._decision_meta == {}
+
+    async def test_the_rule_path_keeps_both_at_equal_importance(self) -> None:
+        phase = _phase()
+        _with_revisions(phase, log_began=None)
+        a, b = self._pair()
+
+        await phase._load_text_edit_times([a, b])
+        decisions = await phase._judge_cluster(
+            [a, b], {_key(a, b): 0.99}, False, "u", "ctx", "ws", SleepBudget(), _config()
+        )
+
+        assert decisions == []
+        assert phase._ambiguous_pairs == 1
+
+    async def test_the_rule_path_merges_when_importance_decides(self) -> None:
+        """An edit of A would not change a decision made on importance."""
+        phase = _phase()
+        _with_revisions(phase, log_began=None)
+        a, b = self._pair(importance=0.3)
+        b.importance = 0.9
+
+        await phase._load_text_edit_times([a, b])
+        decisions = await phase._judge_cluster(
+            [a, b], {_key(a, b): 0.99}, False, "u", "ctx", "ws", SleepBudget(), _config()
+        )
+
+        assert decisions == [(b.id, a.id)]
+        assert phase._ambiguous_pairs == 0
+
+    async def test_a_log_that_began_before_the_duplicate_tells(self) -> None:
+        phase = _phase()
+        _with_revisions(phase, log_began=_days_ago(90))
+        a, b = self._pair()
+
+        assert await _judge(phase, a, b, "A") == [(b.id, a.id)]
+        assert phase._ambiguous_pairs == 0
+
+    async def test_a_logged_text_edit_leaves_no_doubt(self) -> None:
+        """The log shows the edit that wrote A's text; anything it does not
+        show is older than that edit."""
+        phase = _phase()
+        a, b = self._pair(version=2)
+        _with_revisions(phase, [_rev(a.id, 2, at=_days_ago(100))], log_began=None)
+
+        assert await _judge(phase, a, b, "A") == [(b.id, a.id)]
+        assert phase._ambiguous_pairs == 0
+
+    @pytest.mark.parametrize(("log_began", "kept"), [(None, True), (30, True), (90, False)])
+    async def test_a_metadata_edit_leaves_the_doubt(self, log_began, kept) -> None:
+        phase = _phase()
+        a, b = self._pair(version=2)
+        _with_revisions(
+            phase,
+            [_rev(a.id, 2, at=_days_ago(7), text=False)],
+            log_began=None if log_began is None else _days_ago(log_began),
+        )
+
+        decisions = await _judge(phase, a, b, "A")
+
+        assert decisions == ([] if kept else [(b.id, a.id)])
+
+    @pytest.mark.parametrize(("b_days_ago", "kept"), [(60, True), (10, False)])
+    async def test_a_rollback_without_a_block_leaves_the_doubt(self, b_days_ago, kept) -> None:
+        """It put back the text of some earlier version, which may be the edit
+        it dropped (30 days ago): later than B written 60 days ago, earlier
+        than B written 10 days ago. The log began a year ago."""
+        phase = _phase()
+        a = _mem(created=_days_ago(180), updated=_days_ago(20), version=3)
+        b = _mem(created=_days_ago(b_days_ago))
+        _with_revisions(
+            phase,
+            [
+                _rev(a.id, 2, at=_days_ago(30)),
+                _rev(a.id, 3, at=_days_ago(20), writer="rollback"),
+            ],
+            log_began=_days_ago(365),
+        )
+
+        decisions = await _judge(phase, a, b, "A")
+
+        assert phase._recency_key(a) == a.created_at
+        assert decisions == ([] if kept else [(b.id, a.id)])
+
+    @pytest.mark.parametrize(
+        "stamp",
+        [_days_ago(70), _days_ago(60) + timedelta(seconds=30)],
+        ids=["before_b", "in_b_minute"],
+    )
+    async def test_a_stamp_not_later_than_the_winner_needs_no_log(self, stamp) -> None:
+        phase = _phase()
+        db = _with_revisions(phase)
+        a, b = self._pair(updated=stamp)
+
+        assert await _judge(phase, a, b, "A") == [(b.id, a.id)]
+        db.execute.assert_not_called()
+
+    async def test_the_log_start_is_read_once_a_run_and_only_when_needed(self) -> None:
+        phase = _phase()
+        db = _with_revisions(phase, log_row=_days_ago(90))
+        a1, b1 = self._pair()
+        a2, b2 = self._pair()
+
+        assert await _judge(phase, a1, b1, "A") == [(b1.id, a1.id)]
+        assert await _judge(phase, a2, b2, "B") == [(b2.id, a2.id)]
+
+        assert db.execute.await_count == 1
+        assert phase._log_began_at == _days_ago(90)
+
+    @pytest.mark.parametrize("failure", [True, False], ids=["read_failed", "no_row"])
+    async def test_no_log_start_keeps_both(self, failure) -> None:
+        phase = _phase()
+        db = _with_revisions(
+            phase, error=RuntimeError("statement timeout") if failure else None, log_row=None
+        )
+        a, b = self._pair()
+
+        assert await _judge(phase, a, b, "A") == []
+        assert db.execute.await_count == 1
+        assert phase._log_began_read is True and phase._log_began_at is None
+
+    async def test_a_kept_row_is_never_absorbed_through_a_third(self) -> None:
+        """W (100 days) cannot take L (180 days, stamped last week): kept. C
+        (5 days) is newer than any edit L can have had, so L may go to C, and
+        W goes to C too; nothing leaves L under W."""
+        phase = _phase()
+        _with_revisions(phase, log_began=None)
+        w = _mem(created=_days_ago(100))
+        loser = _mem(created=_days_ago(180), updated=_days_ago(7))
+        c = _mem(created=_days_ago(5))
+        _judge_answers(
+            phase,
+            [
+                {"pair": ["A", "B"], "verdict": "merge", "winner": "A"},
+                {"pair": ["A", "C"], "verdict": "merge", "winner": "A"},
+                {"pair": ["B", "C"], "verdict": "merge", "winner": "B"},
+            ],
+        )
+        scores = {_key(w, loser): 0.96, _key(w, c): 0.96, _key(loser, c): 0.96}
+        await phase._load_text_edit_times([w, loser, c])
+
+        decisions = await phase._judge_cluster(
+            [w, loser, c], scores, True, "u", "ctx", "ws", SleepBudget(), _config()
+        )
+
+        assert decisions == [(c.id, w.id), (c.id, loser.id)]
+        assert phase._ambiguous_pairs == 1
+
+    async def test_the_rest_of_a_cluster_still_merges(self) -> None:
+        phase = _phase()
+        _with_revisions(phase, log_began=None)
+        w = _mem(created=_days_ago(100))
+        loser = _mem(created=_days_ago(180), updated=_days_ago(7))
+        older = _mem(created=_days_ago(150))
+        _judge_answers(
+            phase,
+            [
+                {"pair": ["A", "B"], "verdict": "merge", "winner": "A"},
+                {"pair": ["A", "C"], "verdict": "merge", "winner": "A"},
+            ],
+        )
+        scores = {_key(w, loser): 0.96, _key(w, older): 0.96, _key(loser, older): 0.5}
+        await phase._load_text_edit_times([w, loser, older])
+
+        decisions = await phase._judge_cluster(
+            [w, loser, older], scores, True, "u", "ctx", "ws", SleepBudget(), _config()
+        )
+
+        assert decisions == [(w.id, older.id)]
+        assert phase._ambiguous_pairs == 1
+
+
+def _run_config(**overrides: Any) -> Any:
+    from neural.config import NeuralMemoryConfig
+
+    values: dict[str, Any] = {
+        "sleep_llm_provider": "openai",
+        "sleep_llm_model": "m",
+        "sleep_dedup_enabled": True,
+        "sleep_max_memories_per_run": 50,
+        "sleep_dedup_similarity_threshold": 0.92,
+        "sleep_dedup_supersede_enabled": False,
+    }
+    values.update(overrides)
+    return NeuralMemoryConfig(**values)
+
+
+class TestKeepBothInARun:
+    """``execute``: a cluster in which no judge answer could merge anything is
+    not sent to the judge; the pair is counted under its own reason."""
+
+    def _phase(self, memories, pairs, *, log_row: datetime | None) -> DedupMergePhase:
+        phase = _phase()
+        _with_revisions(phase, log_row=log_row)
+        phase._fetch_active_memories = AsyncMock(return_value=memories)
+        phase._find_similar_pairs = AsyncMock(return_value=pairs)
+        phase._count_pinned = AsyncMock(return_value=0)
+        phase._execute_merge = AsyncMock(return_value=True)
+        phase._execute_shadow_merge = AsyncMock(return_value=(True, None))
+        _judge_picks(phase, "A")
+        return phase
+
+    @pytest.mark.parametrize("shadow", [False, True], ids=["remove", "shadow"])
+    async def test_a_cluster_nothing_can_merge_spends_no_call(self, shadow) -> None:
+        a = _mem(created=_days_ago(180), updated=_days_ago(7))
+        b = _mem(created=_days_ago(60))
+        phase = self._phase([a, b], [(a.id, b.id, 0.96)], log_row=None)
+
+        result = await phase.execute(
+            _run_config(sleep_dedup_supersede_enabled=shadow), "u", "ws", "ctx", SleepBudget()
+        )
+
+        phase.llm_service.complete_json.assert_not_awaited()
+        phase._execute_merge.assert_not_awaited()
+        phase._execute_shadow_merge.assert_not_awaited()
+        assert result.llm_calls_used == 0
+        assert result.details["merged"] == 0
+        assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}
+        assert result.details["budget_cut"] is False
+
+    async def test_the_same_pair_merges_once_the_log_tells(self) -> None:
+        a = _mem(created=_days_ago(180), updated=_days_ago(7))
+        b = _mem(created=_days_ago(60))
+        phase = self._phase([a, b], [(a.id, b.id, 0.96)], log_row=_days_ago(90))
+
+        result = await phase.execute(_run_config(), "u", "ws", "ctx", SleepBudget())
+
+        phase.llm_service.complete_json.assert_awaited_once()
+        phase._execute_merge.assert_awaited_once()
+        assert phase._execute_merge.await_args.args[:2] == (b, a)
+        assert result.details["merged"] == 1
+        assert "ambiguous_recency" not in result.details["no_action_reasons"]
+
+    async def test_a_cluster_with_a_pair_that_can_merge_is_judged(self) -> None:
+        """The judge picks the kept row's pair and a mergeable one; only the
+        mergeable one runs, and the cluster is not counted as kept-both."""
+        w = _mem(created=_days_ago(100))
+        loser = _mem(created=_days_ago(180), updated=_days_ago(7))
+        older = _mem(created=_days_ago(150))
+        phase = self._phase(
+            [w, loser, older],
+            [(w.id, loser.id, 0.96), (w.id, older.id, 0.96)],
+            log_row=None,
+        )
+        _judge_answers(
+            phase,
+            [
+                {"pair": ["A", "B"], "verdict": "merge", "winner": "A"},
+                {"pair": ["A", "C"], "verdict": "merge", "winner": "A"},
+            ],
+        )
+
+        result = await phase.execute(_run_config(), "u", "ws", "ctx", SleepBudget())
+
+        phase.llm_service.complete_json.assert_awaited_once()
+        phase._execute_merge.assert_awaited_once()
+        assert phase._execute_merge.await_args.args[:2] == (w, older)
+        assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}
+
+    async def test_the_rule_path_counts_the_kept_pair(self) -> None:
+        a = _mem(created=_days_ago(180), updated=_days_ago(7))
+        b = _mem(created=_days_ago(60))
+        phase = self._phase([a, b], [(a.id, b.id, 0.99)], log_row=None)
+
+        result = await phase.execute(
+            _run_config(sleep_llm_provider=""), "u", "ws", "ctx", SleepBudget()
+        )
+
+        phase._execute_merge.assert_not_awaited()
+        assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}

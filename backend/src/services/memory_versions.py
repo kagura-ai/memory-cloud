@@ -702,6 +702,22 @@ def text_edit_events_query(
     )
 
 
+def revision_log_began_query() -> Select[datetime]:
+    """When this deployment's revision log began, as far as its rows tell (#3019).
+
+    The ``at`` of the lowest-id ``memory_revisions`` row: one primary-key
+    read, no scan. Invariant: every row was written, at its own write time, by
+    a deployment that logs every text edit, so this time is never earlier
+    than the moment logging began, and every edit of a memory's ``summary`` or
+    ``content`` made after it wrote an ``updated`` revision of that memory
+    (``record_edit``; the session rollback writes one too). Rows only leave
+    with their memory, which can make the value later, never earlier. A
+    context-merge copy is a new row: what its source logged is not its own
+    (docs/sleep-maintenance.md). No row: nothing tells when logging began.
+    """
+    return select(MemoryRevision.at).order_by(MemoryRevision.id).limit(1)
+
+
 def text_edit_event(row: Any) -> TextEditEvent:
     """A ``text_edit_events_query`` row as a ``TextEditEvent``.
 

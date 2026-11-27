@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import DateTime, literal, select
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import Memory
@@ -166,6 +166,8 @@ class _Partition:
         self.rows: list[Memory] = []
         self.windows: list[list] = []
         self.sweeps: list[list] = []
+        # When the revision log began (see ``run``): before every row here.
+        self.log_began = utcnow() - timedelta(days=3650)
 
     def axis(self, index: int) -> list[float]:
         vector = [0.0] * self.dims
@@ -258,6 +260,19 @@ class _Partition:
             stack.enter_context(patch.object(dedup_merge, "search_memories_qdrant", self._search))
             stack.enter_context(patch.object(dedup_merge, "retrieve_dense_vectors", self._vectors))
             stack.enter_context(patch.object(dedup_merge, "fetch_window", recording_fetch))
+            # The revision log began before any row here was written, as on a
+            # deployment that logged every edit of these rows; the test
+            # database itself may hold no revision row. Without it, a merge
+            # winner's stamp later than a newer duplicate could be an edit the
+            # log does not show, and that pair would be kept.
+            log_began = self.log_began
+            stack.enter_context(
+                patch.object(
+                    dedup_merge,
+                    "revision_log_began_query",
+                    lambda: select(literal(log_began, DateTime())),
+                )
+            )
             if raise_search:
                 stack.enter_context(
                     patch.object(

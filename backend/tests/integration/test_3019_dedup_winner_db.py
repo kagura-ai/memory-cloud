@@ -4,7 +4,11 @@ A memory that was never edited is compared by its creation time, not by
 ``updated_at``: Sleep and other writes that change no text stamp that column
 too (importance re-evaluation did, before it kept its own clock), so an old
 stamped memory used to outrank a newer duplicate and the newer fact was the
-one retired. An edit's time comes from the revision log.
+one retired. An edit's time comes from the revision log. When the log cannot
+tell whether a stamp is an edit that would make the losing row the newer one
+(it began after the other row's recency, or nothing tells when it began),
+both rows stay (owner decision 2026-11-27). The test database's log start is
+set per run (``_Scope.run(log_began=...)``) unless a test reads the real one.
 
 The vector store, the embedding service and the judge are faked; the window,
 the eligibility checks, the revision read, the winner rules and the merge run
@@ -26,7 +30,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import DateTime, delete, literal, select
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import (
@@ -47,6 +51,14 @@ from utils.datetime import utcnow
 
 # (owner, workspace id) of every scope the running test created.
 _created: list[tuple[str, UUID]] = []
+
+# ``_Scope.run``: read the deployment's real revision log start.
+_READ: Any = object()
+
+
+def _log_start_query(at: datetime | None):
+    """A stand-in for ``revision_log_began_query`` answering ``at`` on Postgres."""
+    return lambda: select(literal(at, DateTime()))
 
 
 @pytest.fixture(autouse=True)
@@ -212,9 +224,17 @@ class _Scope:
         service.complete_json = AsyncMock(side_effect=answer)
         return service
 
-    async def run(self, *, judge_picks: Memory | None = None, shadow: bool = False):
+    async def run(
+        self,
+        *,
+        judge_picks: Memory | None = None,
+        shadow: bool = False,
+        log_began: Any = _READ,
+    ):
         """One dedup run over the context: the judge picks ``judge_picks``, or
-        the rule path (no model) when it is None."""
+        the rule path (no model) when it is None. ``log_began`` is when the
+        revision log began (None: it has no row); left out, the real start is
+        read from ``memory_revisions``."""
         config = NeuralMemoryConfig(
             sleep_llm_provider="openai" if judge_picks is not None else "",
             sleep_llm_model="m",
@@ -234,6 +254,12 @@ class _Scope:
             stack.enter_context(
                 patch.object(dedup_merge, "retrieve_dense_vectors", self._stored_vectors)
             )
+            if log_began is not _READ:
+                stack.enter_context(
+                    patch.object(
+                        dedup_merge, "revision_log_began_query", _log_start_query(log_began)
+                    )
+                )
             phase = DedupMergePhase(self.db, llm)
             result = await phase.execute(
                 config, self.owner, str(self.ws.id), str(self.ctx.id), SleepBudget()
@@ -280,7 +306,10 @@ async def test_a_row_stamped_without_an_edit_loses_to_a_newer_duplicate(db_sessi
     a, b = await _old_stamped_and_newer(scope, now)
     assert a.version == 1 and b.version == 1 and b.updated_at is None
 
-    result, phase = await scope.run(judge_picks=a if judged else None)
+    # The log began before B was written: an edit of A after B would be in it.
+    result, phase = await scope.run(
+        judge_picks=a if judged else None, log_began=now - timedelta(days=90)
+    )
 
     assert result.details["merged"] == 1
     state = await scope.state(a, b)
@@ -299,7 +328,7 @@ async def test_shadow_mode_records_the_newer_row_as_the_successor(db_session):
     scope = await _Scope.create(db_session)
     a, b = await _old_stamped_and_newer(scope, now)
 
-    result, _ = await scope.run(judge_picks=a, shadow=True)
+    result, _ = await scope.run(judge_picks=a, shadow=True, log_began=now - timedelta(days=90))
 
     assert result.details["merged"] == 1
     edges = (
@@ -370,7 +399,9 @@ async def test_a_real_edit_of_the_text_makes_the_old_row_win(db_session, fields,
     # the edit's stamp; the merge winner's tag union stamps the row again
     edit_stamp = a.updated_at
 
-    result, phase = await scope.run(judge_picks=b if a_wins else a)
+    result, phase = await scope.run(
+        judge_picks=b if a_wins else a, log_began=now - timedelta(days=90)
+    )
 
     assert result.details["merged"] == 1
     assert result.details["winner_overrides"] == 1
@@ -386,9 +417,19 @@ async def test_a_real_edit_of_the_text_makes_the_old_row_win(db_session, fields,
 
 
 @pytest.mark.asyncio
-async def test_a_context_merge_copy_loses_to_a_row_created_later_in_the_target(db_session):
+@pytest.mark.parametrize(
+    ("log_began_days_ago", "merged"),
+    [(90, True), (30, False)],
+    ids=["log_began_before_later", "log_began_after_later"],
+)
+async def test_a_context_merge_copy_loses_to_a_row_created_later_in_the_target(
+    db_session, log_began_days_ago, merged
+):
     """``merge_contexts`` copies a row with its ``created_at`` and a fresh
-    ``updated_at`` at version 1: the copy is as old as the row it copies."""
+    ``updated_at`` at version 1: the copy is as old as the row it copies. When
+    the log began before the later row, the copy loses (the documented limit:
+    an edit made in the source before the merge is not seen); when it began
+    after, the copy's stamp could be an edit and both stay."""
     from services.context_service import ContextService
 
     now = utcnow()
@@ -430,12 +471,19 @@ async def test_a_context_merge_copy_loses_to_a_row_created_later_in_the_target(d
     assert copy.updated_at is not None and copy.updated_at > later.created_at
     scope.vectors[str(copy.id)] = scope.vectors.pop(str(original.id))
 
-    result, _ = await scope.run(judge_picks=copy)
+    result, _ = await scope.run(
+        judge_picks=copy, log_began=now - timedelta(days=log_began_days_ago)
+    )
 
-    assert result.details["merged"] == 1
     state = await scope.state(copy, later)
     assert state[later.id].deleted_at is None
-    assert state[copy.id].deleted_by == DELETED_BY_SLEEP_MERGE
+    if merged:
+        assert result.details["merged"] == 1
+        assert state[copy.id].deleted_by == DELETED_BY_SLEEP_MERGE
+    else:
+        assert result.details["merged"] == 0
+        assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}
+        assert state[copy.id].deleted_at is None
 
 
 async def _log_edit(
@@ -538,3 +586,76 @@ async def test_the_revision_read_and_the_rollback_walk_on_real_rows(db_session):
     phase = DedupMergePhase(db_session, MagicMock())
     await phase._load_text_edit_times([a, other])
     assert phase._recency_key(a) == now - timedelta(days=2)
+
+
+# ---------------------------------------------------------------------------
+# Owner decision 2026-11-27: keep both when the log cannot tell
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["judge", "rule_path", "shadow"])
+@pytest.mark.parametrize("log_began_days_ago", [None, 30], ids=["no_log_row", "log_began_after_b"])
+async def test_when_the_log_cannot_tell_both_rows_stay(db_session, mode, log_began_days_ago):
+    """A's stamp (last week) is later than B (two months old). With no
+    revision row, or a log that began after B was written, an edit of A after
+    B would not be in the log, so the stamp may be one: neither row is
+    retired, shadow mode writes no edge, the judge is not asked, and both rows
+    are settled for the lanes."""
+    now = utcnow()
+    scope = await _Scope.create(db_session)
+    a, b = await _old_stamped_and_newer(scope, now)
+
+    result, phase = await scope.run(
+        judge_picks=a if mode != "rule_path" else None,
+        shadow=mode == "shadow",
+        log_began=None if log_began_days_ago is None else now - timedelta(days=log_began_days_ago),
+    )
+
+    assert result.details["merged"] == 0
+    assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}
+    assert result.details["budget_cut"] is False
+    assert result.llm_calls_used == 0
+    assert scope.prompts == []
+    state = await scope.state(a, b)
+    assert state[a.id].deleted_at is None and state[b.id].deleted_at is None
+    edges = (
+        await db_session.execute(
+            select(NeuralMemoryEdge.id).where(
+                NeuralMemoryEdge.user_id == scope.owner,
+                NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+            )
+        )
+    ).all()
+    assert edges == []
+    assert phase.coverage_outcome is not None
+    assert {phase.coverage_outcome.outcomes[m.id] for m in (a, b)} == {"settled"}
+
+
+@pytest.mark.asyncio
+async def test_the_log_start_is_read_from_postgres(db_session):
+    """The real start: the ``at`` of the lowest-id revision, never later than
+    an edit the log holds."""
+    now = utcnow()
+    scope = await _Scope.create(db_session)
+    a, _ = await _old_stamped_and_newer(scope, now)
+    await db_session.commit()
+    await _edit(scope, a, summary="the deploy target is blue, checked again")
+    edit_at = (
+        await db_session.execute(
+            select(MemoryRevision.at)
+            .where(MemoryRevision.memory_id == a.id, MemoryRevision.kind == "updated")
+            .order_by(MemoryRevision.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+    lowest = (
+        await db_session.execute(select(MemoryRevision.at).order_by(MemoryRevision.id).limit(1))
+    ).scalar_one()
+
+    phase = DedupMergePhase(db_session, MagicMock())
+    began = await phase._revision_log_began()
+
+    assert began == lowest
+    assert began is not None and began <= edit_at
+    assert phase._log_began_read is True
