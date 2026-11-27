@@ -154,7 +154,14 @@ async def test_builder_charges_only_new_pairs_and_skips_suppressed_rows(db_sessi
         *args, SleepBudget(max_memories=200), report_id=report.id
     )
     await db.flush()
-    assert first.details == {"candidates": 2, "indexed": 2}
+    assert first.details == {
+        "candidates": 2,
+        "indexed": 2,
+        # #3019: what the phase considered and why it did nothing.
+        "candidates_considered": 2,
+        "no_action_reasons": {},
+        "budget_cut": False,
+    }
     assert first.memories_processed == 4
     rows = (
         await db.execute(
@@ -167,5 +174,11 @@ async def test_builder_charges_only_new_pairs_and_skips_suppressed_rows(db_sessi
     second = await RelatedIndexPhase(db).execute(
         *args, SleepBudget(max_memories=200), report_id=report.id
     )
-    assert second.details == {"candidates": 0, "indexed": 0}
+    assert second.details == {
+        "candidates": 0,
+        "indexed": 0,
+        "candidates_considered": 0,
+        "no_action_reasons": {},
+        "budget_cut": False,
+    }
     assert second.memories_processed == 0
