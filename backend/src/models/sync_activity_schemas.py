@@ -112,10 +112,25 @@ class RunObservation(TZAwareBaseModel):
     search: SearchObservation
 
 
+class IndexProgress(TZAwareBaseModel):
+    """How many of a run's index events the indexer has passed (#3038).
+
+    The worker's run status carries the same object. ``search.state``, not
+    ``indexed == total``, says a run is done: a run without index events
+    reads ``0`` of ``0`` while it can still wait on the feed's earlier events.
+    """
+
+    model_config = ConfigDict(json_schema_mode_override="validation")
+
+    indexed: int = Field(ge=0)
+    total: int = Field(ge=0)
+
+
 class RunDetail(RunObservation):
     received_chunks: int
     received_records: int
     as_of: datetime
+    index_progress: IndexProgress | None = None
 
 
 class RunPage(TZAwareBaseModel):

@@ -6404,6 +6404,23 @@
         ],
         "type": "object"
       },
+      "IndexProgress": {
+        "properties": {
+          "indexed": {
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "indexed",
+          "total"
+        ],
+        "type": "object"
+      },
       "IndexerLastRunV1": {
         "additionalProperties": false,
         "properties": {
@@ -12601,6 +12618,7 @@
           "declared_records": {},
           "expires_at": {},
           "feed_id": {},
+          "index_progress": {},
           "manual_request_id": {},
           "operation_id": {},
           "origin": {},

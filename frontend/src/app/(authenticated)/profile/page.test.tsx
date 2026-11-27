@@ -188,7 +188,7 @@ describe("ProfilePage section links", () => {
     render(<ProfilePage />);
     const navigation = screen.getByRole("navigation", { name: "sections.label" });
     const links = navigation.querySelectorAll("a");
-    expect(links).toHaveLength(8);
+    expect(links).toHaveLength(7);
     for (const link of links) {
       const id = link.getAttribute("href")!.slice(1);
       expect(document.getElementById(id)).not.toBeNull();
@@ -200,6 +200,40 @@ describe("ProfilePage section links", () => {
     expect(screen.getByRole("link", { name: "sections.appearance" })).toHaveAttribute("aria-current", "location");
     expect(screen.getByLabelText("fullName")).toHaveValue("Unsaved draft");
     expect(mockApiPut).not.toHaveBeenCalled();
+  });
+});
+
+describe("ProfilePage account deletion outside the section links", () => {
+  afterEach(() => {
+    window.history.replaceState(null, "", window.location.pathname);
+  });
+
+  it("offers no navigation entry for account deletion but still renders the section", () => {
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    const navigation = screen.getByRole("navigation", { name: "sections.label" });
+    const hrefs = Array.from(navigation.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    expect(hrefs).not.toContain("#profile-deletion");
+    expect(screen.queryByRole("link", { name: "sections.deletion" })).toBeNull();
+    const deletion = screen.getByRole("region", { name: "sections.deletion" });
+    expect(deletion.id).toBe("profile-deletion");
+    expect(deletion).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("marks no entry current when the address points at the deletion section", () => {
+    window.history.replaceState(null, "", "#profile-deletion");
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    const navigation = screen.getByRole("navigation", { name: "sections.label" });
+    for (const link of navigation.querySelectorAll("a")) {
+      expect(link).not.toHaveAttribute("aria-current");
+    }
+  });
+
+  it("marks the first entry current while the address names no section", () => {
+    mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
+    render(<ProfilePage />);
+    expect(screen.getByRole("link", { name: "sections.info" })).toHaveAttribute("aria-current", "location");
   });
 });
 
@@ -232,7 +266,7 @@ describe("ProfilePage Emails section (#2761)", () => {
     mockUser = { id: "u-1", name: "Test", email: "u@example.test", auth_method: "password" };
     render(<ProfilePage />);
     const navigation = screen.getByRole("navigation", { name: "sections.label" });
-    expect(navigation.querySelectorAll("a")).toHaveLength(7);
+    expect(navigation.querySelectorAll("a")).toHaveLength(6);
     expect(screen.queryByRole("link", { name: "sections.emails" })).toBeNull();
   });
 });
@@ -266,7 +300,7 @@ describe("ProfilePage Notices in AI tools section (#2762)", () => {
     // Mounted (it still asks the server), but nothing of it is shown.
     expect(document.getElementById("profile-mcp-notices")).not.toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "sections.label" });
-    expect(navigation.querySelectorAll("a")).toHaveLength(7);
+    expect(navigation.querySelectorAll("a")).toHaveLength(6);
     expect(screen.queryByRole("link", { name: "sections.mcpNotices" })).toBeNull();
     // Its own flag: the Emails link stays.
     expect(screen.getByRole("link", { name: "sections.emails" })).toBeInTheDocument();

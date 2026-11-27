@@ -15,7 +15,11 @@ export function PageSectionNavigation({ label, sections }: PageSectionNavigation
     window.addEventListener("hashchange", syncHash);
     return () => window.removeEventListener("hashchange", syncHash);
   }, []);
-  const selectedId = sections.find(section => section.id === activeId)?.id ?? sections[0]?.id;
+  // No hash: the first entry. A hash naming a section without an entry (one the page
+  // leaves out of the links): no entry, rather than marking an unrelated one.
+  const selectedId = activeId
+    ? sections.find(section => section.id === activeId)?.id
+    : sections[0]?.id;
 
   return (
     <nav
