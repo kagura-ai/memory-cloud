@@ -584,6 +584,8 @@ Background consolidation of memories (decay, edge pruning, theme summarization).
 
 Since #2088 a Memory Analysis run also writes a `sleep_reports` row (`source='analysis'`) carrying its spend, so through v0.137.0 `get_sleep_history` returned those rows mixed in with the Sleep runs. Since #2219 the tool lists Sleep runs only unless you pass `source="analysis"` or `source="all"`.
 
+Each `get_sleep_history` row and the `report` of `get_sleep_report` carry `budget_limited_phases` (#3019): `{phase: "skipped" | "cut"}` in run order, `{}` when no phase was limited. `skipped`: the phase did not run because its budget was used up at entry; `cut`: it stopped with work left. Every phase that ran has `candidates_considered`, `no_action_reasons` (a count per reason it did nothing) and `budget_cut` in its result's `details`, and `merge_retention_result` holds the `forget_retention` and `measurement_retention` results under those keys.
+
 ## Usage (1)
 
 | Tool | Description | Required Role |

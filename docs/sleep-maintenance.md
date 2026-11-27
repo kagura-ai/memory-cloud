@@ -110,6 +110,10 @@ Re-embeds and upserts memories whose text or metadata was changed by earlier pha
 
 Finalizes the `SleepReport` row with aggregated per-phase results (edges created, memories merged, promoted, flagged), cost counters (LLM calls, tokens, embedding calls), and overall status. Per-action audit entries written by earlier phases to `sleep_actions` become the rollback log.
 
+- **Why a phase did nothing** (#3019): every phase that ran carries three keys in its `details`, early exits included: `candidates_considered` (what it looked at: memories for edge discovery, dedup, importance re-evaluation and consolidation; candidate edges for the related index; tombstones or observations past the cutoff for the retention phases), `no_action_reasons` (a count per reason for doing nothing, zero counts left out, so `{}` means nothing was left undone; the units differ per reason, so the counts do not add up to the candidates) and `budget_cut` (the phase stopped because its budget ran out, with work left). A skipped or failed phase has no `details`. Existing keys and `message` strings are unchanged; consolidation's `llm_pass_cut_for_budget` equals its `budget_cut`.
+- **Where each result is stored**: `edge_discovery_result` (with the related index under its `related_index` key), `dedup_result`, `merge_retention_result` (with the `forget_retention` and `measurement_retention` results under those keys), `importance_result`, `consolidation_result`, `reindex_result`.
+- **Budget-limited phases** (#3019): the run summary carries `budget_limited_phases`, `{phase: "skipped" | "cut"}` in run order (`{}` when none): `skipped` when the phase was not run because its budget was used up at entry (`skip_reason="budget_exhausted"`), `cut` when it ran and stopped with work left. It is derived from the stored results when a report is read (a report written before this key existed shows consolidation's `llm_pass_cut_for_budget`), and is returned by the REST report list and detail, by `get_sleep_history` rows and `get_sleep_report`, and marked in the web report list and detail.
+
 ## `sleep_mode` Configuration
 
 Each context has a `sleep_mode` column (`Context.sleep_mode`, default `"skip"`) that determines which phases run for that context. New contexts are silent by default — Sleep Maintenance is opt-in (#558).
@@ -185,7 +189,7 @@ Every phase writes individual change records to `sleep_actions` during execution
 
 | Tool                  | Purpose                                                                  |
 |-----------------------|--------------------------------------------------------------------------|
-| `get_sleep_history`   | List recent sleep runs for a context with status, timing, and counters. `source` picks Sleep runs (`sleep`, the default), Memory Analysis spend rows (`analysis`) or both (`all`) (#2219). |
+| `get_sleep_history`   | List recent sleep runs for a context with status, timing, counters and `budget_limited_phases` (#3019). `source` picks Sleep runs (`sleep`, the default), Memory Analysis spend rows (`analysis`) or both (`all`) (#2219). |
 | `get_sleep_report`    | Fetch a single report with per-phase results and the full action audit log. |
 | `rollback_sleep_run`  | Reverse every recorded action of a run in reverse order.                 |
 

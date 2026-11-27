@@ -25,6 +25,7 @@ from mcp_server.tools._helpers import (
     _success_response,
 )
 from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE
+from models.sleep import budget_limited_phases
 from services.sleep.merge_retention import restore_sleep_tombstone_stmt
 from services.sleep.related_index import undo_related_index
 from utils.logger import get_logger
@@ -92,6 +93,8 @@ def _report_to_summary(report: Any) -> dict[str, Any]:
         "llm_tokens_used": report.llm_tokens_used,
         # #1183: magnitude behind a 'degraded'/'failed' grading.
         "llm_call_failures": report.llm_call_failures,
+        # #3019: {phase: "skipped" | "cut"}, from the stored phase results.
+        "budget_limited_phases": budget_limited_phases(report),
     }
 
 

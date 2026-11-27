@@ -2612,6 +2612,8 @@ The handler writes an `audit_logs` row in the report's commit: action `sleep_run
 
 Neither route answers, logs or audits memory text, tags, the target user's e-mail or name, or a context's name; the audit row names the caller, as stated above. The own-account undo writes no `audit_logs` row.
 
+Each report, in the list rows and in the detail's `report`, carries `budget_limited_phases` (#3019): `{phase: "skipped" | "cut"}` in run order, `{}` when no phase was limited. `skipped` means the phase did not run because its budget was used up at entry, `cut` that it stopped with work left; the map is derived from the stored phase results. Every phase that ran has `candidates_considered`, `no_action_reasons` and `budget_cut` in its result's `details`, and the detail's `merge_retention_result` holds the `forget_retention` and `measurement_retention` results under those keys.
+
 Each report, in the list rows and in the detail's `report`, carries `workspace_name` next to `workspace_id` (#2844): the workspace's name while it is live, `null` for a soft-deleted or missing workspace and for a report without a workspace id. One query resolves the names of a response; nothing else about the workspace (owner, members, plan) is answered. The workspace-scoped routes (`GET /api/v1/workspaces/{workspace_id}/sleep-reports` and its detail) share the model and fill it the same way.
 
 See [Sleep Maintenance](sleep-maintenance.md) for the full Sleep cycle design, `sleep_mode`, and rollback semantics.

@@ -21,11 +21,11 @@ Issue #179: Sleep Report admin UI (split from #104).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,6 +87,17 @@ class SleepReportSummary(TZAwareBaseModel):
     # behind a 'degraded'/'failed' grading, exposed top-level so dashboards
     # don't have to parse per-phase JSON blobs.
     llm_call_failures: int = 0
+    # #3019: the phases this run's budget limited, in run order: 'skipped'
+    # (not run, the budget was used up at entry) or 'cut' (stopped with work
+    # left). Derived from the stored phase results (``SleepReport``'s
+    # property); {} when none was limited.
+    budget_limited_phases: dict[str, Literal["skipped", "cut"]] = Field(default_factory=dict)
+
+    @field_validator("budget_limited_phases", mode="before")
+    @classmethod
+    def _budget_limited_phases_map(cls, value: Any) -> Any:
+        """Anything that is not a dict (a row without results) reads as {}."""
+        return value if isinstance(value, dict) else {}
 
 
 class SleepReportDetail(SleepReportSummary):

@@ -1415,6 +1415,7 @@ Notes:
 - `memories_flagged: int` — required
 - `llm_calls_made: int` — required
 - `llm_tokens_used: int` — required
+- `budget_limited_phases: dict[str, Literal["skipped", "cut"]]` — optional, default `{}` (#3019: the phases the run's budget skipped or cut, derived from the stored phase results)
 
 ### SleepActionItem (TZAwareBaseModel, L79)
 > Sleep action audit log entry.
