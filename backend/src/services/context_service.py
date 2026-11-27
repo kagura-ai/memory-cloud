@@ -1398,6 +1398,19 @@ class ContextService:
                 # on the model.
                 access_count=0,
                 reference_count=0,
+                # #3022: the delivery history travels with the copy, which keeps
+                # the source's created_at: first_delivered_at, last_delivered_at
+                # and last_used_at. Without them every copy past the
+                # never-delivered age threshold would be listed as never
+                # delivered, however often the source row was delivered (most
+                # use signals predate delivery recording, hence last_used_at).
+                # What does NOT travel: neural_memory_edges. The merge copies
+                # no edge, so the copy of a memory that superseded an older one
+                # has no `supersedes` edge in the target and can be listed as
+                # never delivered there (docs/mcp-tools.md, the list topic).
+                first_delivered_at=mem.first_delivered_at,
+                last_delivered_at=mem.last_delivered_at,
+                last_used_at=mem.last_used_at,
                 client=mem.client,
                 client_version=mem.client_version,
                 source=mem.source,

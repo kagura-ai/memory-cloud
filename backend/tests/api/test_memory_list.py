@@ -827,3 +827,121 @@ async def test_count_and_page_queries_carry_identical_filters():
         "memories.type !=",
     ):
         assert fragment in page_where, f"expected filter missing: {fragment}\n{page_where}"
+
+
+# --- #3022: never_delivered -------------------------------------------------
+
+
+def _pg_where(mock_db, call_index: int) -> str:
+    from sqlalchemy.dialects import postgresql
+
+    stmt = mock_db.execute.call_args_list[call_index].args[0]
+    return str(
+        stmt.whereclause.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+
+
+async def _list_in_context(*, private: bool, **kwargs):
+    from datetime import datetime as _dt
+
+    mock_db = _db_with_rows(total=1, rows=[_mock_memory_row()])
+    mock_context = MagicMock()
+    mock_context.is_private = private
+    perm = MagicMock()
+    perm.resolve_context_for_workspace_read = AsyncMock(return_value=mock_context)
+    frozen = _dt(2026, 11, 27, 9, 0, 0)
+    with (
+        patch("api.routes.memory.PermissionService", return_value=perm),
+        patch("services.never_delivered.utcnow", return_value=frozen),
+        patch("services.never_delivered.exempt_tags", return_value=frozenset({"status:open"})),
+    ):
+        response = await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=uuid4(),
+            q=None,
+            tags=None,
+            limit=50,
+            offset=0,
+            **kwargs,
+        )
+    return response, mock_db
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private", [True, False])
+async def test_never_delivered_adds_the_predicate_to_both_statements(private):
+    _, mock_db = await _list_in_context(private=private, never_delivered=True)
+    count_where = _pg_where(mock_db, 0)
+    page_where = _pg_where(mock_db, 1)
+    assert count_where == page_where
+    for fragment in (
+        "memories.first_delivered_at IS NULL",
+        "memories.access_count = 0",
+        "memories.user_id = 'test_user_123'",
+        "(memories.details -> 'tool_trigger') IS NULL",
+        "contexts.is_public IS true",
+        "neural_memory_edges.edge_type = 'supersedes'",
+    ):
+        assert fragment in page_where, fragment
+
+
+@pytest.mark.asyncio
+async def test_never_delivered_omitted_adds_nothing():
+    # Called directly, the omitted parameter arrives as its Query(...) default
+    # object, which is truthy: the route tests the value with ``is True``.
+    _, mock_db = await _list_in_context(private=False)
+    for call_index in (0, 1):
+        sql = _pg_where(mock_db, call_index)
+        assert "first_delivered_at" not in sql
+        assert "user_id" not in sql
+
+
+@pytest.mark.asyncio
+async def test_never_delivered_false_adds_nothing():
+    _, mock_db = await _list_in_context(private=False, never_delivered=False)
+    assert "first_delivered_at" not in _pg_where(mock_db, 1)
+
+
+@pytest.mark.asyncio
+async def test_never_delivered_needs_a_context():
+    from utils.exceptions import ValidationError
+
+    mock_db = AsyncMock()
+    with pytest.raises(ValidationError) as exc:
+        await list_memories(
+            user=MOCK_USER,
+            db=mock_db,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=None,
+            limit=50,
+            offset=0,
+            never_delivered=True,
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.message == "never_delivered needs context_id"
+    mock_db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_context_branch_scopes_with_listing_scope():
+    """The context branch builds its scope with the shared ``listing_scope``."""
+    from unittest.mock import patch as _patch
+
+    from api.routes import memory as route_module
+    from services.memory_listing import listing_scope as real_scope
+
+    spy = MagicMock(side_effect=real_scope)
+    with _patch.object(route_module, "listing_scope", spy):
+        await _list_in_context(private=True)
+    assert spy.call_count == 1
+    kwargs = spy.call_args.kwargs
+    assert kwargs["owner_user_id"] == "test_user_123"
+    assert kwargs["binding"] is None

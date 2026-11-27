@@ -135,7 +135,7 @@ async def handle_list(
         return _error_response("validation_error", e.message, received=e.received)
     try:
         # Pure: a bad filter is refused before any database round trip.
-        predicates = compile_memory_filters(args.get("filters"))
+        predicates = compile_memory_filters(args.get("filters"), viewer_user_id=user_id)
     except ValueError as e:
         return _error_response("validation_error", str(e))
     start = time.time()

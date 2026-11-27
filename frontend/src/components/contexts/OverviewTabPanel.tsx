@@ -51,6 +51,7 @@ import {
   type PublicAPIStatsResponse,
 } from "@/lib/api/workspaces";
 import { PublicAPIStats } from "@/components/dashboard/PublicAPIStats";
+import { NeverDeliveredCard } from "@/components/contexts/NeverDeliveredCard";
 import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
@@ -79,6 +80,8 @@ export function OverviewTabPanel({
   const [publicAPIStats, setPublicAPIStats] =
     useState<PublicAPIStatsResponse | null>(null);
   const [timelineDays, setTimelineDays] = useState<7 | 30>(7);
+  // #3022: bumped by Refresh so the never-delivered card reads its count again.
+  const [refreshCount, setRefreshCount] = useState(0);
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
   // Issue #398: User Activity is admin/owner only. Backend 403's the
   // /user-activity endpoint for non-admins; gating here both hides the
@@ -143,6 +146,7 @@ export function OverviewTabPanel({
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
+    setRefreshCount((n) => n + 1);
     try {
       await overviewRef.current?.refresh();
       await fetchUsageStats();
@@ -263,6 +267,14 @@ export function OverviewTabPanel({
 
       {/* Memory Health & Neural Activity */}
       <RichMemoryOverview ref={overviewRef} contextId={contextId} />
+
+      {/* #3022: the Memories tab is gated by the same role check as
+          canSeeUserActivity (workspace Admin or above, page.tsx). */}
+      <NeverDeliveredCard
+        contextId={contextId}
+        canOpenMemories={canSeeUserActivity}
+        refreshKey={refreshCount}
+      />
 
       {/* User Activity Table — Issue #398: admin/owner only. */}
       {canSeeUserActivity && (

@@ -302,7 +302,7 @@ curl -X PUT https://kagura.example.com/api/v1/admin/neural-config/sleep_importan
 
 With edge discovery off, a context in `edges_only` mode runs no phase but Reindex and Report.
 
-`SLEEP_ARCHIVE_EXEMPT_TAGS` (#2584) is env-only, not a Neural Config field: the tags that keep a memory off the losing side of a merge (the name predates #3021, when consolidation archived too). A JSON array (`["status:open"]`) or a comma-separated list (`status:open,status:blocked`); unset means `status:open`, an empty value (`""` or `[]`) turns the exemption off, and a JSON value that does not parse to strings keeps the default and logs `sleep_archive_exempt_tags_invalid`.
+`SLEEP_ARCHIVE_EXEMPT_TAGS` (#2584) is env-only, not a Neural Config field: the tags that keep a memory off the losing side of a merge (the name predates #3021, when consolidation archived too). A JSON array (`["status:open"]`) or a comma-separated list (`status:open,status:blocked`); unset means `status:open`, an empty value (`""` or `[]`) turns the exemption off, and a JSON value that does not parse to strings keeps the default and logs `sleep_archive_exempt_tags_invalid`. The same tags keep a memory out of the never-delivered list and count (#3022: the MCP `list` filter `never_delivered`, `GET /api/v1/contexts/{context_id}/never-delivered-count` and the context Overview card). The API service reads the variable from its own environment and the Sleep worker from its own, so set it for both; with it set on the worker only, the two use different tags.
 
 ## Related
 

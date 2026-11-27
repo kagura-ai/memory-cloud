@@ -12,16 +12,17 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const mockPost = vi.fn();
 const mockPatch = vi.fn();
+const mockGet = vi.fn();
 
 vi.mock("./base", () => ({
   apiClient: {
-    get: vi.fn(),
+    get: (...args: unknown[]) => mockGet(...args),
     post: (...args: unknown[]) => mockPost(...args),
     patch: (...args: unknown[]) => mockPatch(...args),
   },
 }));
 
-import { rememberMemory, recallMemories, updateMemoryById } from "./memory";
+import { getMemories, rememberMemory, recallMemories, updateMemoryById } from "./memory";
 
 const REMEMBER = "/api/v1/memory/remember";
 const RECALL = "/api/v1/memory/recall";
@@ -160,5 +161,26 @@ describe("updateMemoryById", () => {
       accept_supersede_candidate: true,
     });
     expect(res.supersede_candidate).toBeNull();
+  });
+});
+
+describe("getMemories never_delivered (#3022)", () => {
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockGet.mockResolvedValue({ memories: [], total: 0, has_more: false });
+  });
+
+  it("sends never_delivered=true only when asked", async () => {
+    await getMemories({ context_id: "ctx-1", neverDelivered: true });
+    const url = String(mockGet.mock.calls[0][0]);
+    const params = new URLSearchParams(url.split("?")[1]);
+    expect(params.get("never_delivered")).toBe("true");
+    expect(params.get("context_id")).toBe("ctx-1");
+  });
+
+  it.each([undefined, false])("omits the parameter when %s", async (value) => {
+    await getMemories({ context_id: "ctx-1", neverDelivered: value });
+    const url = String(mockGet.mock.calls[0][0]);
+    expect(new URLSearchParams(url.split("?")[1]).has("never_delivered")).toBe(false);
   });
 });
