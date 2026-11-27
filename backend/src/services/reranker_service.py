@@ -1416,7 +1416,8 @@ class RerankerService:
 
         Args:
             query: Search query
-            candidates: Candidate results with 'payload' containing 'summary'
+            candidates: Candidate results with a 'payload'; the text scored
+                for each is ``rerank_document`` (no payload key is required).
             user_id: User ID
             k: Number of top results to return
             context_id: Optional context ID (Issue #82)

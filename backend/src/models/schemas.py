@@ -1051,6 +1051,14 @@ class ReferenceResponse(TZAwareBaseModel):
     # the MCP reference carries them with event_weekday, REST stays as it was.
     event_start: str | None = Field(default=None, exclude=True)
     event_end: str | None = Field(default=None, exclude=True)
+    # #3033: why the current version is not searchable yet, from the row's
+    # embedding state (None once it is indexed, and on a historical read):
+    # 'indexing' (waiting or in progress), 'retrying' (failed, the sweep
+    # retries it), 'failed' (nothing retries it on its own). The MCP reference
+    # carries it as ``search_index``; REST stays as it was.
+    index_state: Literal["indexing", "retrying", "failed"] | None = Field(
+        default=None, exclude=True
+    )
     # #2043: the version read here — the expected_version of an edit based on it.
     version: int
     # #2043: true when ``version`` is an earlier version (reference with

@@ -208,6 +208,12 @@ class PhaseResult:
     # inside the try block, after the response parsed; a failed call's spent
     # tokens are added with ``count_call=False``, #2038).
     llm_call_failures: int = 0
+    # #3036: items of a phase that failed while the phase itself succeeded
+    # (the reindex's failed memories when some were reindexed), out of
+    # ``memories_processed``. Grades the run 'degraded' and leaves ``error``
+    # None (a phase with an error reads as failed); a phase whose every item
+    # failed reports success=False.
+    operation_failures: int = 0
     # #471: cost-grade fields.
     llm_breakdown: list[LLMCallBreakdown] = field(default_factory=list)
     embedding_provider: str | None = None
@@ -457,15 +463,26 @@ class SleepReporter:
         # unmerged near-dup pairs leak into consolidation. A hard phase
         # failure is at least 'degraded'; it never upgrades a 'failed' run.
         failed_phases = [r.phase_name for r in phase_results if not r.success]
+        # #3036: a phase that succeeded with some failed items (the reindex's
+        # memories) is 'degraded' too, its count in the message.
+        partial_phases = [r for r in phase_results if r.success and r.operation_failures > 0]
         if judge_failures > 0 and judge_successes == 0:
             report.status = "failed"
             report.error_message = (
                 f"llm_judge_total_failure: {judge_failures} judge call(s) attempted, 0 succeeded"
             )
-        elif judge_failures > 0 or failed_phases:
+        elif judge_failures > 0 or failed_phases or partial_phases:
             report.status = "degraded"
-            if failed_phases and not report.error_message:
-                report.error_message = f"phase_failure: {', '.join(failed_phases)}"
+            causes = []
+            if failed_phases:
+                causes.append(f"phase_failure: {', '.join(failed_phases)}")
+            causes.extend(
+                f"{r.phase_name}_partial_failure: {r.operation_failures} of "
+                f"{r.memories_processed} {r.phase_name} operations failed"
+                for r in partial_phases
+            )
+            if causes and not report.error_message:
+                report.error_message = "; ".join(causes)
         else:
             report.status = "completed"
         report.llm_call_failures = judge_failures
