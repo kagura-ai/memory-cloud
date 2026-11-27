@@ -356,7 +356,9 @@ async def test_real_handlers_expose_the_returned_rows_doc_ids(fake_db, monkeypat
     reference = await tools.public_reference(endpoint, {"memory_id": str(rows[1].id)})
     assert reference.doc_ids == ("d2",)
 
-    seed = SimpleNamespace(id=uuid4(), resource_doc_id="seed-doc", summary="seed")
+    seed = SimpleNamespace(
+        id=uuid4(), resource_doc_id="seed-doc", summary="seed", feed_content=None
+    )
     fake_db.queue.append([seed])
 
     async def neighbours(db, ep, frontier, exclude, limit):

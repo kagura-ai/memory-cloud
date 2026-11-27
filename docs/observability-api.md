@@ -201,9 +201,10 @@ one resource's ingestion events, oldest first:
 
 → `{"resource_id", "documents": {doc_key: {"title", "source_url"} | null}, "publication_serving"}`.
 Resolves the opaque `doc_key`s of usage and ingestion events to what the
-public endpoint already shows: `title` (the document's summary, cut to 200
-characters, as anonymous `recall` returns it) and `source_url` (only an
-http(s) URL, else `null`). A key resolves only while the resource's
+public endpoint already shows: `title` (what anonymous `recall` returns as
+the document's summary — for an unedited feed record its title or question —
+cut to 200 characters) and `source_url` (the feed record's URL, otherwise only
+an http(s) source URL, else `null`). A key resolves only while the resource's
 publication **serves right now**; otherwise every key is `null` and
 `publication_serving` is `false` — unpublished, operator switch off, context no
 longer public. Unknown keys, keys of another resource, deleted documents, and

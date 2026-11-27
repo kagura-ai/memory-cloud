@@ -26,7 +26,12 @@ from mcp.types import TextContent
 from sqlalchemy import event, func, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mcp_server.public.feed_record import public_source_url
+from mcp_server.public.feed_record import (
+    feed_content_column,
+    feed_record_of,
+    parse_feed_record,
+    public_source_url,
+)
 from mcp_server.public.limits import (
     PUBLIC_DEFAULT_EXPLORE_LIMIT,
     PUBLIC_DEFAULT_K,
@@ -49,6 +54,8 @@ from mcp_server.tools._helpers import _dumps, _error_response
 from mcp_server.tools.memory import _reference_page, _ReferenceOffsetError
 from models.llm_call_log import LLMCallLog
 from models.memory import Memory, NeuralMemoryEdge
+from models.schemas import SUMMARY_MAX_LENGTH
+from services.guardrail_digest import cut_summary
 from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 from utils.response_budget import fit_items
@@ -186,19 +193,32 @@ def _max_chars_arg(args: dict[str, Any]) -> int:
 _source_url = public_source_url
 
 
+def _feed_summary(feed_content: str | None, summary: str) -> str:
+    """The record's cut label when ``feed_content`` is a feed record, else ``summary``."""
+    record = parse_feed_record(feed_content)
+    return cut_summary(record.label, SUMMARY_MAX_LENGTH) if record is not None else summary
+
+
 def _project(memory: Memory, score: float | None = None) -> dict[str, Any]:
-    """The public fields of one memory (recall item with ``score`` / reference head)."""
+    """The public fields of one memory (recall item with ``score`` / reference head).
+
+    For an unedited feed record (``feed_record``) ``summary``, ``type`` and
+    ``source_url`` are the record's title or question, kind and URL (#3032).
+    """
+    record = feed_record_of(memory)
     item: dict[str, Any] = {
         "memory_id": str(memory.id),
         "doc_id": memory.resource_doc_id,
-        "summary": memory.summary,
+        "summary": memory.summary
+        if record is None
+        else cut_summary(record.label, SUMMARY_MAX_LENGTH),
     }
     if score is not None:
         item["score"] = round(score, 4)
-    item["type"] = memory.type
+    item["type"] = memory.type if record is None else record.kind
     if memory.tags:
         item["tags"] = list(memory.tags)
-    source_url = _source_url(memory.source_uri)
+    source_url = (record.url if record is not None else None) or _source_url(memory.source_uri)
     if source_url is not None:
         item["source_url"] = source_url
     item["created_at"] = to_utc_iso(memory.created_at)
@@ -392,14 +412,25 @@ async def _neighbours(
         .subquery()
     )
     stmt = (
-        select(Memory.id, Memory.resource_doc_id, Memory.summary, ranked.c.edge_type)
+        select(
+            Memory.id,
+            Memory.resource_doc_id,
+            Memory.summary,
+            ranked.c.edge_type,
+            feed_content_column(),
+        )
         .join(ranked, ranked.c.nid == Memory.id)
         .where(ranked.c.rn == 1, public_rows(endpoint))
         .order_by(ranked.c.weight.desc(), Memory.id)
         .limit(limit + 1)
     )
     return [
-        _Neighbour(row.id, row.resource_doc_id, row.summary, str(row.edge_type))
+        _Neighbour(
+            row.id,
+            row.resource_doc_id,
+            _feed_summary(row.feed_content, row.summary),
+            str(row.edge_type),
+        )
         for row in (await db.execute(stmt)).all()
     ]
 
@@ -417,9 +448,9 @@ async def public_explore(endpoint: ServingEndpoint, args: dict[str, Any]) -> Pub
     async with _read_session() as db:
         seed = (
             await db.execute(
-                select(Memory.id, Memory.resource_doc_id, Memory.summary).where(
-                    Memory.id == memory_id, public_rows(endpoint)
-                )
+                select(
+                    Memory.id, Memory.resource_doc_id, Memory.summary, feed_content_column()
+                ).where(Memory.id == memory_id, public_rows(endpoint))
             )
         ).first()
         if seed is None:
@@ -440,7 +471,7 @@ async def public_explore(endpoint: ServingEndpoint, args: dict[str, Any]) -> Pub
         "seed": {
             "memory_id": str(seed.id),
             "doc_id": seed.resource_doc_id,
-            "summary": seed.summary,
+            "summary": _feed_summary(seed.feed_content, seed.summary),
         },
         "related": [
             {
