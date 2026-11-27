@@ -238,7 +238,10 @@ def rerank_document(candidate: dict[str, Any]) -> str:
     payload = candidate.get("payload") or {}
     summary = payload.get("summary")
     if isinstance(summary, str) and summary:
-        doc = f"{summary} {payload.get('context_summary', '')}"
+        # The memory point always carries the key; its value is None when the
+        # memory has no context summary.
+        context_summary = payload.get("context_summary")
+        doc = f"{summary} {context_summary if isinstance(context_summary, str) else ''}"
     else:
         content = payload.get("content")
         context_summary = payload.get("context_summary")

@@ -155,6 +155,12 @@ class TestRerankDocument:
         doc = rerank_document({"payload": {"summary": "S", "context_summary": "C"}})
         assert doc == "S C"
 
+    def test_a_null_context_summary_reads_as_missing(self):
+        # The memory point writes the key with None when there is no context summary.
+        with_null = rerank_document({"payload": {"summary": "S", "context_summary": None}})
+        assert with_null == rerank_document({"payload": {"summary": "S"}})
+        assert "None" not in with_null
+
     def test_missing_context_summary(self):
         assert rerank_document({"payload": {"summary": "S"}}) == "S "
 
