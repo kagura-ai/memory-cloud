@@ -291,17 +291,28 @@ batch every ten minutes. Each target gets up to three minutes per tick
 stops starting targets after three and a half minutes
 (`DRAIN_TICK_BUDGET_SECONDS`), so other queued targets keep their turn; a
 target that could not start stays queued for the next tick. These are
-constants, not settings.
+constants, not settings. A batch starts only while one as long as the
+tick's longest batch so far still ends inside both budgets, so slow batches
+(slow embeddings) shorten a drain rather than run the tick into the next one.
 
 A target whose drain used its time budget with events still pending is due at
 the next tick, and that run is not refused by the per-target limits (10
 minutes apart, 6 runs an hour): a drain counts as one run, and the exemption
 holds only while events remain. A target with nothing pending is limited as
-before. During a drain each batch holds the target's locks until its commit
+before. The hourly cap counts the tick that starts a drain; a continuation
+moves only the last-run time, so the 10-minute interval counts from the
+drain's end. The stored `applied_upserts`, `applied_deletes` and `errors` of
+`indexer-status` add up the batches of that tick. During a drain each batch holds the target's locks until its commit
 and releases them before the next one, with a one-second pause in between
 (`DRAIN_YIELD_SECONDS`), so a status poll or feed transition waiting on them
 gets its turn; a batch that meets a lock such a request holds stops there
 (see below).
+
+A process stop during a drain (a deploy, a restart) leaves the target
+`running`. Its last batch commit refreshed `last_run_at`, so once that is older
+than 30 minutes (`STALE_RUNNING_AFTER` in `services/sync_feed_index.py`) the
+job queues the target again at its next tick and the rest of the backlog is
+applied; that holds for a resource that is not a sync target too.
 
 What ends a drain before its backlog is applied, with the same skip reason
 and retry as a single batch:
@@ -327,7 +338,10 @@ Progress is readable at two places. The worker's run status carries
 (its outbox receipt) and `indexed` how many of them the indexer's cursor has
 passed. They are equal once the cursor passed the run, which `complete`
 requires; an event the indexer recorded as failed is passed too, so
-`index_status` stays the verdict. A run without index events reads `0` of `0`.
+`index_status` stays the verdict. A run without index events (not committed,
+or a commit that changed nothing) reads `0` of `0`, and its `index_status` can
+still be `pending` while the feed's earlier events wait: `indexed == total` is
+not a completion signal, `index_status` is.
 The owner's `GET /api/v1/resources/{resource_id}/indexer-status` carries
 `pending_events`: the resource's events after the target's cursor (all of
 them before the first run), `0` once the indexer has caught up.
