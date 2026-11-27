@@ -656,6 +656,68 @@ describe("MemoriesTabPanel — never-delivered filter (#3022)", () => {
     expect(screen.queryByText("noResultsTitle")).toBeNull();
   });
 
+  it("the empty state's action removes the filter", async () => {
+    mockSearchParams.current = new URLSearchParams("tab=memories&never_delivered=1");
+    mockGetMemories.mockResolvedValue({ memories: [], total: 0, has_more: false });
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "emptyAction" }));
+    const url = mockReplace.mock.calls.at(-1)?.[0] as string;
+    const params = new URLSearchParams(url.split("?")[1]);
+    expect(params.has("never_delivered")).toBe(false);
+    expect(params.get("tab")).toBe("memories");
+  });
+
+  it("an emptied page past the first steps back one page when the dialog closes", async () => {
+    mockSearchParams.current = new URLSearchParams("never_delivered=1");
+    mockGetMemories.mockResolvedValue({
+      memories: [
+        {
+          id: TARGET_ID,
+          summary: "Some row",
+          type: "note",
+          scope: "working",
+          importance: 0.4,
+          created_at: "2026-04-25T00:00:00Z",
+          updated_at: "2026-04-25T00:00:00Z",
+        },
+      ],
+      total: 51,
+      has_more: true,
+    });
+    mockReferenceMemory.mockResolvedValue(makeRef());
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "paginationNext" }));
+    await waitFor(() => expect(lastFetch()?.offset).toBe(50));
+    fireEvent.click(await screen.findByRole("button", { name: "actionView" }));
+    await screen.findByText("Hydrated body");
+    // The opened memory was the only row of page 2: the refetch on close
+    // comes back empty, so the panel steps back to page 1.
+    mockGetMemories.mockResolvedValueOnce({ memories: [], total: 50, has_more: false });
+    const before = mockGetMemories.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "close" }));
+    await waitFor(() => expect(mockGetMemories.mock.calls.length).toBe(before + 2));
+    expect(mockGetMemories.mock.calls[before][0]).toMatchObject({ offset: 50 });
+    expect(lastFetch()).toMatchObject({ offset: 0, neverDelivered: true });
+  });
+
+  it("an emptied first page stays on page 1 when the dialog closes", async () => {
+    mockSearchParams.current = new URLSearchParams(
+      `never_delivered=1&memoryId=${TARGET_ID}`,
+    );
+    mockReferenceMemory.mockResolvedValue(makeRef());
+    render(<MemoriesTabPanel contextId="ctx-1" />);
+    await screen.findByText("Hydrated body");
+    mockGetMemories.mockResolvedValue({ memories: [], total: 0, has_more: false });
+    const before = mockGetMemories.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "close" }));
+    await waitFor(() => expect(mockGetMemories.mock.calls.length).toBe(before + 1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockGetMemories.mock.calls.length).toBe(before + 1);
+    expect(lastFetch()?.offset).toBe(0);
+  });
+
   it("recall mode ignores the param and hides the chip", async () => {
     mockSearchParams.current = new URLSearchParams("never_delivered=1");
     render(<MemoriesTabPanel contextId="ctx-1" />);

@@ -62,6 +62,9 @@ import { useMemoryDetailDialog } from "@/hooks/useMemoryDetailDialog";
 import { useMemoryIdParam } from "@/hooks/useMemoryIdParam";
 import { getMemories, recallMemories } from "@/lib/api/memory";
 import { TagCloud } from "@/components/contexts/TagCloud";
+// #3022: one name for the URL parameter, shared with the Overview card's
+// Review link; only the value "1" turns the filter on.
+import { NEVER_DELIVERED_PARAM } from "@/components/contexts/NeverDeliveredCard";
 import { RecallResultsList } from "@/components/memories/RecallResultsList";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
@@ -84,8 +87,6 @@ const SEARCH_PARAM = "q";
 // #830: repeatable param for the multi-tag AND drill-down (?tags=a&tags=b).
 // Supersedes #618's single `?tag=`.
 const TAGS_PARAM = "tags";
-// #3022: only the value "1" turns the never-delivered filter on.
-const NEVER_DELIVERED_PARAM = "never_delivered";
 const DEBOUNCE_MS = 300;
 // The API returns top-k, not offset pages. Increasing k replaces the ranking.
 const RECALL_K = 20;
@@ -861,6 +862,8 @@ export function MemoriesTabPanel({ contextId, recallOnly = false, readOnly = fal
           icon={FileText}
           title={tNever("emptyTitle")}
           description={tNever("emptyDesc")}
+          actionLabel={tNever("emptyAction")}
+          onAction={removeNeverDelivered}
         />
       </div>
     );

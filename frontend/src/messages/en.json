@@ -4170,7 +4170,8 @@
     "chipRemove": "Remove the never-delivered filter",
     "chipHint": "Your own memories past the age threshold whose content was never returned by a search or opened. Opening one takes it off this list. Delete by filter is not available in this view.",
     "emptyTitle": "No never-delivered memories",
-    "emptyDesc": "None of your memories in this context is past the age threshold without having been delivered. Remove the filter to see every memory."
+    "emptyDesc": "None of your memories in this context is past the age threshold without having been delivered. Remove the filter to see every memory.",
+    "emptyAction": "Show every memory"
   },
   "contextSettings": {
     "title": "{contextName} — Settings",
