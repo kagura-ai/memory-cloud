@@ -44,7 +44,7 @@ Write paths (`remember`, chunking, edge creation) optimize for ingest speed. Ove
                       └───────────────┘
 ```
 
-Phases are independently recoverable. If phase N fails, phases N+1..6 still execute, the error is recorded in the report, and the run is marked `completed` with the failing phase's error captured — fatal exceptions mark the run `failed`. Each phase has its own budget (`SleepBudget`, #3019): the full memory allowance and a share of the run's LLM calls, so one phase cannot starve another (see "Budget enforcement" below).
+Phases are independently recoverable. If phase N fails, phases N+1..6 still execute, the error is recorded in the report, and the run is marked `degraded` with the failing phase named — fatal exceptions mark the run `failed` (see "Report status values" below). Each phase has its own budget (`SleepBudget`, #3019): the full memory allowance and a share of the run's LLM calls, so one phase cannot starve another (see "Budget enforcement" below).
 
 ## The Six Phases
 
@@ -105,6 +105,7 @@ Re-embeds and upserts memories whose text or metadata was changed by earlier pha
 - **Algorithm**: collect `changed_memory_ids` from phases 1–4 → batch fetch from PostgreSQL → regenerate embeddings via `EmbeddingService` → upsert Qdrant vectors and payloads.
 - **LLM**: no.
 - **Always runs** when there are changes, regardless of which earlier phases ran.
+- **Failures** (#3036): a memory that cannot be re-indexed is counted under `failed` (its id in `failed_ids`) and the others go on. When some failed, the run is `degraded` with `reindex_partial_failure: N of M reindex operations failed`; when all failed, the phase fails and the run is `degraded` with `phase_failure: reindex`. A failed memory is re-indexed by the next run that changes it.
 
 ### Phase 6 — Report
 
@@ -214,8 +215,12 @@ All of these require `Depends(require_admin)`. The two own-account routes refuse
 ### Report status values
 
 ```
-running  →  completed | failed | cancelled | rolled_back
+running  →  completed | degraded | failed | cancelled | rolled_back
 ```
+
+- `completed` — every phase succeeded.
+- `degraded` — the run finished, but some judge-LLM calls failed (#1183), a phase failed (`phase_failure: <phase>`, #1229) or a phase succeeded with some failed items (`reindex_partial_failure: N of M reindex operations failed`, #3036). `error_message` names the cause; `rollback_sleep_run` accepts it.
+- `failed` — every judge-LLM call failed, the run stopped on a fatal error, or a rollback could not reverse every action (below).
 
 ### Rollback semantics
 

@@ -413,3 +413,80 @@ class TestPhaseFailureGrading:
         await reporter.complete_report(report, results)
 
         assert report.status == "completed"
+
+
+class TestPartialPhaseFailureGrading:
+    """#3036: a phase that succeeded with some failed items degrades the run."""
+
+    @pytest.fixture
+    def reporter(self):
+        db = AsyncMock()
+        db.add = MagicMock()
+        return SleepReporter(db)
+
+    @pytest.mark.asyncio
+    async def test_a_partly_failed_reindex_grades_degraded_with_the_count(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        report.error_message = None
+        results = [
+            PhaseResult(phase_name="importance_reeval"),
+            PhaseResult(
+                phase_name="reindex",
+                operation_failures=2,
+                error="2 of 5 reindex operations failed",
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "degraded"
+        assert report.error_message == ("reindex_partial_failure: 2 of 5 reindex operations failed")
+
+    @pytest.mark.asyncio
+    async def test_a_phase_failure_and_a_partial_one_are_both_named(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        report.error_message = None
+        results = [
+            PhaseResult(phase_name="dedup_merge", success=False, error="boom"),
+            PhaseResult(
+                phase_name="reindex", operation_failures=1, error="1 of 3 reindex operations failed"
+            ),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "degraded"
+        assert report.error_message == (
+            "phase_failure: dedup_merge; reindex_partial_failure: 1 of 3 reindex operations failed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_entirely_failed_reindex_keeps_the_phase_failure(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        report.error_message = None
+        results = [
+            PhaseResult(
+                phase_name="reindex", success=False, error="All 3 reindex operations failed"
+            )
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "degraded"
+        assert report.error_message == "phase_failure: reindex"
+
+    @pytest.mark.asyncio
+    async def test_a_partial_failure_never_upgrades_a_failed_run(self, reporter):
+        report = MagicMock()
+        report.id = uuid4()
+        results = [
+            PhaseResult(phase_name="edge_discovery", llm_calls_used=2, llm_call_failures=2),
+            PhaseResult(phase_name="reindex", operation_failures=1, error="1 of 2 failed"),
+        ]
+
+        await reporter.complete_report(report, results)
+
+        assert report.status == "failed"
