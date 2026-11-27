@@ -25,6 +25,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from services.memory_versions import (
+    TextEditEvent,
+    TextEditTimes,
+    last_text_edit_at,
+    text_edit_times,
+)
 from services.sleep.dedup_merge import (
     AUTO_MERGE_THRESHOLD,
     DedupMergePhase,
@@ -457,6 +463,9 @@ class TestTextEditTimes:
             ),
             # a rollback that names no block reverts every earlier edit
             ([(2, "api", 30, True, None), (3, "rollback", 20, True, None)], 180),
+            # one that names no block and changed no text left the text as it was
+            ([(2, "api", 30, True, None), (3, "rollback", 20, False, None)], 30),
+            ([(2, "api", 30, True, None), (3, "rollback", 20, False, "x")], 30),
             # an unreadable block reads as no block
             ([(2, "api", 30, True, None), (3, "rollback", 20, True, "x")], 180),
             # an erasure's details revert is never an edit of the text
@@ -482,6 +491,56 @@ class TestTextEditTimes:
         await phase._load_text_edit_times([a, self._b()])
 
         assert phase._recency_key(a) == now - timedelta(days=expected_days_ago)
+
+    @pytest.mark.parametrize(
+        ("revisions", "last_days_ago", "unsure_days_ago"),
+        [
+            # a block-less rollback that changed the text: which edit's text it
+            # put back is unknown, the latest it may be is the last one dropped
+            ([(2, "api", 30, True, None), (3, "rollback", 20, True, None)], None, 30),
+            (
+                [
+                    (2, "api", 40, True, None),
+                    (3, "api", 30, True, None),
+                    (4, "rollback", 20, True, None),
+                ],
+                None,
+                30,
+            ),
+            # an edit after it writes the text again: no doubt left
+            (
+                [
+                    (2, "api", 30, True, None),
+                    (3, "rollback", 20, True, None),
+                    (4, "api", 10, True, None),
+                ],
+                10,
+                None,
+            ),
+            # it changed no text: the edit stays, no doubt
+            ([(2, "api", 30, True, None), (3, "rollback", 20, False, None)], 30, None),
+            # a rollback that names its block leaves no doubt
+            ([(2, "api", 30, True, None), (3, "rollback", 20, True, 2)], None, None),
+            ([], None, None),
+        ],
+    )
+    def test_the_doubt_a_rollback_without_a_block_leaves(
+        self, revisions, last_days_ago, unsure_days_ago
+    ) -> None:
+        now = _now()
+        times = text_edit_times(
+            TextEditEvent(version=v, writer=w, at=now - timedelta(days=d), text=t, restored_from=r)
+            for v, w, d, t, r in revisions
+        )
+
+        def ago(days: int | None) -> datetime | None:
+            return None if days is None else now - timedelta(days=days)
+
+        assert times == TextEditTimes(last=ago(last_days_ago), unsure_until=ago(unsure_days_ago))
+        assert last_text_edit_at(
+            TextEditEvent(version=v, writer=w, at=now - timedelta(days=d), text=t, restored_from=r)
+            for v, w, d, t, r in revisions
+        ) == ago(last_days_ago)
 
     @pytest.mark.parametrize("version", [MagicMock(), True, None, "3"])
     async def test_a_version_that_is_not_an_int_reads_nothing(self, version) -> None:

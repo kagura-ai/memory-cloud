@@ -619,27 +619,59 @@ def last_text_edit_at(events: Iterable[TextEditEvent]) -> datetime | None:
     Walks one memory's ``updated`` events in version order. An API edit that
     changed the text is a candidate. A session rollback's restore of values
     removes the candidates it reverted (those at or above its
-    ``restored_from``; all of them when it names none) and is no edit time of
-    its own: it puts older text back. An erasure's details revert and an edit
-    of other fields are skipped.
+    ``restored_from``; all of them when it names none and changed the text)
+    and is no edit time of its own: it puts older text back. A rollback that
+    names no block and changed no text left the text as it was, so the
+    candidates stay. An erasure's details revert and an edit of other fields
+    are skipped.
 
     Returns:
         The time of the last candidate left, or None when, as far as the log
         tells, the text is the one the memory was created with.
     """
+    return text_edit_times(events).last
+
+
+@dataclass(frozen=True)
+class TextEditTimes:
+    """What the revision log tells about when a memory's text was written (#3019).
+
+    Attributes:
+        last: The time of the logged edit that wrote the text the memory holds
+            now (``last_text_edit_at``); None when no logged edit did.
+        unsure_until: Set when a session rollback that names no reverted block
+            changed the text after the last edit left in ``last``: it put back
+            the text of some earlier version, which may be any of the edits it
+            dropped. The time of the latest of them; None when the log leaves no
+            such doubt.
+    """
+
+    last: datetime | None = None
+    unsure_until: datetime | None = None
+
+
+def text_edit_times(events: Iterable[TextEditEvent]) -> TextEditTimes:
+    """The walk of ``last_text_edit_at``, with the doubt a rollback that names
+    no block leaves (#3019)."""
     live: list[tuple[int, datetime]] = []
+    unsure: datetime | None = None
     for event in sorted(events, key=lambda e: e.version):
         if event.writer == REVISION_WRITER_API:
             if event.text:
                 live.append((event.version, event.at))
         elif event.writer == REVISION_WRITER_ROLLBACK:
             restored_from = event.restored_from
-            live = (
-                []
-                if restored_from is None
-                else [entry for entry in live if entry[0] < restored_from]
-            )
-    return live[-1][1] if live else None
+            if restored_from is not None:
+                live = [entry for entry in live if entry[0] < restored_from]
+            elif event.text:
+                if live:
+                    dropped = live[-1][1]
+                    unsure = dropped if unsure is None else max(unsure, dropped)
+                live = []
+    last = live[-1][1] if live else None
+    if unsure is not None and last is not None and last >= unsure:
+        unsure = None
+    return TextEditTimes(last=last, unsure_until=unsure)
 
 
 def text_edit_events_query(
