@@ -108,6 +108,11 @@ def dedup_phase(mock_db, mock_llm):
     # scope; mock-db tests pass non-UUID scope strings, so stub it like the
     # candidate fetch. Real-DB coverage lives in test_count_pinned_*.
     phase._count_pinned = AsyncMock(return_value=0)
+    # #3019: the same for the two reads of rows outside the window: by default
+    # no search hit outside the fetched set is eligible and none loads.
+    # Real-DB coverage lives in TestOutsideRowsRealDB.
+    phase._eligible_outside_ids = AsyncMock(return_value=set())
+    phase._load_cluster_members = AsyncMock(return_value=[])
     return phase
 
 
@@ -154,16 +159,22 @@ class TestDedupMergePhase:
 
     @pytest.mark.asyncio
     async def test_too_few_memories(self, dedup_phase):
+        """#3019: an empty window is "not enough"; one window row is searched,
+        since its neighbours can be anywhere in the context."""
         config = _make_config()
         budget = SleepBudget()
 
         # Mock _fetch_active_memories directly
-        dedup_phase._fetch_active_memories = AsyncMock(return_value=[_make_memory()])
-
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[])
         result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
-
         assert result.success is True
         assert result.details["message"] == "not_enough_memories"
+
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[_make_memory()])
+        dedup_phase._find_similar_pairs = AsyncMock(return_value=[])
+        result = await dedup_phase.execute(config, "user-1", "ws-1", "ctx-1", budget)
+        dedup_phase._find_similar_pairs.assert_awaited_once()
+        assert result.details["message"] == "no_duplicate_candidates"
 
     @pytest.mark.asyncio
     async def test_no_similar_pairs(self, dedup_phase):

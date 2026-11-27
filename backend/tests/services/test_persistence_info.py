@@ -265,42 +265,56 @@ def test_sleep_consolidation_deletes_nothing():
 # ---------------------------------------------------------------------------
 
 
-def test_dedup_merge_still_has_no_age_or_adoption_gate():
-    """Pin WHY the detail names the merge next to forget().
+# #3019: the one eligibility rule of dedup, and the three reads built on it.
+_DEDUP_RULE = "dedup_eligible"
+_DEDUP_RULE_CALLERS = ("_fetch_active_memories", "_eligible_outside_ids", "_load_cluster_members")
+# What the callers may name besides the rule: the id, the embedding status of
+# a neighbour (its stored vector must match its text) and its point id.
+_DEDUP_CALLER_COLUMNS = {"id", "embedding_status", "summary_embedding_id"}
+# The window fetch orders its rows (newest first); ordering decides which rows
+# fit under the cap, never which rows are eligible.
+_DEDUP_WINDOW_ORDER_COLUMNS = {"updated_at", "created_at", "id"}
 
-    ``DedupMergePhase._fetch_active_memories`` selects on identity columns,
-    ``deleted_at`` and the two lane exemptions (#1519 pinned, #1524 time) alone
-    — no age, scope, or reference_count gate — so an unpinned, non-time memory
-    written minutes ago can lose a near-duplicate merge the same night. Any global "not removed before N days"
-    wording would therefore be false.
 
-    If a gate is ever added here, this test fails: revisit the response wording,
-    because the promise could then legitimately be widened.
-    """
-    import services.sleep.dedup_merge as dedup_merge
-
-    tree = ast.parse(Path(dedup_merge.__file__).read_text(encoding="utf-8"))
-    fn = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_fetch_active_memories"
-    )
-    referenced = {
+def _memory_attributes(fn: ast.AST) -> set[str]:
+    return {
         node.attr
         for node in ast.walk(fn)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id == "Memory"
     }
+
+
+def _calls_name(fn: ast.AST, name: str) -> bool:
+    return any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+        for node in ast.walk(fn)
+    )
+
+
+def test_dedup_merge_still_has_no_age_or_adoption_gate():
+    """Pin WHY the detail names the merge next to forget().
+
+    ``dedup_eligible`` — the one rule for the rows dedup reads, compares as
+    neighbours and merges (#3019) — selects on identity columns,
+    ``deleted_at`` and the lane exemptions (#1519 pinned, #1524 time, tool
+    guardrails, #2996 resource-owned) alone — no age, scope, or
+    reference_count gate — so an unpinned, non-time memory written minutes ago
+    can lose a near-duplicate merge the same night, and a memory of any age can
+    lose one to a newly written duplicate. Any global "not removed before N
+    days" wording would therefore be false.
+
+    If a gate is ever added here, this test fails: revisit the response wording,
+    because the promise could then legitimately be widened.
+    """
+    import services.sleep.dedup_merge as dedup_merge
+
+    rule = _fn(dedup_merge, _DEDUP_RULE)
+    referenced = _memory_attributes(rule)
     assert referenced == {
         "user_id",
         "deleted_at",
-        "updated_at",
-        # #1868: ``created_at`` and ``id`` appear in the ORDER BY only — the
-        # fallback clock for a never-edited row and the tie-break. They decide
-        # which rows fit under the cap, newest first; neither is an age gate.
-        "created_at",
-        "id",
         "workspace_id",
         "context_id",
         # #1524: time memories (type='time') are the recall_upcoming lane and are
@@ -313,7 +327,17 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
     # #1519/#1523: the pinned exemption is the shared ``not_pinned_predicate()``
     # call, not an inline column — an exemption, not an age/adoption gate;
     # persistence_info(pinned=True) carries the widened promise for pinned writes.
-    assert _calls_not_pinned_predicate(fn)
+    assert _calls_not_pinned_predicate(rule)
+
+    # Every read of dedup builds its WHERE from the rule and adds no gate.
+    for caller in _DEDUP_RULE_CALLERS:
+        fn = _fn(dedup_merge, caller)
+        assert _calls_name(fn, _DEDUP_RULE), f"{caller} does not apply {_DEDUP_RULE}"
+        allowed = _DEDUP_CALLER_COLUMNS | (
+            _DEDUP_WINDOW_ORDER_COLUMNS if caller == "_fetch_active_memories" else set()
+        )
+        extra = _memory_attributes(fn) - allowed
+        assert not extra, f"{caller} names {sorted(extra)} beside {_DEDUP_RULE}"
 
 
 def _is_predicate_call(node: ast.AST, name: str) -> bool:
@@ -339,20 +363,26 @@ def _calls_not_pinned_predicate(fn: ast.AST) -> bool:
     return _calls_predicate(fn, "not_pinned_predicate")
 
 
-def _async_fn(module, name: str) -> ast.AsyncFunctionDef:
+def _fn(module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """The function ``name`` of ``module``, sync or async (#3019: the shared
+    dedup rule is a plain function)."""
     tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
     return next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == name
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
     )
+
+
+_async_fn = _fn
 
 
 @pytest.mark.parametrize(
     ("module_name", "fn_name"),
     [
-        # candidate fetches (read side)
-        ("services.sleep.dedup_merge", "_fetch_active_memories"),
+        # candidate fetches (read side). #3019: dedup's window fetch, neighbour
+        # check and member load all apply this one rule (pinned above).
+        ("services.sleep.dedup_merge", "dedup_eligible"),
         ("services.sleep.consolidation", "_fetch_working_memories"),
         ("services.sleep.importance_reeval", "_fetch_candidates"),
         # writes that follow an unlocked fetch (a pin can land in between)
@@ -381,8 +411,9 @@ def test_every_automated_deleter_uses_the_shared_pinned_exemption(module_name, f
 @pytest.mark.parametrize(
     ("module_name", "fn_name"),
     [
-        # candidate fetches (read side)
-        ("services.sleep.dedup_merge", "_fetch_active_memories"),
+        # candidate fetches (read side). #3019: dedup's window fetch, neighbour
+        # check and member load all apply this one rule (pinned above).
+        ("services.sleep.dedup_merge", "dedup_eligible"),
         ("services.sleep.consolidation", "_fetch_working_memories"),
         ("services.sleep.importance_reeval", "_fetch_candidates"),
         # writes that follow an unlocked fetch (a marking can land in between)
@@ -436,15 +467,11 @@ def test_dedup_merge_is_not_scope_gated():
     """Pin the reason the persistent branch needs the caveat too."""
     import services.sleep.dedup_merge as dedup_merge
 
-    tree = ast.parse(Path(dedup_merge.__file__).read_text(encoding="utf-8"))
-    fn = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_fetch_active_memories"
-    )
-    assert not any(
-        isinstance(node, ast.Attribute) and node.attr == "scope" for node in ast.walk(fn)
-    ), "dedup selection is now scope-gated — the persistent-scope wording can be widened"
+    for name in (_DEDUP_RULE, *_DEDUP_RULE_CALLERS):
+        fn = _fn(dedup_merge, name)
+        assert not any(
+            isinstance(node, ast.Attribute) and node.attr == "scope" for node in ast.walk(fn)
+        ), f"dedup {name} is now scope-gated — the persistent-scope wording can be widened"
 
 
 # ---------------------------------------------------------------------------

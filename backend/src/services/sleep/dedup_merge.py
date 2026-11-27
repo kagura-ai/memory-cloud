@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import random
 import string
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -37,10 +38,11 @@ if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepReporter
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
-from db.qdrant import search_memories_qdrant
+from db.qdrant import retrieve_dense_vectors, search_memories_qdrant
 from models.memory import (
     DELETED_BY_SLEEP_MERGE,
     MEMORY_TYPE_TIME,
@@ -85,6 +87,45 @@ MAX_EXTRA_NEIGHBORS = 50
 # Maximum cluster size to process in one run.
 # Larger clusters are deferred to the next sleep cycle.
 MAX_CLUSTER_SIZE = 5
+
+# #3019: ids per statement when checking a search hit outside the window, and
+# per statement and vector read when loading a cluster's outside members.
+ELIGIBILITY_CHECK_CHUNK = 1000
+MEMBER_LOAD_CHUNK = 100
+
+
+def dedup_eligible(
+    user_id: str, workspace_id: str | None, context_id: str | None
+) -> ColumnElement[bool]:
+    """The one rule for which memories dedup may compare and merge (#3019).
+
+    The run's user's live rows in the run's workspace and context, minus the
+    deterministic lanes: pinned rows (#1519, ``load_pinned()``), tool
+    guardrails (``load_guardrails``), time memories (#1524,
+    ``recall_upcoming``) and rows the resource indexer owns (#2996). The
+    window fetch, the check of a search hit outside the window and the load
+    of a cluster's outside members all build their WHERE from this function,
+    so a row the window would exclude can never come in as a neighbour. No
+    age, scope or adoption gate: a memory of any age can lose a merge to a
+    newly written near-duplicate.
+    """
+    return and_(
+        Memory.user_id == user_id,
+        Memory.deleted_at.is_(None),
+        # #1523: the shared exemption every automated deleter uses.
+        not_pinned_predicate(),
+        # Tool guardrails: same exemption, the guardrail lane.
+        not_tool_triggered_predicate(),
+        # #1524: time memories are served by their trigger window, not their
+        # summary — a same-summary occurrence is not a duplicate.
+        Memory.type != MEMORY_TYPE_TIME,
+        # #2996: a row the resource indexer owns is the source's: two
+        # documents that read alike are two records, and the source alone
+        # removes either.
+        not_resource_owned_predicate(),
+        Memory.workspace_id == UUID(workspace_id) if workspace_id else true(),
+        Memory.context_id == UUID(context_id) if context_id else true(),
+    )
 
 
 def _pair_key(a: UUID, b: UUID) -> tuple[UUID, UUID]:
@@ -271,7 +312,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
     # stubbed search (many tests) reads zeros.
     _rows_without_neighbour: int = 0
     _rows_search_failed: int = 0
-    _hits_outside_window: int = 0
+    _hits_not_eligible: int = 0
 
     def __init__(
         self,
@@ -325,7 +366,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         return {
             "no_similar_neighbour": self._rows_without_neighbour,
             "search_failed": self._rows_search_failed,
-            "neighbour_outside_window": self._hits_outside_window,
+            "neighbour_not_eligible": self._hits_not_eligible,
         }
 
     def _backfill_cluster_scores(
@@ -611,7 +652,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #3019: reset the search's per-row counters (a stubbed search leaves them).
         self._rows_without_neighbour = 0
         self._rows_search_failed = 0
-        self._hits_outside_window = 0
+        self._hits_not_eligible = 0
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -627,7 +668,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         memories = await self._fetch_active_memories(
             user_id, workspace_id, context_id, config.sleep_max_memories_per_run
         )
-        if len(memories) < 2:
+        # #3019: one window row is searched too — its neighbours can be
+        # anywhere in the partition.
+        if not memories:
             result.details = {
                 "message": "not_enough_memories",
                 "count": len(memories),
@@ -714,6 +757,17 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
         # Step 4: Process each cluster
         memory_map = {m.id: m for m in memories}
+        # #3019: a cluster's members that are not window rows are loaded (full
+        # row and stored vector) right before it is judged; on the rule path,
+        # which judges every cluster, all at once.
+        if not llm_enabled:
+            await self._load_outside_members(
+                [mid for cluster in processable for mid in cluster],
+                memory_map,
+                user_id,
+                workspace_id,
+                context_id,
+            )
         pair_scores = {_pair_key(a, b): s for a, b, s in pairs}
         tally = _MergeTally()
         # #1231: pair keys whose score came from the on-demand direct check
@@ -731,6 +785,12 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 unjudged_clusters = len(processable) - index
                 break
 
+            if llm_enabled:
+                await self._load_outside_members(
+                    cluster, memory_map, user_id, workspace_id, context_id
+                )
+            # A member that no longer loads (forgotten, pinned, moved) is
+            # left out of the cluster.
             cluster_memories = [memory_map[mid] for mid in cluster if mid in memory_map]
             if len(cluster_memories) < 2:
                 continue
@@ -871,15 +931,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
         context_id: str | None,
         limit: int = 500,
     ) -> list[Memory]:
-        """Fetch active (non-deleted), unpinned, non-time memories, capped by limit.
+        """Fetch the window: eligible memories (``dedup_eligible``), capped by limit.
 
         #1519: ``delivery_mode='always'`` rows are the deterministic
         ``load_pinned()`` lane (#886) and never enter dedup candidacy. A pinned
         loser would silently drop out of that lane, and a pinned *winner* is no
         better — merge folds only tags, so it would discard the newer unpinned
-        fact instead of absorbing it. Excluding them here covers every downstream
-        path at once: ``_find_similar_pairs`` restricts vector-search hits to the
-        fetched id set, so a pinned neighbour cannot re-enter that way either.
+        fact instead of absorbing it. The same rule (``dedup_eligible``) decides
+        which search hits outside the window are compared (#3019), so a pinned
+        neighbour cannot re-enter that way either.
 
         #1524: ``type='time'`` rows are the other deterministic lane
         (``recall_upcoming``, keyed on ``details.trigger``). Two occurrences of a
@@ -896,21 +956,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         """
         stmt = (
             select(Memory)
-            .where(
-                Memory.user_id == user_id,
-                Memory.deleted_at.is_(None),
-                # #1523: the shared exemption every automated deleter uses.
-                not_pinned_predicate(),
-                # Tool guardrails: same exemption, the guardrail lane.
-                not_tool_triggered_predicate(),
-                # #1524: time memories are served by their trigger window, not
-                # their summary — a same-summary occurrence is not a duplicate.
-                Memory.type != MEMORY_TYPE_TIME,
-                # #2996: a row the resource indexer owns is the source's: two
-                # documents that read alike are two records, and the source
-                # alone removes either.
-                not_resource_owned_predicate(),
-            )
+            .where(dedup_eligible(user_id, workspace_id, context_id))
             # #1868: ``updated_at`` is NULL until a memory is edited, and
             # PostgreSQL sorts NULLs first under DESC — the bare column put
             # every never-edited row ahead of every edited one, unordered.
@@ -922,13 +968,102 @@ class DedupMergePhase(EmbeddingSpendTracker):
             )
             .limit(limit)
         )
-        if workspace_id:
-            stmt = stmt.where(Memory.workspace_id == UUID(workspace_id))
-        if context_id:
-            stmt = stmt.where(Memory.context_id == UUID(context_id))
 
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
+
+    async def _eligible_outside_ids(
+        self,
+        ids: list[UUID],
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> set[UUID]:
+        """The search hits outside the window that dedup may compare (#3019).
+
+        An id-only check under ``dedup_eligible``, plus a successful
+        embedding: a neighbour's score was computed against its stored vector,
+        which matches its text only when its last embedding succeeded. A hit
+        that does not come back (pinned, a guardrail, a time memory,
+        resource-owned, forgotten, another user's or context's, a point id that
+        is no memory, not embedded) is not compared.
+        """
+        eligible: set[UUID] = set()
+        for start in range(0, len(ids), ELIGIBILITY_CHECK_CHUNK):
+            chunk = ids[start : start + ELIGIBILITY_CHECK_CHUNK]
+            rows = await self.db.execute(
+                select(Memory.id).where(
+                    Memory.id.in_(chunk),
+                    dedup_eligible(user_id, workspace_id, context_id),
+                    Memory.embedding_status == "success",
+                )
+            )
+            eligible.update(rows.scalars().all())
+        return eligible
+
+    async def _load_cluster_members(
+        self,
+        ids: list[UUID],
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> list[Memory]:
+        """Load outside-window cluster members and their stored vectors (#3019).
+
+        The rows are read under ``dedup_eligible`` and a successful
+        embedding; a member that no longer qualifies does not load. Each
+        loaded row's stored dense vector (its point: ``summary_embedding_id``,
+        else its id — the embedding of its summary, the text the window rows
+        are embedded from) goes into ``_summary_vectors``, so the direct-score
+        veto scores its pairs like a window row's. A vector read that fails
+        leaves the rows without vectors: their pairs are unverifiable.
+        """
+        loaded: list[Memory] = []
+        collection = self.collection_name or "kagura_memories"
+        for start in range(0, len(ids), MEMBER_LOAD_CHUNK):
+            chunk = ids[start : start + MEMBER_LOAD_CHUNK]
+            rows = list(
+                (
+                    await self.db.execute(
+                        select(Memory).where(
+                            Memory.id.in_(chunk),
+                            dedup_eligible(user_id, workspace_id, context_id),
+                            Memory.embedding_status == "success",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                continue
+            loaded.extend(rows)
+            points = {row.id: str(row.summary_embedding_id or row.id) for row in rows}
+            try:
+                vectors = await retrieve_dense_vectors(collection, list(points.values()))
+            except Exception as e:
+                logger.warning("dedup_member_vectors_unavailable", count=len(rows), error=str(e))
+                continue
+            for memory_id, point_id in points.items():
+                vector = vectors.get(point_id)
+                if vector is not None:
+                    self._summary_vectors[memory_id] = vector
+        return loaded
+
+    async def _load_outside_members(
+        self,
+        member_ids: Iterable[UUID],
+        memory_map: dict[UUID, Memory],
+        user_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> None:
+        """Add the members of ``member_ids`` not yet in ``memory_map`` (#3019)."""
+        missing = sorted({mid for mid in member_ids if mid not in memory_map}, key=str)
+        if not missing:
+            return
+        for row in await self._load_cluster_members(missing, user_id, workspace_id, context_id):
+            memory_map[row.id] = row
 
     async def _count_pinned(
         self,
@@ -970,8 +1105,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
     ) -> list[tuple[UUID, UUID, float]]:
         """Find pairs of memories with cosine similarity >= threshold.
 
-        For each memory, embed its summary and search Qdrant for
+        For each window memory, embed its summary and search Qdrant for
         high-similarity neighbors. Deduplicates pairs by sorted ID tuple.
+
+        #3019: a hit outside the window is kept when ``_eligible_outside_ids``
+        returns it (the same eligibility rule as the window, plus a successful
+        embedding), checked once after the search loop and before clustering,
+        so an excluded row can neither be merged nor chain two clusters. Pairs
+        come in window order; every pair has a window row.
 
         ``extra_neighbors`` (#1523) widens the per-memory neighbour cap by the
         number of pinned rows in scope (capped at ``MAX_EXTRA_NEIGHBORS``):
@@ -980,9 +1121,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
         unpinned memory's true duplicate (the #1231 saturation shape).
         """
         neighbor_limit = NEIGHBOR_LIMIT + max(0, min(extra_neighbors, MAX_EXTRA_NEIGHBORS))
-        pairs: list[tuple[UUID, UUID, float]] = []
-        seen: set[tuple[UUID, UUID]] = set()
         memory_ids = {m.id for m in memories}
+        hits_by_row: list[tuple[UUID, list[tuple[UUID, float]]]] = []
         # #1231: cache every successfully embedded vector for the veto's
         # on-demand direct check. Reset here (not in execute()) so the
         # cache's lifecycle matches the candidate search that fills it.
@@ -990,10 +1130,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # #3019: per-row reasons for ``details.no_action_reasons``.
         self._rows_without_neighbour = 0
         self._rows_search_failed = 0
-        self._hits_outside_window = 0
+        self._hits_not_eligible = 0
 
         for memory in memories:
-            has_neighbour = False
+            row_hits: list[tuple[UUID, float]] = []
             try:
                 vector, tokens = await self.embedding_service.embed_with_usage(
                     memory.summary,
@@ -1018,17 +1158,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     hit_id = UUID(str(hit["id"]))
                     if hit_id == memory.id:
                         continue
-                    has_neighbour = True
-                    if hit_id not in memory_ids:
-                        self._hits_outside_window += 1
-                        continue
-                    # Canonical pair key (order-independent)
-                    a, b = sorted([memory.id, hit_id], key=str)
-                    pair_key = (a, b)
-                    if pair_key in seen:
-                        continue
-                    seen.add(pair_key)
-                    pairs.append((memory.id, hit_id, hit["score"]))
+                    row_hits.append((hit_id, hit["score"]))
             except Exception as e:
                 self._rows_search_failed += 1
                 logger.warning(
@@ -1037,9 +1167,31 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     error=str(e),
                 )
                 continue
-            if not has_neighbour:
+            hits_by_row.append((memory.id, row_hits))
+            if not row_hits:
                 self._rows_without_neighbour += 1
 
+        outside = sorted(
+            {hit_id for _, hits in hits_by_row for hit_id, _ in hits if hit_id not in memory_ids},
+            key=str,
+        )
+        eligible = (
+            await self._eligible_outside_ids(outside, user_id, workspace_id, context_id)
+            if outside
+            else set()
+        )
+        pairs: list[tuple[UUID, UUID, float]] = []
+        seen: set[tuple[UUID, UUID]] = set()
+        for memory_id, hits in hits_by_row:
+            for hit_id, score in hits:
+                if hit_id not in memory_ids and hit_id not in eligible:
+                    self._hits_not_eligible += 1
+                    continue
+                pair_key = _pair_key(memory_id, hit_id)
+                if pair_key in seen:
+                    continue
+                seen.add(pair_key)
+                pairs.append((memory_id, hit_id, score))
         return pairs
 
     def _direct_pair_similarity(self, id_a: UUID, id_b: UUID) -> float | None:
@@ -1650,9 +1802,10 @@ class DedupMergePhase(EmbeddingSpendTracker):
         is the state the merge would act on. Returns True (refuse) when either
         row is now pinned, soft-deleted, missing, (#1524) a time memory —
         ``update_memory`` can flip ``type`` in the same window, and a merge would
-        drop the loser's trigger window from ``recall_upcoming`` — or (#2996) a
+        drop the loser's trigger window from ``recall_upcoming`` — (#2996) a
         row the resource indexer owns (it re-points a ``remember(external_id)``
-        row it matches by natural key).
+        row it matches by natural key), or (#3019) a row whose user or context
+        is no longer the one it was fetched with (moved to another context).
         """
         rows = (
             await self.db.execute(
@@ -1663,6 +1816,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     resource_owned_predicate().label("resource_owned"),
                     Memory.deleted_at,
                     Memory.type,
+                    # #3019: the partition the row was fetched in.
+                    Memory.user_id,
+                    Memory.context_id,
                 )
                 .where(Memory.id.in_([winner.id, loser.id]))
                 .with_for_update()
@@ -1684,6 +1840,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 reasons.append(f"{label}_resource_owned")
             elif row.type == MEMORY_TYPE_TIME:
                 reasons.append(f"{label}_time")
+            elif row.user_id != memory.user_id or row.context_id != memory.context_id:
+                # #3019: moved to another context (or user) since the fetch.
+                reasons.append(f"{label}_moved")
         if not reasons:
             return False
         if any(reason.endswith("_resource_owned") for reason in reasons):

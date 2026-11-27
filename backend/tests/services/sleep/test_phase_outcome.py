@@ -507,6 +507,8 @@ def dedup_phase():
     phase.edge_repo = AsyncMock()
     phase.embedding_service = AsyncMock()
     phase._count_pinned = AsyncMock(return_value=0)
+    phase._eligible_outside_ids = AsyncMock(return_value=set())
+    phase._load_cluster_members = AsyncMock(return_value=[])
     return phase
 
 
@@ -525,9 +527,9 @@ def _dedup_config(provider="openai"):
 class TestDedupOutcome:
     @pytest.mark.asyncio
     async def test_not_enough_memories(self, dedup_phase):
-        dedup_phase._fetch_active_memories = AsyncMock(return_value=[_memory()])
+        dedup_phase._fetch_active_memories = AsyncMock(return_value=[])
         result = await dedup_phase.execute(_dedup_config(), "u", None, None, SleepBudget())
-        assert result.details == {"message": "not_enough_memories", "count": 1, **phase_outcome(1)}
+        assert result.details == {"message": "not_enough_memories", "count": 0, **phase_outcome(0)}
 
     @pytest.mark.asyncio
     async def test_no_pairs_counts_rows_and_hits(self, dedup_phase):
@@ -544,7 +546,7 @@ class TestDedupOutcome:
         assert result.details["message"] == "no_duplicate_candidates"
         assert _outcome(result.details) == phase_outcome(
             3,
-            {"no_similar_neighbour": 1, "search_failed": 1, "neighbour_outside_window": 1},
+            {"no_similar_neighbour": 1, "search_failed": 1, "neighbour_not_eligible": 1},
         )
 
     @pytest.mark.asyncio
