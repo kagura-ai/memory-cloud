@@ -30,7 +30,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import DateTime, delete, literal, select
+from sqlalchemy import DateTime, delete, literal, literal_column, select
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import (
@@ -59,6 +59,11 @@ _READ: Any = object()
 def _log_start_query(at: datetime | None):
     """A stand-in for ``revision_log_began_query`` answering ``at`` on Postgres."""
     return lambda: select(literal(at, DateTime()))
+
+
+def _failing_query(*_: Any):
+    """A statement Postgres refuses when it runs (division by zero)."""
+    return select(literal_column("1/0").label("x"))
 
 
 @pytest.fixture(autouse=True)
@@ -547,9 +552,12 @@ async def _events(db, memory: Memory) -> list[Any]:
 
 @pytest.mark.asyncio
 async def test_the_revision_read_and_the_rollback_walk_on_real_rows(db_session):
-    """The key tests and ``restored_from`` against rows ``record_edit`` and
-    ``rollback_session`` wrote: a text edit counts until a rollback reverts it,
-    a metadata edit never counts, a text edit after the rollback counts."""
+    """The key tests and ``restored_from`` on Postgres: the two API edits are
+    written by ``_log_edit`` the way ``record_edit`` writes them (its own rows
+    are read in ``test_a_real_edit_of_the_text_makes_the_old_row_win``), the
+    rollback row by ``rollback_session`` itself. A text edit counts until a
+    rollback reverts it, a metadata edit never counts, a text edit after the
+    rollback counts."""
     now = utcnow()
     scope = await _Scope.create(db_session)
     a = await scope.add(created_at=now - timedelta(days=180), vector=scope.axis(0))
@@ -659,3 +667,76 @@ async def test_the_log_start_is_read_from_postgres(db_session):
     assert began == lowest
     assert began is not None and began <= edit_at
     assert phase._log_began_read is True
+
+
+async def _two_pairs(scope: _Scope, now: datetime, *, a_stamped_days_ago: int):
+    """A (six months, version 2: its revisions are read) stamped
+    ``a_stamped_days_ago``, B two months old; C and D, never edited, on
+    another axis, D newer."""
+    a = await scope.add(
+        created_at=now - timedelta(days=180),
+        updated_at=now - timedelta(days=a_stamped_days_ago),
+        version=2,
+        vector=scope.axis(0),
+    )
+    b = await scope.add(created_at=now - timedelta(days=60), vector=scope.axis(0))
+    c = await scope.add(created_at=now - timedelta(days=50), vector=scope.axis(1))
+    d = await scope.add(created_at=now - timedelta(days=40), vector=scope.axis(1))
+    return a, b, c, d
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("a_stamped_days_ago", "a_kept"),
+    [(100, False), (7, True)],
+    ids=["stamped_before_b", "stamped_after_b"],
+)
+async def test_a_failed_revision_read_rolls_back_to_its_savepoint(
+    db_session, a_stamped_days_ago, a_kept
+):
+    """The revision read fails on Postgres: the phase transaction goes on (the
+    other pair merges afterwards), A is compared by its creation time, and
+    when its stamp is later than B its logged edits are unknown, so both
+    stay."""
+    now = utcnow()
+    scope = await _Scope.create(db_session)
+    a, b, c, d = await _two_pairs(scope, now, a_stamped_days_ago=a_stamped_days_ago)
+
+    with patch.object(dedup_merge, "text_edit_events_query", _failing_query):
+        result, phase = await scope.run(log_began=now - timedelta(days=365))
+
+    assert phase._text_edited_at == {a.id: None}
+    assert phase._text_edit_unread == {a.id}
+    state = await scope.state(a, b, c, d)
+    assert state[c.id].deleted_by == DELETED_BY_SLEEP_MERGE
+    assert state[d.id].deleted_at is None
+    assert state[b.id].deleted_at is None
+    if a_kept:
+        assert result.details["merged"] == 1
+        assert state[a.id].deleted_at is None
+        assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}
+    else:
+        assert result.details["merged"] == 2
+        assert state[a.id].deleted_by == DELETED_BY_SLEEP_MERGE
+
+
+@pytest.mark.asyncio
+async def test_a_failed_log_start_read_rolls_back_to_its_savepoint(db_session):
+    """The log start read fails on Postgres: nothing tells when the log
+    began, so A and B (A at version 1 here) stay, and the run goes on to
+    merge C into D."""
+    now = utcnow()
+    scope = await _Scope.create(db_session)
+    a, b, c, d = await _two_pairs(scope, now, a_stamped_days_ago=7)
+    a.version = 1
+    await db_session.flush()
+
+    with patch.object(dedup_merge, "revision_log_began_query", _failing_query):
+        result, phase = await scope.run()
+
+    assert phase._log_began_read is True and phase._log_began_at is None
+    assert result.details["merged"] == 1
+    assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}
+    state = await scope.state(a, b, c, d)
+    assert state[c.id].deleted_by == DELETED_BY_SLEEP_MERGE
+    assert state[a.id].deleted_at is None and state[b.id].deleted_at is None
