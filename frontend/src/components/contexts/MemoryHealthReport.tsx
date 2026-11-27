@@ -99,20 +99,45 @@ function SectionCard({ name, section }: { name: string; section: MemoryHealthSec
           {Object.entries(section.metrics).map(([key, value]) => (
             <tr key={key} className="border-t align-top">
               <td className="w-1/2 py-1 pr-2 font-mono text-muted-foreground">{key}</td>
-              {/* break-all: a long unbroken value (e.g. a JSON object) wraps
-                  inside its own cell instead of overlaying the neighbor. */}
+              {/* break-all: a long unbroken value wraps inside its own cell
+                  instead of overlaying the neighbor. */}
               <td className="w-1/2 break-all py-1 text-right font-mono">
-                {value === null
-                  ? t("emptyValue")
-                  : typeof value === "object"
-                    ? JSON.stringify(value)
-                    : String(value)}
+                <MetricValue value={value} emptyLabel={t("emptyValue")} />
               </td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** One level of `name: value` pairs, when a metric is a flat map of counts. */
+function flatEntries(value: unknown): [string, string | number | boolean][] | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return null;
+  const flat = entries.every(([, v]) => ["string", "number", "boolean"].includes(typeof v));
+  return flat ? (entries as [string, string | number | boolean][]) : null;
+}
+
+/**
+ * A metric's value: a flat map of counts (e.g. edges per origin) as one
+ * `name: value` line per entry, anything else nested as compact JSON.
+ */
+function MetricValue({ value, emptyLabel }: { value: unknown; emptyLabel: string }) {
+  if (value === null || value === undefined) return <>{emptyLabel}</>;
+  if (typeof value !== "object") return <>{String(value)}</>;
+  const entries = flatEntries(value);
+  if (!entries) return <>{JSON.stringify(value)}</>;
+  return (
+    <ul className="space-y-0.5">
+      {entries.map(([name, v]) => (
+        <li key={name}>
+          <span className="text-muted-foreground">{name}:</span> {String(v)}
+        </li>
+      ))}
+    </ul>
   );
 }
 
