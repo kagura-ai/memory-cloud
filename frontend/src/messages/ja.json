@@ -3480,7 +3480,10 @@
               "empty": "再インデックス対象はありませんでした"
             }
           },
-          "headlineAnalysis": "メモリ分析の費用: LLM 呼び出し {calls} 回 / {tokens} トークン"
+          "headlineAnalysis": "メモリ分析の費用: LLM 呼び出し {calls} 回 / {tokens} トークン",
+          "budgetSkipped": "バジェットを使い切ったため未実行: {phases}",
+          "budgetCut": "バジェットが尽きて途中で停止 (残りあり): {phases}",
+          "budgetCutPhase": "バジェットが尽きて停止しました。残りは後の実行で処理されます"
         },
         "analysisNoPhases": "この行はメモリ分析の実行 (クラスタのラベル付け) にかかった LLM 費用の記録です。Sleep のフェーズは実行されておらず、ラベル付けフェーズの結果もここには保存されません。クラスタは分析本体で確認できます。"
       },
@@ -3499,6 +3502,17 @@
         "runConflict": "Sleep 実行は既に進行中です。",
         "runConflictViewLink": "実行中のレポートを表示",
         "runError": "Sleep 実行の開始に失敗しました。"
+      },
+      "budget": {
+        "badge": "バジェット上限",
+        "badgeTitle": "バジェットで制限されたフェーズ: {phases}",
+        "phases": {
+          "edgeDiscovery": "エッジ発見",
+          "relatedIndex": "関連インデックス",
+          "dedup": "重複排除",
+          "importance": "重要度再評価",
+          "consolidation": "統合"
+        }
       }
     },
     "environment": {

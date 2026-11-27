@@ -150,3 +150,59 @@ describe("SleepReportDetailView — source (#2219)", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("SleepReportDetailView — budget-limited phases (#3019)", () => {
+  it("names the limited phases per kind above the phase cards", () => {
+    renderDetail({
+      budget_limited_phases: {
+        edge_discovery: "cut",
+        dedup_merge: "skipped",
+      },
+    });
+
+    const note = screen.getByTestId("sleep-report-budget-note");
+    expect(note).toHaveAttribute("role", "status");
+    expect(note).toHaveTextContent(
+      'detail.narrative.budgetSkipped:{"phases":"budget.phases.dedup"}',
+    );
+    expect(note).toHaveTextContent(
+      'detail.narrative.budgetCut:{"phases":"budget.phases.edgeDiscovery"}',
+    );
+  });
+
+  it("adds a note on the card of a phase that was cut", () => {
+    renderDetail({
+      budget_limited_phases: { consolidation: "cut" },
+      consolidation_result: {
+        success: true,
+        skipped: false,
+        skip_reason: null,
+        error: null,
+        llm_calls: 1,
+        memories_processed: 7,
+        details: { working_count: 7, llm_pass_cut_for_budget: true },
+      },
+    });
+
+    expect(
+      screen.getByText("detail.narrative.budgetCutPhase"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a report without the field as before", () => {
+    renderDetail({});
+
+    expect(screen.queryByTestId("sleep-report-budget-note")).toBeNull();
+    expect(screen.queryByText("detail.narrative.budgetCutPhase")).toBeNull();
+    expect(screen.getByText("detail.edgeDiscovery")).toBeInTheDocument();
+  });
+
+  it("does not show the note on an analysis row", () => {
+    renderDetail({
+      source: "analysis",
+      budget_limited_phases: { consolidation: "cut" },
+    });
+
+    expect(screen.queryByTestId("sleep-report-budget-note")).toBeNull();
+  });
+});

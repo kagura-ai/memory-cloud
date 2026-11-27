@@ -52,7 +52,15 @@ export interface SleepReportSummary {
   // behind a 'degraded'/'failed' grading. Optional: reports written before
   // v0.43.0 lack the column in older cached payloads.
   llm_call_failures?: number;
+  // #3019: the phases this run's budget limited, in run order: "skipped" (not
+  // run, its budget was used up at entry) or "cut" (stopped with work left).
+  // Derived by the API from the stored phase results; {} when none was
+  // limited. Optional: older API versions do not send it.
+  budget_limited_phases?: Record<string, BudgetLimit>;
 }
+
+/** #3019: how a phase's budget limited it in a run. */
+export type BudgetLimit = "skipped" | "cut";
 
 export interface PhaseResult {
   success: boolean;

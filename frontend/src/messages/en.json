@@ -3480,7 +3480,10 @@
               "empty": "Nothing to reindex"
             }
           },
-          "headlineAnalysis": "Memory Analysis spend: {calls, plural, one {# LLM call} other {# LLM calls}}, {tokens} tokens"
+          "headlineAnalysis": "Memory Analysis spend: {calls, plural, one {# LLM call} other {# LLM calls}}, {tokens} tokens",
+          "budgetSkipped": "Not run, its budget was used up: {phases}",
+          "budgetCut": "Stopped with work left when its budget ran out: {phases}",
+          "budgetCutPhase": "Stopped when its budget ran out; the rest waits for a later run"
         },
         "analysisNoPhases": "This row records the LLM spend of a Memory Analysis run (cluster labeling). None of the Sleep phases ran, and the labeling phase keeps no per-phase result here: the clusters are on the analysis itself."
       },
@@ -3499,6 +3502,17 @@
         "runConflict": "A sleep run is already in progress.",
         "runConflictViewLink": "View the running report",
         "runError": "Failed to start sleep run."
+      },
+      "budget": {
+        "badge": "Budget-limited",
+        "badgeTitle": "Limited by its budget: {phases}",
+        "phases": {
+          "edgeDiscovery": "Edge Discovery",
+          "relatedIndex": "Related index",
+          "dedup": "Deduplication",
+          "importance": "Importance Re-evaluation",
+          "consolidation": "Consolidation"
+        }
       }
     },
     "environment": {
