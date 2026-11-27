@@ -11,6 +11,7 @@ directly and never wait for a slot.
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
 import warnings
 from types import SimpleNamespace
@@ -126,6 +127,56 @@ async def test_a_task_cancelled_while_waiting_never_runs_and_leaves_no_warning(l
         str(waiting)
     ]
     assert not memory_service._embedding_tasks
+
+
+async def test_a_task_cancelled_before_its_first_step_creates_no_pipeline_run(limit, monkeypatch):
+    """A process that stops right after spawning (a remember_batch, then
+    shutdown) cancels tasks that never ran a step. The pipeline coroutine is
+    created inside the task, so none is left behind un-awaited (Python warns
+    "coroutine ... was never awaited" for each one)."""
+    limit(1)
+    created: list[UUID] = []
+
+    async def _run(memory_id: UUID) -> None:
+        return None
+
+    def pipeline(memory_id: UUID):
+        created.append(memory_id)
+        return _run(memory_id)
+
+    monkeypatch.setattr(memory_service, "process_pending_embedding", pipeline)
+
+    tasks = [spawn_embedding_task(uuid4()) for _ in range(3)]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    gc.collect()
+
+    assert created == []
+    assert all(task.cancelled() for task in tasks)
+    assert not memory_service._embedding_tasks
+
+
+async def test_the_task_is_created_through_asyncio_create_task(limit, monkeypatch):
+    """Tests that wait for the embeddings of a remember record them by
+    patching ``asyncio.create_task`` (test_single_collection_isolation): the
+    spawn goes through it, so their waits stay meaningful."""
+    limit(1)
+    pipeline = _Pipeline()
+    pipeline.release.set()
+    monkeypatch.setattr(memory_service, "process_pending_embedding", pipeline)
+    seen: list[asyncio.Task] = []
+    original = asyncio.create_task
+
+    def tracking(coro, **kwargs):
+        task = original(coro, **kwargs)
+        seen.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", tracking)
+    task = spawn_embedding_task(uuid4())
+    assert seen == [task]
+    await task
 
 
 async def test_the_pipeline_is_resolved_when_the_task_is_spawned(limit, monkeypatch):

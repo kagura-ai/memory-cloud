@@ -14,7 +14,7 @@ import hashlib
 import math
 import os
 import statistics
-from collections.abc import AsyncIterator, Collection, Coroutine, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import SimpleNamespace
@@ -159,7 +159,7 @@ from utils.tool_trigger import carries_tool_trigger
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from auth.agent_scope import AgentScope
     from models.memory import Memory
@@ -290,16 +290,17 @@ def _embedding_slots() -> asyncio.Semaphore:
     return slots
 
 
-async def _run_in_embedding_slot(run: Coroutine[Any, Any, None]) -> None:
-    """Await ``run`` once a slot is free; close it unstarted when cancelled first."""
-    try:
-        async with _embedding_slots():
-            await run
-    finally:
-        # A no-op once ``run`` finished; a task cancelled while it waited
-        # closes the never-started pipeline (no "never awaited" warning), and
-        # its row stays ``pending`` for the sweep.
-        run.close()
+async def _run_in_embedding_slot(
+    pipeline: Callable[[UUID], Awaitable[None]], memory_id: UUID
+) -> None:
+    """Run ``pipeline(memory_id)`` once a slot is free.
+
+    The pipeline coroutine is created here, inside the task: a task cancelled
+    before it got a slot (or before its first step) never created one, so
+    nothing is left un-awaited, and its row stays ``pending`` for the sweep.
+    """
+    async with _embedding_slots():
+        await pipeline(memory_id)
 
 
 def spawn_embedding_task(memory_id: UUID) -> asyncio.Task[None]:
@@ -315,10 +316,11 @@ def spawn_embedding_task(memory_id: UUID) -> asyncio.Task[None]:
 
     ``process_pending_embedding`` is looked up as the module global when the
     task is spawned (as before the limit), so a patched pipeline applies to
-    the tasks spawned under it.
+    the tasks spawned under it. The task is created with
+    ``asyncio.create_task``, as the write paths did before, so a patched
+    ``create_task`` (tests that wait for a remember's embedding) sees it.
     """
-    run = process_pending_embedding(memory_id)
-    task = asyncio.get_running_loop().create_task(_run_in_embedding_slot(run))
+    task = asyncio.create_task(_run_in_embedding_slot(process_pending_embedding, memory_id))
     _embedding_tasks.add(task)
     task.add_done_callback(_embedding_tasks.discard)
     task.add_done_callback(functools.partial(_log_embedding_task_result, memory_id=str(memory_id)))
