@@ -701,18 +701,19 @@ class TestExecuteMergeRealDB:
 
 
 class TestFetchActiveMemoriesOrdering:
-    """#1868: ``updated_at`` is NULL until a memory is edited. Ordering the
-    capped candidate fetch on the bare column put every never-edited row ahead
-    of every edited one (PostgreSQL sorts NULLs first under DESC), in no
-    defined order. The fetch orders by ``coalesce(updated_at, created_at)``
-    with ``id`` as the tie-break instead."""
+    """#3019: the window comes from two lanes. The changed lane takes the rows
+    changed since its position, newest by ``coalesce(updated_at, created_at)``
+    (#1868: ``updated_at`` is NULL until a memory is edited), and hands them
+    to the judge oldest first; the sweep takes older rows by ``(created_at,
+    id)``, newest first. Row-value comparisons on ``id`` keep rows that share
+    a timestamp from repeating or being skipped across runs."""
 
-    async def _phase_for_db(self, db_session):
+    async def _phase_for_db(self, db_session, lanes=None):
         with (
             patch("services.sleep.dedup_merge.NeuralEdgeRepository"),
             patch("services.sleep.dedup_merge.EmbeddingService"),
         ):
-            return DedupMergePhase(db_session, AsyncMock())
+            return DedupMergePhase(db_session, AsyncMock(), coverage=lanes)
 
     @staticmethod
     async def _add(db_session, user_id, *, created_days_ago, updated_days_ago=None):
@@ -736,29 +737,40 @@ class TestFetchActiveMemoriesOrdering:
         await db_session.flush()
         return mem
 
-    async def test_never_edited_and_edited_rows_interleave_newest_first(self, db_session):
-        """Above the cap, the kept set is the most recent memories whichever
-        clock made them recent, and the oldest never-edited row is the one cut."""
+    async def test_changed_lane_newest_first_then_the_sweep(self, db_session):
+        """A first run: everything counts as changed. The newest three by either
+        clock are the changed lane (judged oldest first), the next row by
+        ``created_at`` is the sweep's reserved one, and the newest row left out
+        of the changed lane is its floor."""
+        from services.sleep.coverage import changed_key, sweep_key
+
         user_id = f"dedup-order-{uuid4()}"
         never_1d = await self._add(db_session, user_id, created_days_ago=1)
         edited_2d = await self._add(db_session, user_id, created_days_ago=30, updated_days_ago=2)
         never_3d = await self._add(db_session, user_id, created_days_ago=3)
         edited_4d = await self._add(db_session, user_id, created_days_ago=40, updated_days_ago=4)
         never_5d = await self._add(db_session, user_id, created_days_ago=5)
-        never_6d = await self._add(db_session, user_id, created_days_ago=6)
+        await self._add(db_session, user_id, created_days_ago=6)
         phase = await self._phase_for_db(db_session)
 
         first = await phase._fetch_active_memories(user_id, None, None, limit=4)
+        window = phase.coverage_outcome
         second = await phase._fetch_active_memories(user_id, None, None, limit=4)
 
-        expected = [never_1d.id, edited_2d.id, never_3d.id, edited_4d.id]
+        expected = [never_3d.id, edited_2d.id, never_1d.id, never_5d.id]
         assert [m.id for m in first] == expected
         assert [m.id for m in second] == expected
-        assert never_5d.id not in expected and never_6d.id not in expected
+        assert window.changed == [changed_key(m) for m in (never_3d, edited_2d, never_1d)]
+        assert window.sweep == [sweep_key(never_5d)]
+        assert window.floor == changed_key(edited_4d)
+        assert window.exhausted is False
 
-    async def test_equal_timestamps_break_ties_on_id(self, db_session):
-        """Rows sharing a timestamp (a bulk import) come back in a defined
-        order, so the capped subset is the same on every run."""
+    async def test_equal_timestamps_neither_repeat_nor_skip_across_runs(self, db_session):
+        """Six rows of one import share ``created_at``: the first window takes
+        four of them in ``id`` order, and the positions it leaves give the next
+        window exactly the other two."""
+        from services.sleep.coverage import SETTLED, DedupLanes, advance_dedup
+
         user_id = f"dedup-order-{uuid4()}"
         stamp = utcnow() - timedelta(days=2)
         ids = []
@@ -778,12 +790,41 @@ class TestFetchActiveMemoriesOrdering:
             db_session.add(mem)
             ids.append(mem.id)
         await db_session.flush()
+        # PostgreSQL orders uuid by its bytes, which is the order of the hex text.
+        descending = sorted(ids, key=lambda i: i.hex, reverse=True)
+
         phase = await self._phase_for_db(db_session)
+        first = await phase._fetch_active_memories(user_id, None, None, limit=4)
+        assert [m.id for m in first] == [*reversed(descending[:3]), descending[3]]
+
+        window = phase.coverage_outcome
+        window.outcomes = dict.fromkeys(window.outcomes, SETTLED)
+        lanes, _ = advance_dedup(DedupLanes(), window, returned=True, now=utcnow())
+        phase = await self._phase_for_db(db_session, lanes)
+        second = await phase._fetch_active_memories(user_id, None, None, limit=4)
+
+        assert [m.id for m in second] == descending[4:]
+        assert phase.coverage_outcome.changed == []
+        assert phase.coverage_outcome.exhausted is True
+
+    async def test_an_edit_puts_an_old_row_in_the_changed_lane(self, db_session):
+        from services.sleep.coverage import LaneEntry, changed_key
+
+        user_id = f"dedup-order-{uuid4()}"
+        rows = [await self._add(db_session, user_id, created_days_ago=d) for d in (10, 9, 8)]
+        edited = await self._add(db_session, user_id, created_days_ago=50, updated_days_ago=1)
+        position = changed_key(rows[2])
+        from services.sleep.coverage import DedupLanes
+
+        lanes = DedupLanes(changed=LaneEntry(at=position[0], id=position[1]))
+        phase = await self._phase_for_db(db_session, lanes)
 
         fetched = await phase._fetch_active_memories(user_id, None, None, limit=4)
 
-        # PostgreSQL orders uuid by its bytes, which is the order of the hex text.
-        assert [m.id for m in fetched] == sorted(ids, key=lambda i: i.hex, reverse=True)[:4]
+        assert phase.coverage_outcome.changed == [changed_key(edited)]
+        assert phase.coverage_outcome.floor is None
+        assert [m.id for m in fetched][0] == edited.id
+        assert {m.id for m in fetched[1:]} == {m.id for m in rows}
 
 
 # ---------------------------------------------------------------------------

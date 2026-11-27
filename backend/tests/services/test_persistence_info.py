@@ -271,9 +271,11 @@ _DEDUP_RULE_CALLERS = ("_fetch_active_memories", "_eligible_outside_ids", "_load
 # What the callers may name besides the rule: the id, the embedding status of
 # a neighbour (its stored vector must match its text) and its point id.
 _DEDUP_CALLER_COLUMNS = {"id", "embedding_status", "summary_embedding_id"}
-# The window fetch orders its rows (newest first); ordering decides which rows
-# fit under the cap, never which rows are eligible.
-_DEDUP_WINDOW_ORDER_COLUMNS = {"updated_at", "created_at", "id"}
+# The two lane statements (services/sleep/coverage.py) order and bound the
+# window and keep each lane's position; the two lanes together read every row
+# (the changed lane what changed since its position, the sweep every row on
+# each pass), so neither is an age gate.
+_DEDUP_LANE_COLUMNS = {"updated_at", "created_at", "id"}
 
 
 def _memory_attributes(fn: ast.AST) -> set[str]:
@@ -333,11 +335,14 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
     for caller in _DEDUP_RULE_CALLERS:
         fn = _fn(dedup_merge, caller)
         assert _calls_name(fn, _DEDUP_RULE), f"{caller} does not apply {_DEDUP_RULE}"
-        allowed = _DEDUP_CALLER_COLUMNS | (
-            _DEDUP_WINDOW_ORDER_COLUMNS if caller == "_fetch_active_memories" else set()
-        )
-        extra = _memory_attributes(fn) - allowed
+        extra = _memory_attributes(fn) - _DEDUP_CALLER_COLUMNS
         assert not extra, f"{caller} names {sorted(extra)} beside {_DEDUP_RULE}"
+
+    # #3019: the window's two lanes order and bound the rows the rule allows.
+    import services.sleep.coverage as coverage
+
+    lanes = _fn(coverage, "fetch_window")
+    assert _memory_attributes(lanes) == _DEDUP_LANE_COLUMNS
 
 
 def _is_predicate_call(node: ast.AST, name: str) -> bool:
@@ -465,10 +470,14 @@ def test_response_makes_no_unscoped_retention_promise(sleep_pass, scope):
 
 def test_dedup_merge_is_not_scope_gated():
     """Pin the reason the persistent branch needs the caveat too."""
+    import services.sleep.coverage as coverage
     import services.sleep.dedup_merge as dedup_merge
 
-    for name in (_DEDUP_RULE, *_DEDUP_RULE_CALLERS):
-        fn = _fn(dedup_merge, name)
+    for module, name in (
+        *((dedup_merge, fn_name) for fn_name in (_DEDUP_RULE, *_DEDUP_RULE_CALLERS)),
+        (coverage, "fetch_window"),
+    ):
+        fn = _fn(module, name)
         assert not any(
             isinstance(node, ast.Attribute) and node.attr == "scope" for node in ast.walk(fn)
         ), f"dedup {name} is now scope-gated — the persistent-scope wording can be widened"

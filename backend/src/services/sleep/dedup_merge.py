@@ -59,6 +59,16 @@ from services.deferred_point_deletes import PointDelete, queue_point_deletes
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
 from services.resource_indexer import unshared_point_id
+from services.sleep.coverage import (
+    BUDGET,
+    FAILURE,
+    PASSED,
+    SETTLED,
+    DedupCoverage,
+    DedupLanes,
+    fetch_window,
+    sweep_call_share,
+)
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     DEDUP_JUDGE_SYSTEM,
@@ -313,6 +323,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
     _rows_without_neighbour: int = 0
     _rows_search_failed: int = 0
     _hits_not_eligible: int = 0
+    # #3019: the window rows whose embed and search succeeded (None: the
+    # search was stubbed, every row counts as searched).
+    _searched_ok: set[UUID] | None = None
 
     def __init__(
         self,
@@ -320,12 +333,21 @@ class DedupMergePhase(EmbeddingSpendTracker):
         llm_service: LLMService,
         embedding_model: str | None = None,
         collection_name: str | None = None,
+        *,
+        coverage: DedupLanes | None = None,
     ):
         self.db = db
         self.llm_service = llm_service
         self.edge_repo = NeuralEdgeRepository(db)
         self.embedding_service = EmbeddingService(db, model=embedding_model)
         self.collection_name = collection_name
+        # #3019: the partition's lane positions as the last run left them
+        # (None: a first run), and this run's window with each row's outcome,
+        # which the orchestrator turns into the next positions. A stubbed
+        # fetch leaves the window None: rows are judged in list order and the
+        # positions are carried unchanged.
+        self._lanes = coverage or DedupLanes()
+        self.coverage_outcome: DedupCoverage | None = None
         # #475: embedding cost-grade accumulators (init here so
         # ``_find_similar_pairs`` can be unit-tested without execute()).
         self._embedding_calls_used: int = 0
@@ -653,6 +675,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         self._rows_without_neighbour = 0
         self._rows_search_failed = 0
         self._hits_not_eligible = 0
+        self._searched_ok = None
+        self.coverage_outcome = None
+        calls_at_entry = max(0, budget.max_llm_calls - budget.llm_calls_used)
 
         if not config.sleep_dedup_enabled:
             result.skipped = True
@@ -691,6 +716,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
             extra_neighbors=pinned_in_scope,
         )
         if not pairs:
+            self._settle_outcomes(memories)
             result.details = {
                 "message": "no_duplicate_candidates",
                 **phase_outcome(len(memories), self._search_reasons()),
@@ -709,6 +735,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                 pairs, user_id
             )
             if not pairs:
+                self._settle_outcomes(memories)
                 result.details = {
                     "message": "all_candidates_already_superseded",
                     "settled_pairs_skipped": settled_pairs_skipped,
@@ -737,14 +764,15 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # cross-subcluster pairs are counted as deferred, not silently lost.
         split_subclusters = 0
         deferred_pairs = 0
-        for big in oversize:
+        # #3019: the original oversize cluster each subcluster came from.
+        origin_of: dict[int, int] = {}
+        for big_index, big in enumerate(oversize):
             subclusters, skipped = _split_oversize_cluster(big, pairs)
             split_subclusters += len(subclusters)
             deferred_pairs += skipped
-            # Appended AFTER the normal-size clusters deliberately: under
-            # budget exhaustion the pre-existing cluster set keeps priority
-            # and mega-cluster subclusters only consume the margin.
-            processable.extend(subclusters)
+            for subcluster in subclusters:
+                origin_of[len(processable)] = big_index
+                processable.append(subcluster)
 
         if oversize:
             logger.info(
@@ -774,71 +802,96 @@ class DedupMergePhase(EmbeddingSpendTracker):
         # rather than candidate discovery — merges on these are "rescues"
         # the top-10 candidate cap would previously have vetoed.
         backfilled_keys: set[tuple[UUID, UUID]] = set()
-        # #3019: clusters judged with no merge, whose judge call failed, and
-        # left unjudged when the calls ran out.
+        # #3019: clusters judged with no merge, and whose judge call failed;
+        # what happened to each cluster (for its window rows' outcomes).
         kept_both = 0
         failed_clusters = 0
-        unjudged_clusters = 0
+        judge_answered = False
+        cluster_state: dict[int, str] = {}
+        merged_oversize: set[int] = set()
+        shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
 
-        for index, cluster in enumerate(processable):
-            if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
-                unjudged_clusters = len(processable) - index
-                break
+        for order, cap in self._judge_stages(
+            processable, memories, llm_enabled=llm_enabled, calls=calls_at_entry
+        ):
+            for index in order:
+                if index in cluster_state:
+                    continue
+                if cap is not None and budget.llm_calls_used - llm_calls_before >= cap:
+                    break
+                if not budget.can_afford(llm_calls=1 if llm_enabled else 0):
+                    break
+                cluster = processable[index]
+                if llm_enabled:
+                    await self._load_outside_members(
+                        cluster, memory_map, user_id, workspace_id, context_id
+                    )
+                # A member that no longer loads (forgotten, pinned, moved) is
+                # left out of the cluster.
+                cluster_memories = [memory_map[mid] for mid in cluster if mid in memory_map]
+                if len(cluster_memories) < 2:
+                    cluster_state[index] = "dropped"
+                    continue
 
-            if llm_enabled:
-                await self._load_outside_members(
-                    cluster, memory_map, user_id, workspace_id, context_id
+                self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
+
+                failures_before = self._llm_failures
+                merge_decisions = await self._judge_cluster(
+                    cluster_memories,
+                    pair_scores,
+                    llm_enabled,
+                    user_id,
+                    context_id,
+                    workspace_id,
+                    budget,
+                    config,
                 )
-            # A member that no longer loads (forgotten, pinned, moved) is
-            # left out of the cluster.
-            cluster_memories = [memory_map[mid] for mid in cluster if mid in memory_map]
-            if len(cluster_memories) < 2:
-                continue
+                if self._llm_failures > failures_before:
+                    failed_clusters += 1
+                    cluster_state[index] = "failed"
+                else:
+                    judge_answered = True
+                    cluster_state[index] = "judged"
+                    if not merge_decisions:
+                        kept_both += 1
 
-            self._backfill_cluster_scores(cluster_memories, pair_scores, backfilled_keys)
+                merge_jobs = self._plan_cluster_merges(
+                    merge_decisions,
+                    memory_map,
+                    pair_scores,
+                    backfilled_keys,
+                    threshold,
+                    tally,
+                    snapshot_audit=bool(reporter and report_id),
+                    exempt_tags=exempt_tags,
+                )
+                merged_before = tally.merged
+                await self._execute_merge_jobs(
+                    merge_jobs,
+                    shadow_mode=shadow_mode,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    context_id=context_id,
+                    pair_scores=pair_scores,
+                    result=result,
+                    tally=tally,
+                    reporter=reporter,
+                    report_id=report_id,
+                )
+                if tally.merged > merged_before and index in origin_of:
+                    merged_oversize.add(origin_of[index])
 
-            failures_before = self._llm_failures
-            merge_decisions = await self._judge_cluster(
-                cluster_memories,
-                pair_scores,
-                llm_enabled,
-                user_id,
-                context_id,
-                workspace_id,
-                budget,
-                config,
-            )
-            if self._llm_failures > failures_before:
-                failed_clusters += 1
-            elif not merge_decisions:
-                kept_both += 1
+                result.memories_processed += len(cluster_memories)
 
-            shadow_mode = bool(getattr(config, "sleep_dedup_supersede_enabled", False))
-
-            merge_jobs = self._plan_cluster_merges(
-                merge_decisions,
-                memory_map,
-                pair_scores,
-                backfilled_keys,
-                threshold,
-                tally,
-                snapshot_audit=bool(reporter and report_id),
-                exempt_tags=exempt_tags,
-            )
-            await self._execute_merge_jobs(
-                merge_jobs,
-                shadow_mode=shadow_mode,
-                user_id=user_id,
-                workspace_id=workspace_id,
-                context_id=context_id,
-                pair_scores=pair_scores,
-                result=result,
-                tally=tally,
-                reporter=reporter,
-                report_id=report_id,
-            )
-
-            result.memories_processed += len(cluster_memories)
+        unjudged_clusters = len(processable) - len(cluster_state)
+        self._settle_outcomes(
+            memories,
+            processable=processable,
+            cluster_state=cluster_state,
+            oversize=oversize,
+            merged_oversize=merged_oversize,
+            judge_answered=judge_answered,
+        )
 
         result.details = {
             "candidates": len(pairs),
@@ -924,6 +977,104 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
         return result
 
+    def _judge_stages(
+        self,
+        processable: list[set[UUID]],
+        memories: list[Memory],
+        *,
+        llm_enabled: bool,
+        calls: int,
+    ) -> list[tuple[list[int], int | None]]:
+        """The order the clusters are judged in, as stages (#3019).
+
+        Each stage is (cluster indexes, a cap on the calls the phase may have
+        used when the stage judges its next cluster, or None). ``C`` holds the
+        clusters with a changed-lane row, ordered by their earliest such row;
+        ``S`` those with a sweep-lane row, by their earliest sweep row (a
+        cluster of both lanes is in both and judged once). With a judge, ``C``
+        first until the sweep's share of the calls is all that is left, then
+        ``S`` with every call left, then the rest of ``C``: neither lane can use
+        the other's share. On the rule path every cluster is judged, ``C`` then
+        ``S``. Without a window (a stubbed fetch) the clusters are judged in the
+        order of their earliest row in the fetched list.
+        """
+        window = self.coverage_outcome
+
+        def ordered(position: dict[UUID, int]) -> list[int]:
+            first = {
+                index: min(position[mid] for mid in cluster if mid in position)
+                for index, cluster in enumerate(processable)
+                if any(mid in position for mid in cluster)
+            }
+            return sorted(first, key=lambda index: first[index])
+
+        if window is None:
+            listed = {m.id: i for i, m in enumerate(memories)}
+            last = len(memories)
+            return [
+                (
+                    sorted(
+                        range(len(processable)),
+                        key=lambda index: min(listed.get(mid, last) for mid in processable[index]),
+                    ),
+                    None,
+                )
+            ]
+        changed = ordered({key[1]: i for i, key in enumerate(window.changed)})
+        sweep = ordered({key[1]: i for i, key in enumerate(window.sweep)})
+        if not llm_enabled:
+            return [(changed, None), (sweep, None)]
+        sweep_calls = sweep_call_share(calls, self._lanes.turn)
+        return [(changed, calls - sweep_calls), (sweep, None), (changed, None)]
+
+    def _settle_outcomes(
+        self,
+        memories: list[Memory],
+        *,
+        processable: list[set[UUID]] | None = None,
+        cluster_state: dict[int, str] | None = None,
+        oversize: list[set[UUID]] | None = None,
+        merged_oversize: set[int] | None = None,
+        judge_answered: bool = False,
+    ) -> None:
+        """Each window row's outcome in this run (#3019), on ``coverage_outcome``.
+
+        ``settled``: its search succeeded and it has no eligible pair, or its
+        cluster was judged (the judge answered, or the rule path), or could not
+        be judged because fewer than two members loaded. ``budget``: its cluster
+        was not reached for lack of calls, or a merge executed in the original
+        oversize cluster it belongs to (the rest is judged next run). A failure
+        of the row's own — its search, or its cluster's judge call — is
+        ``passed`` when the same kind of work succeeded for another row in this
+        run, else ``failure`` (an outage holds the lane).
+        """
+        window = self.coverage_outcome
+        if window is None:
+            return
+        searched = self._searched_ok
+        any_searched = searched is None or bool(searched)
+        cluster_of = {mid: index for index, c in enumerate(processable or []) for mid in c}
+        oversize_of = {mid: index for index, c in enumerate(oversize or []) for mid in c}
+        states = cluster_state or {}
+        merged = merged_oversize or set()
+        for memory in memories:
+            mid = memory.id
+            if searched is not None and mid not in searched:
+                outcome = PASSED if any_searched else FAILURE
+            elif oversize_of.get(mid) in merged:
+                outcome = BUDGET
+            elif mid in cluster_of:
+                state = states.get(cluster_of[mid])
+                if state in ("judged", "dropped"):
+                    outcome = SETTLED
+                elif state == "failed":
+                    outcome = PASSED if judge_answered else FAILURE
+                else:
+                    outcome = BUDGET
+            else:
+                outcome = SETTLED
+            window.outcomes[mid] = outcome
+
     async def _fetch_active_memories(
         self,
         user_id: str,
@@ -931,7 +1082,14 @@ class DedupMergePhase(EmbeddingSpendTracker):
         context_id: str | None,
         limit: int = 500,
     ) -> list[Memory]:
-        """Fetch the window: eligible memories (``dedup_eligible``), capped by limit.
+        """Fetch the window: up to ``limit`` eligible memories (``dedup_eligible``).
+
+        #3019: the rows come from two lanes (``services.sleep.coverage``): the
+        rows changed since the changed lane's position (newest first when more
+        changed than fit), then the sweep over older rows in stable
+        ``(created_at, id)`` order, so every row of the partition is read in a
+        bounded number of runs. The window and each row's outcome are kept on
+        ``coverage_outcome`` for the orchestrator.
 
         #1519: ``delivery_mode='always'`` rows are the deterministic
         ``load_pinned()`` lane (#886) and never enter dedup candidacy. A pinned
@@ -954,23 +1112,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
         belong to their source, which alone removes or replaces them. They are
         also no longer embedded here, one embedding call each per run.
         """
-        stmt = (
-            select(Memory)
-            .where(dedup_eligible(user_id, workspace_id, context_id))
-            # #1868: ``updated_at`` is NULL until a memory is edited, and
-            # PostgreSQL sorts NULLs first under DESC — the bare column put
-            # every never-edited row ahead of every edited one, unordered.
-            # Fall back to ``created_at`` and break ties on ``id`` so the cap
-            # keeps the most recent memories, the same ones on every run.
-            .order_by(
-                func.coalesce(Memory.updated_at, Memory.created_at).desc(),
-                Memory.id.desc(),
-            )
-            .limit(limit)
+        memories, window = await fetch_window(
+            self.db, dedup_eligible(user_id, workspace_id, context_id), self._lanes, limit
         )
-
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+        self.coverage_outcome = window
+        return memories
 
     async def _eligible_outside_ids(
         self,
@@ -1131,6 +1277,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         self._rows_without_neighbour = 0
         self._rows_search_failed = 0
         self._hits_not_eligible = 0
+        self._searched_ok = set()
 
         for memory in memories:
             row_hits: list[tuple[UUID, float]] = []
@@ -1167,6 +1314,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
                     error=str(e),
                 )
                 continue
+            self._searched_ok.add(memory.id)
             hits_by_row.append((memory.id, row_hits))
             if not row_hits:
                 self._rows_without_neighbour += 1
