@@ -119,13 +119,13 @@ def test_the_viewer_is_inside_the_predicate():
     )
 
 
-# Invariant: the rule is written once. Only the recorder and the predicate
-# access the column.
+# Invariant: the rule is written once. Only the recorder, the predicate and the
+# context merge copy access the column.
 _SRC = Path(__file__).resolve().parents[2] / "src"
 _ACCESS = re.compile(r"\.first_delivered_at\b")
 
 
-def test_only_the_recorder_and_the_predicate_access_the_column():
+def test_only_the_recorder_the_predicate_and_the_merge_copy_access_the_column():
     hits = {
         p.relative_to(_SRC).as_posix()
         for p in _SRC.rglob("*.py")
@@ -134,4 +134,5 @@ def test_only_the_recorder_and_the_predicate_access_the_column():
     assert hits == {
         "repositories/memory.py",
         "services/never_delivered.py",
+        "services/context_service.py",
     }

@@ -1398,6 +1398,15 @@ class ContextService:
                 # on the model.
                 access_count=0,
                 reference_count=0,
+                # #3022: the delivery history travels with the copy, which keeps
+                # the source's created_at: first_delivered_at, last_delivered_at
+                # and last_used_at. Without them every copy past the
+                # never-delivered age threshold would be listed as never
+                # delivered, however often the source row was delivered (most
+                # use signals predate delivery recording, hence last_used_at).
+                first_delivered_at=mem.first_delivered_at,
+                last_delivered_at=mem.last_delivered_at,
+                last_used_at=mem.last_used_at,
                 client=mem.client,
                 client_version=mem.client_version,
                 source=mem.source,

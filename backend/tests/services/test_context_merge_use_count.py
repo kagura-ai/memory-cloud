@@ -15,6 +15,7 @@ field-set fails here instead of in production.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -381,6 +382,44 @@ async def test_the_usage_stats_reset_as_one_group():
     _, rows, _, _ = await _run_merge([_source_memory])
     assert rows[0].access_count == 0
     assert rows[0].reference_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_copy_carries_its_delivery_history():
+    """#3022: a merged copy keeps when it was delivered and last used.
+
+    The copy keeps the source's ``created_at``; without these three columns
+    every copy older than the never-delivered threshold would read as never
+    delivered, however often it was delivered in the source. The two counters
+    still reset as one group.
+    """
+    first = utcnow() - timedelta(days=300)
+    last = utcnow() - timedelta(days=20)
+    used = utcnow() - timedelta(days=10)
+
+    def source(u, c):
+        mem = _source_memory(u, c)
+        mem.first_delivered_at = first
+        mem.last_delivered_at = last
+        mem.last_used_at = used
+        mem.access_count = 7
+        mem.reference_count = 2
+        return mem
+
+    _, rows, _, _ = await _run_merge([source])
+    assert rows[0].first_delivered_at == first
+    assert rows[0].last_delivered_at == last
+    assert rows[0].last_used_at == used
+    assert rows[0].access_count == 0
+    assert rows[0].reference_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_never_delivered_source_row_stays_unstamped():
+    _, rows, _, _ = await _run_merge([_source_memory])
+    assert rows[0].first_delivered_at is None
+    assert rows[0].last_delivered_at is None
+    assert rows[0].last_used_at is None
 
 
 @pytest.mark.asyncio
