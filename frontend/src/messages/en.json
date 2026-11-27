@@ -4196,6 +4196,20 @@
       "action": "View report"
     }
   },
+  "neverDelivered": {
+    "cardTitle": "Never delivered",
+    "cardBody": "{count, plural, one {# of your memories} other {# of your memories}} in this context: older than {days} days, content never returned by a search and never opened. Nothing is deleted automatically.",
+    "cardExcluded": "Not counted: pinned memories, time memories, tool guardrails, memories indexed from a connected source, and memories that replaced an older one.",
+    "cardExcludedWithTags": "Not counted: pinned memories, time memories, tool guardrails, memories indexed from a connected source, memories that replaced an older one, and memories tagged {tags}.",
+    "cardReview": "Review in Memories",
+    "cardNoAccess": "A workspace admin can review them in the Memories tab; your assistant can list them with the never_delivered filter.",
+    "chip": "Never delivered",
+    "chipRemove": "Remove the never-delivered filter",
+    "chipHint": "Your own memories past the age threshold whose content was never returned by a search or opened. Opening one takes it off this list. Delete by filter is not available in this view.",
+    "emptyTitle": "No never-delivered memories",
+    "emptyDesc": "None of your memories in this context is past the age threshold without having been delivered. Remove the filter to see every memory.",
+    "emptyAction": "Show every memory"
+  },
   "contextSettings": {
     "title": "{contextName} — Settings",
     "description": "Manage context settings and configurations",

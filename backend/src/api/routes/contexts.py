@@ -25,6 +25,7 @@ from config.constants import (
     CONTEXT_DESCRIPTION_MAX_LENGTH,
     CONTEXT_SUMMARY_MAX_LENGTH,
     CONTEXT_USAGE_GUIDE_MAX_LENGTH,
+    NEVER_DELIVERED_AGE_DAYS,
     RESOURCE_ID_MAX_LENGTH,
     RESOURCE_ID_PATTERN,
 )
@@ -35,7 +36,10 @@ from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.context_service import ContextService, TagSortMode
+from services.exempt_tags import exempt_tags
 from services.identity_link_service import linked_user_ids
+from services.memory_listing import count_never_delivered
+from services.permission_service import PermissionService
 from services.plan_seats import writes_paused_context_ids
 from utils.datetime import to_utc_iso
 from utils.exceptions import (
@@ -2070,6 +2074,62 @@ async def get_memory_usage_stats(
         total=total,
         sort_by=sort_by,
         sort_order=sort_order,
+    )
+
+
+class NeverDeliveredCountResponse(BaseModel):
+    """#3022: how many of the caller's memories in a context were never delivered."""
+
+    count: int = Field(..., description="Never-delivered memories of the caller in this context")
+    older_than_days: int = Field(..., description="The age threshold the count applied")
+    exempt_tags: list[str] = Field(
+        ..., description="Tags that keep a memory out of the count (exact match), sorted"
+    )
+
+
+@router.get(
+    "/{context_id}/never-delivered-count",
+    response_model=NeverDeliveredCountResponse,
+)
+async def get_never_delivered_count(
+    context_id: UUID,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> NeverDeliveredCountResponse:
+    """Count the caller's never-delivered memories in a context (#3022).
+
+    The caller's own memories (linked accounts included) created more than
+    ``NEVER_DELIVERED_AGE_DAYS`` ago whose content was never delivered and
+    which show no earlier use; pinned, time and tool-guardrail memories, rows
+    indexed from a connected source, rows with an exempt tag, every memory of
+    a public context and the newer side of a supersede link are left out
+    (``services.never_delivered``). The number equals the ``total`` of
+    ``GET /memory/list?context_id=...&never_delivered=true`` and of the MCP
+    ``list`` filter. Session only; computed per request, never cached; served
+    while the workspace is capacity-locked (the clean-up surface).
+
+    Raises:
+        NotFoundException: 404 for a context the caller cannot read.
+    """
+    user_id = user["user_id"]
+    context = await PermissionService(db).resolve_context_for_workspace_read(
+        user_id=user_id,
+        context_id=context_id,
+        key_workspace_id=user.get("api_key_workspace_id"),
+        capacity=CapacityPolicy.ALLOWED,
+    )
+    exempt = exempt_tags()
+    count = await count_never_delivered(
+        db,
+        context_id=context_id,
+        owner_user_id=user_id if context.is_private else None,
+        viewer_user_id=user_id,
+        exempt=exempt,
+    )
+    return NeverDeliveredCountResponse(
+        count=count,
+        older_than_days=NEVER_DELIVERED_AGE_DAYS,
+        exempt_tags=sorted(exempt),
     )
 
 

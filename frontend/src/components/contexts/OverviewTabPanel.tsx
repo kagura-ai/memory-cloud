@@ -55,6 +55,7 @@ import {
   PublicEndpointUsage,
   shouldShowPublicEndpointUsage,
 } from "@/components/dashboard/PublicEndpointUsage";
+import { NeverDeliveredCard } from "@/components/contexts/NeverDeliveredCard";
 import { formatRelativeTime, formatDate } from "@/lib/utils/datetime";
 import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
@@ -83,7 +84,8 @@ export function OverviewTabPanel({
   const [publicAPIStats, setPublicAPIStats] =
     useState<PublicAPIStatsResponse | null>(null);
   const [timelineDays, setTimelineDays] = useState<7 | 30>(7);
-  // #3035: bumped by Refresh so the owner's endpoint card reloads too.
+  // Bumped by Refresh so the cards that load their own data (the
+  // never-delivered count, #3022; the owner's endpoint usage, #3035) reload too.
   const [refreshKey, setRefreshKey] = useState(0);
   const { currentWorkspace, currentWorkspaceId } = useWorkspace();
   // Issue #398: User Activity is admin/owner only. Backend 403's the
@@ -282,6 +284,14 @@ export function OverviewTabPanel({
 
       {/* Memory Health & Neural Activity */}
       <RichMemoryOverview ref={overviewRef} contextId={contextId} />
+
+      {/* #3022: the Memories tab is gated by the same role check as
+          canSeeUserActivity (workspace Admin or above, page.tsx). */}
+      <NeverDeliveredCard
+        contextId={contextId}
+        canOpenMemories={canSeeUserActivity}
+        refreshKey={refreshKey}
+      />
 
       {/* User Activity Table — Issue #398: admin/owner only. */}
       {canSeeUserActivity && (

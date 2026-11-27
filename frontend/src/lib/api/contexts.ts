@@ -110,6 +110,24 @@ export async function getContextStats(
 }
 
 /**
+ * #3022: how many of the caller's own memories in a context were never
+ * delivered (older than `older_than_days`, content never returned by a search
+ * or read, no earlier use). Session only; computed per request.
+ */
+export interface NeverDeliveredCount {
+  count: number;
+  older_than_days: number;
+  /** Tags that keep a memory out of the count (exact match), sorted. */
+  exempt_tags: string[];
+}
+
+export async function getNeverDeliveredCount(contextId: string): Promise<NeverDeliveredCount> {
+  return apiClient.get<NeverDeliveredCount>(
+    `/api/v1/contexts/${contextId}/never-delivered-count`,
+  );
+}
+
+/**
  * Create a new context
  */
 export async function createContext(

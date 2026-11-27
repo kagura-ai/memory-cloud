@@ -230,6 +230,7 @@ ROUTES: dict[tuple[str, str], str] = {
     ("PUT", "/api/v1/contexts/{context_id}/members/{user_id}"): ALLOWED,
     ("DELETE", "/api/v1/contexts/{context_id}/members/{user_id}"): ALLOWED,
     ("GET", "/api/v1/contexts/{context_id}/memory-stats"): ALLOWED,
+    ("GET", "/api/v1/contexts/{context_id}/never-delivered-count"): ALLOWED,
     ("GET", "/api/v1/contexts/{context_id}/stats"): ALLOWED,
     ("GET", "/api/v1/contexts/{context_id}/tags"): ALLOWED,
     # graph — memory content (MCP list_edges / create_edge)

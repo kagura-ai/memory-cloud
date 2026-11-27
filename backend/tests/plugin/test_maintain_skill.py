@@ -509,3 +509,23 @@ def test_the_guide_describes_the_backlog() -> None:
         assert needle in flat, needle
     # A server without the partial tag edits still closes a memo.
     assert "`tags=[...]`" in flat
+
+
+def test_never_delivered_read_uses_filters_the_list_accepts():
+    """#3022: the skill's never-delivered read passes filters ``list`` accepts.
+
+    The call check above validates tool parameter names, not the keys inside
+    ``filters``; this compiles the read's filter object as the handler would.
+    """
+    import json
+
+    from services.memory_listing import compile_memory_filters
+
+    text = _maintain()
+    calls = [m.group(0) for m in _CALL.finditer(text) if "never_delivered" in m.group(0)]
+    assert len(calls) == 1, calls
+    match = re.search(r"filters=(\{.*?\})(?:,|\))", calls[0])
+    assert match, calls[0]
+    filters = json.loads(match.group(1))
+    assert filters == {"never_delivered": True, "trust_tier": "trusted"}
+    assert compile_memory_filters(filters, viewer_user_id="u")

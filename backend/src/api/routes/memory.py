@@ -15,6 +15,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import APIKeyOrSessionUser
+from config.constants import NEVER_DELIVERED_AGE_DAYS
 from db.base import get_db
 from models.memory import Memory
 from models.schemas import (
@@ -43,7 +44,9 @@ from models.schemas import (
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import owned_by
+from services.memory_listing import listing_scope
 from services.memory_service import MemoryService
+from services.never_delivered import never_delivered_predicates
 from services.permission_service import PermissionService, reachable_memory_filter
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
@@ -1230,6 +1233,15 @@ async def list_memories(
     ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    never_delivered: bool = Query(
+        False,
+        description="#3022: only your own memories of this context that were never "
+        f"delivered: older than {NEVER_DELIVERED_AGE_DAYS} days, content never "
+        "returned by a search or read, no earlier use. Leaves out pinned, time and "
+        "tool-guardrail memories, rows indexed from a connected source, rows with an "
+        "exempt tag, every memory of a public context and a memory that superseded "
+        "another. Needs context_id. ANDs with the other filters; `total` is the count.",
+    ),
 ):
     """List memories for the authenticated user.
 
@@ -1253,6 +1265,9 @@ async def list_memories(
             contexts.
         limit: Maximum number of memories to return
         offset: Pagination offset
+        never_delivered: #3022 review filter (``services.never_delivered``);
+            needs ``context_id``. Tested with ``is True``: a direct call that
+            omits it passes the truthy ``Query`` default object.
 
     Returns:
         Paginated list of memories
@@ -1268,6 +1283,11 @@ async def list_memories(
 
         if not user_id:
             raise ValueError("user_id or sub not found in user object")
+
+        # #3022: without a context the scope is the caller's own id only (no
+        # linked accounts), so "own" would mean less than with one.
+        if never_delivered is True and context_id is None:
+            raise ValidationError("never_delivered needs context_id", field="never_delivered")
 
         # `owner_filter` is `user_id` for private contexts (creator-only) or
         # the unscoped "my memories" view (no context_id), and `None` for
@@ -1304,15 +1324,20 @@ async def list_memories(
         #
         # Soft-deleted rows are excluded: POST /forget sets ``deleted_at``
         # rather than removing the row, and the list must not surface tombstones.
-        filters: list[Any] = [Memory.deleted_at.is_(None)]
-        if binding_predicate is not None:
-            filters.append(binding_predicate)
-        if owner_filter is not None:
-            if context_id is not None:
-                # #1784: inside a private context the caller may read, the
-                # caller's own includes what a linked account wrote there.
-                filters.append(owned_by(Memory.user_id, owner_filter))
-            else:
+        filters: list[Any]
+        if context_id is not None:
+            # #3022: the scope of a one-context list, shared with the MCP list
+            # and the never-delivered count. #1784: inside a private context
+            # the caller may read, the caller's own includes what a linked
+            # account wrote there.
+            filters = listing_scope(
+                context_id=context_id, owner_user_id=owner_filter, binding=binding_predicate
+            )
+        else:
+            filters = [Memory.deleted_at.is_(None)]
+            if binding_predicate is not None:
+                filters.append(binding_predicate)
+            if owner_filter is not None:
                 # No context: the caller's own id only. A link never reaches
                 # into a workspace the caller is not a member of, and nothing
                 # scopes this view to one.
@@ -1330,8 +1355,6 @@ async def list_memories(
             filters.append(Memory.scope == scope)
         if type:
             filters.append(Memory.type == type)
-        if context_id is not None:
-            filters.append(Memory.context_id == context_id)
         if q_pattern is not None:
             filters.append(Memory.summary.ilike(q_pattern, escape="\\"))
         tag_filter = _list_tag_filter(tags_normalized, tags_match)
@@ -1339,6 +1362,9 @@ async def list_memories(
             filters.append(tag_filter)
         filters.extend(_list_window_filters(trigger_from, trigger_until))
         filters.extend(_list_geo_filters(lat_min, lat_max, lon_min, lon_max))
+        if never_delivered is True:
+            # #3022: the one predicate the MCP list and the count use too.
+            filters.extend(never_delivered_predicates(user_id))
 
         count_result = await db.execute(select(func.count(Memory.id)).where(*filters))
         total = count_result.scalar() or 0
@@ -1367,6 +1393,7 @@ async def list_memories(
             q_present=q_normalized is not None,
             q_len=len(q_normalized) if q_normalized else 0,
             tag_filter_count=len(tags_normalized) if tags_normalized else 0,
+            never_delivered=never_delivered is True,
         )
 
         return MemoryListResponse(memories=memory_items, total=total, has_more=has_more)
