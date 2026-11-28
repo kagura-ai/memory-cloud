@@ -42,7 +42,11 @@ def _maker(async_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def row(async_engine: AsyncEngine) -> AsyncIterator[Memory]:
-    """A committed pending row old enough for the sweep (its 10 s threshold)."""
+    """A committed pending row old enough for the sweep (its 10 s threshold).
+
+    Older than any row another file can leave behind: the sweep takes the
+    oldest 20 candidates, so this row is always among them.
+    """
     memory = Memory(
         id=uuid4(),
         workspace_id=uuid4(),
@@ -52,7 +56,7 @@ async def row(async_engine: AsyncEngine) -> AsyncIterator[Memory]:
         type="note",
         scope="working",
         client="test",
-        created_at=utcnow() - timedelta(minutes=1),
+        created_at=utcnow() - timedelta(days=36500),
         embedding_status="pending",
     )
     async with _maker(async_engine)() as session:
