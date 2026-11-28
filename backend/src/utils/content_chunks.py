@@ -271,7 +271,9 @@ def _take_lead_line(text: str, name: str, value: str) -> tuple[str | None, str]:
     can span lines. Returns ``(line, rest)`` when exactly one line is labelled
     ``name`` or, failing that, exactly one line of any label carries the value;
     else ``(None, text)`` (the field is not in the indexed text, or which line
-    is its own is ambiguous).
+    is its own is ambiguous). In that fallback a line whose label part holds
+    ``": "`` is no field's line (it sits inside another field's multi-line
+    value) and is not counted.
     """
     needle = f": {value}"
     spans: list[tuple[int, int, str]] = []
@@ -284,7 +286,8 @@ def _take_lead_line(text: str, name: str, value: str) -> tuple[str | None, str]:
                 spans.append((start, end, text[start:at]))
         at = text.find(needle, at + 1)
     named = [span for span in spans if span[2] == name]
-    picked = named if len(named) == 1 else spans if len(spans) == 1 else []
+    labelled = [span for span in spans if ": " not in span[2]]
+    picked = named if len(named) == 1 else labelled if len(labelled) == 1 else []
     if not picked:
         return None, text
     start, end, _label = picked[0]

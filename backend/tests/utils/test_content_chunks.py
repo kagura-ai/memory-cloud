@@ -272,6 +272,18 @@ class TestRerankDocument:
         doc = rerank_document({"payload": {"content": content, "metadata": {"title": "Red"}}})
         assert doc == content
 
+    def test_a_line_inside_another_fields_value_is_not_a_lead_line(self):
+        # No line carries the field's own label; the one line that ends in the
+        # value sits inside a multi-line value (its label part holds ": ").
+        content = "description: See the notes\nNote: replaces: Shoe\nbrand: B"
+        doc = rerank_document({"payload": {"content": content, "metadata": {"title": "Shoe"}}})
+        assert doc == content
+
+    def test_a_line_inside_another_fields_value_does_not_hide_the_fields_own_line(self):
+        content = "description: Old\nNote: was: Shoe\nProduct name: Shoe"
+        doc = rerank_document({"payload": {"content": content, "metadata": {"title": "Shoe"}}})
+        assert doc == "Product name: Shoe\ndescription: Old\nNote: was: Shoe"
+
     def test_a_numeric_lead_value_moves_its_line(self):
         content = "brand: B\nsku: 12345"
         doc = rerank_document({"payload": {"content": content, "metadata": {"sku": 12345}}})
