@@ -166,7 +166,7 @@ async def close_usage_day(db: AsyncSession, day: date, *, now: datetime | None =
     try:
         await db.execute(_LOCK_EXCLUSIVE, {"key": day_lock_key(day)})
         closed = await count_day(db, day, now=now or utcnow())
-    except BaseException:
+    except Exception:
         await db.rollback()
         raise
     if closed:

@@ -23,16 +23,19 @@ An hourly job (#3053) closes the finished days of the per-day counts
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.settings import get_settings
 from db.base import get_db
-from services.public_mcp_usage_rollup import close_usage_days, first_whole_day
+from services.public_mcp_usage_rollup import (
+    close_usage_days,
+    first_whole_day,
+    retention_cutoff,
+)
 from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -110,7 +113,8 @@ async def purge_public_mcp_usage_events(
         Number of events deleted.
     """
     now = now or utcnow()
-    cutoff = now - timedelta(days=get_settings().mcp_public_telemetry_retention_days)
+    # One definition with the close of a day (#3053).
+    cutoff = retention_cutoff(now)
     total = 0
     while True:
         deleted = (await db.execute(_DELETE_BATCH, {"cutoff": cutoff, "limit": batch_size})).all()
