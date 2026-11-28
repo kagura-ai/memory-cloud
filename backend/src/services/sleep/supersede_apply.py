@@ -574,6 +574,12 @@ class SupersedeApplyPhase:
                 )
             ):
                 raise _PairRefused(REASON_CHANGED_SINCE_READ)
+            # Both rows stay locked until the run commits (through the
+            # reindex), but an edge write takes no memory lock: an edge another
+            # account writes on the pair after this read is not read again (a
+            # person's older -> newer link has another unique key and can then
+            # stand next to this one). The run user's own newer -> older row is
+            # guarded by the upsert (``protect_declared_link``).
             edge_reason = _edge_refusal(
                 await self._read_pair_edges({carrier.id, target.id}),
                 user_id=user_id,
