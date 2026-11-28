@@ -32,7 +32,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, event, select
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.agent_scope import AgentScope, set_agent_scope
@@ -198,14 +198,28 @@ async def world(async_engine) -> AsyncIterator[World]:
             from models.memory_access_event import MemoryAccessEvent
             from models.operation_history import OperationHistory
 
+            # The access audit has no foreign key and is append-only (a
+            # migrated schema refuses its DELETE): off for this one
+            # transaction, as in the other agent e2e tests. DISABLE TRIGGER is
+            # transactional DDL, so the ENABLE before the commit, or the
+            # rollback, turns the guard back on for every later test.
+            try:
+                await s.execute(text("ALTER TABLE memory_access_events DISABLE TRIGGER USER"))
+                await s.execute(
+                    delete(MemoryAccessEvent).where(MemoryAccessEvent.workspace_id.in_(ids))
+                )
+                await s.execute(text("ALTER TABLE memory_access_events ENABLE TRIGGER USER"))
+                await s.commit()
+            except Exception:
+                await s.rollback()
+                raise
             for stmt in (
                 delete(WorkspaceSlotSuspension).where(
                     WorkspaceSlotSuspension.workspace_id.in_(ids)
                 ),
-                # No foreign keys: the history, the access audit and the
-                # purge's audit rows outlive the workspaces.
+                # No foreign keys: the history and the purge's audit rows
+                # outlive the workspaces.
                 delete(OperationHistory).where(OperationHistory.workspace_id.in_(ids)),
-                delete(MemoryAccessEvent).where(MemoryAccessEvent.workspace_id.in_(ids)),
                 delete(AuditLog).where(AuditLog.resource.in_([f"workspace:{i}" for i in ids])),
                 delete(ShareKey).where(ShareKey.user_id.in_(users)),
                 delete(Agent).where(Agent.workspace_id.in_(ids)),

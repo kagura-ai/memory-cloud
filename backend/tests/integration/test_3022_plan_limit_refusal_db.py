@@ -32,6 +32,7 @@ from config.constants import NEVER_DELIVERED_AGE_DAYS
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.deferred_point_delete import DeferredPointDelete
 from models.memory import Memory
+from models.operation_history import OperationHistory
 from models.schemas import RememberRequest
 from services import exempt_tags as exempt_module
 from services import memory_cap_refusal as mcr
@@ -58,7 +59,11 @@ async def _delete_committed_rows(db_session: AsyncSession):
     yield
     await db_session.rollback()
     workspaces = _committed["workspaces"]
-    # A forget queues its row's point delete; the rows' revisions cascade.
+    # A forget queues its row's point delete and records its history (no
+    # foreign keys); the rows' revisions cascade.
+    await db_session.execute(
+        delete(OperationHistory).where(OperationHistory.workspace_id.in_(workspaces))
+    )
     await db_session.execute(
         delete(DeferredPointDelete).where(
             DeferredPointDelete.memory_id.in_(
