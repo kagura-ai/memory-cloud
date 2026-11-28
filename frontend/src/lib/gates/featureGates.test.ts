@@ -49,6 +49,7 @@ const SERVER_QUOTA_TYPES = [
   "contexts",
   "members",
   "workspace_limit_reached",
+  "memories",
   "memories_per_day",
   "memory_analysis",
   "sleep_enabled_contexts",
@@ -314,6 +315,28 @@ describe("normalizeGate — legacy count aliases", () => {
       limit: 3,
       resetsAt: "2026-09-24T00:00:00+09:00",
     });
+  });
+
+  it("reads the total memory cap as a quota gate on memories (#3022)", () => {
+    expect(
+      normalizeGate(429, "QUOTA-001", {
+        gate: "quota",
+        quota_type: "memories",
+        current: 1000,
+        limit: 1000,
+        current_plan: "free",
+        required_plan: "basic",
+        remedies: ["cleanup", "upgrade"],
+        never_delivered_count: 3,
+      }),
+    ).toMatchObject({
+      state: "quota",
+      quotaType: "memories",
+      current: 1000,
+      limit: 1000,
+      requiredPlan: "basic",
+    });
+    expect(QUOTA_TYPE_TO_GATE_KEY.memories).toBe("memories");
   });
 
   it("aliases used_today/limit onto current/limit for memories_per_day", () => {

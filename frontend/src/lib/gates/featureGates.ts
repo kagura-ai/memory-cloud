@@ -288,6 +288,7 @@ export const QUOTA_TYPE_TO_GATE_KEY: Readonly<Record<string, GateKey>> = {
   contexts: "contexts",
   members: "members",
   workspace_limit_reached: "workspaces",
+  memories: "memories",
   memories_per_day: "memories",
   memory_analysis: "memory_analysis",
   sleep_enabled_contexts: "sleep_reports",
@@ -459,8 +460,8 @@ function asString(v: unknown): string | undefined {
  * Status 402 is not mapped — nothing on the server emits it (#1641 P-4).
  *
  * `QUOTA-001` alone is not enough: the server also raises it for limits no
- * tier lifts (the 1 MB memory-size guard, the total memory cap, a missing
- * workspace), and those carry no `quota_type`. Only a `quota_type` from the
+ * tier lifts (the 1 MB memory-size guard, a missing workspace), and those
+ * carry no `quota_type` (the total memory cap is typed `memories` since #3022). Only a `quota_type` from the
  * frozen vocabulary makes it a quota gate — the same rule the server applies
  * before it stamps `gate: "quota"`. Counts alone do not qualify: they name
  * no cap to render, and no server ever sent them without a type. Every
