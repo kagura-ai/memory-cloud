@@ -88,6 +88,8 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 
 import { OnboardingCard } from "./OnboardingCard";
 import { ApiError } from "@/lib/api/base";
+import en from "@/messages/en.json";
+import ja from "@/messages/ja.json";
 
 function setWorkspace(role: string = "owner") {
   mockUseWorkspace.mockReturnValue({
@@ -192,6 +194,53 @@ describe("OnboardingCard trigger gating", () => {
     expect(screen.queryByText("recovery")).not.toBeInTheDocument();
     expect(screen.queryByText("English server prose")).not.toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem("onboarding:u1:ws-1:wizard")!).step).toBe("ended");
+  });
+
+  it.each([
+    [["cleanup", "upgrade"], { current: 1000, limit: 1000 }, "errors.memoryLimit errors.memoryLimitUpgrade"],
+    [["cleanup", "admin"], { current: 1000, limit: 1000 }, "errors.memoryLimit errors.memoryLimitAdmin"],
+    [["cleanup"], {}, "errors.memoryLimitNoCounts"],
+  ])("names the workspace memory limit and its remedies (#3022): %j", async (remedies, counts, text) => {
+    const refusal = new ApiError({
+      status: 429,
+      error: "QUOTA-001",
+      message: "English server prose",
+      details: { gate: "quota", quota_type: "memories", remedies },
+      gate: { state: "quota", quotaType: "memories", ...counts },
+    });
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "memory", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
+    mockRemember.mockRejectedValueOnce(refusal);
+    render(<OnboardingCard replay />);
+    fireEvent.click(await screen.findByText("memory.saveButton"));
+    expect(await screen.findByText(text)).toBeVisible();
+    expect(screen.queryByText("errors.saveFailed")).not.toBeInTheDocument();
+    expect(screen.queryByText("English server prose")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["en", en, "(1,000 of 1,000)"],
+    ["ja", ja, "（1,000 / 1,000 件）"],
+  ])("formats the memory limit counts for the locale (%s)", async (locale, messages, counts) => {
+    const { createTranslator } = await vi.importActual<typeof import("next-intl")>("next-intl");
+    const t = createTranslator({ locale, messages, namespace: "onboarding" });
+    expect(t("errors.memoryLimit", { current: 1000, limit: 1000 })).toContain(counts);
+  });
+
+  it("keeps the generic save failure for another quota refusal", async () => {
+    const refusal = new ApiError({
+      status: 429,
+      error: "QUOTA-001",
+      message: "English server prose",
+      details: { gate: "quota", quota_type: "memories_per_day" },
+      gate: { state: "quota", quotaType: "memories_per_day", current: 100, limit: 100 },
+    });
+    window.localStorage.setItem("onboarding:u1:ws-1:wizard", JSON.stringify({ step: "memory", contextId: "c1" }));
+    mockGetContexts.mockResolvedValue({ contexts: [{ id: "c1", workspace_id: "ws-1", is_private: true, created_by: "u1" }] });
+    mockRemember.mockRejectedValueOnce(refusal);
+    render(<OnboardingCard replay />);
+    fireEvent.click(await screen.findByText("memory.saveButton"));
+    expect(await screen.findByText("errors.saveFailed")).toBeVisible();
   });
 
   it("keeps completed practice terminal after its context is deleted", async () => {

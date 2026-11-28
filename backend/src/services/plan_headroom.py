@@ -38,6 +38,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from config.constants import NEVER_DELIVERED_AGE_DAYS
 from config.plan_tiers import PLAN_ORDER, get_plan_tier, plan_rank
 from db.redis import set_if_absent
 from services.memory_counts import count_live_memories
@@ -301,6 +302,81 @@ def tool_neutral_help(notice: Mapping[str, Any]) -> str | None:
     ):
         return None
     return _help(dimension, remedies, resets_at, neutral=True)
+
+
+# ----------------------------------------------------- the total cap refusal
+# #3022: when the total cap refuses a write, the refusal carries the same
+# remedies as the notice above, the caller's never-delivered count in the
+# target context (``services.memory_cap_refusal``) and a help text built here,
+# from the same phrases, so the wording stays one table.
+_REVIEW_TEXT = (
+    "Review them with list(context_id, filters={'never_delivered': true}) and, with the "
+    "user's approval, forget the ones no longer needed (memory_ids takes up to 50)."
+)
+_NEUTRAL_REVIEW_TEXT = (
+    "Review them and, with the user's approval, remove the ones no longer needed."
+)
+
+
+def memory_cap_remedies(plan: str | None) -> list[str]:
+    """The remedies of a total-cap refusal: ``cleanup``, then ``upgrade`` / ``admin`` / none."""
+    return _remedies(MEMORIES, plan, billing=billing_configured())
+
+
+def never_delivered_sentence(count: int) -> str:
+    """The tool-free sentence naming the caller's never-delivered count."""
+    one = count == 1
+    return (
+        f"{count} of your memories in this context {'is' if one else 'are'} over "
+        f"{NEVER_DELIVERED_AGE_DAYS} days old and {'was' if one else 'were'} never delivered."
+    )
+
+
+def memory_cap_help(count: int | None, remedies: list[str], *, neutral: bool = False) -> str:
+    """The ``help`` of a total-cap refusal on MCP.
+
+    With a count above 0: the count sentence first (tool-free, so it survives
+    the google profile's pointer drop), how to review and delete, then the
+    plan remedy. Without one (0, or the count could not be read): the remedy
+    list of the headroom notice, without its "at 100 %" sentence.
+
+    Args:
+        count: The caller's never-delivered memories in the target context.
+        remedies: The refusal's remedies (``memory_cap_remedies``).
+        neutral: The wording without a tool name or a call recipe.
+    """
+    remedy_text = _NEUTRAL_REMEDY_TEXT if neutral else _REMEDY_TEXT
+    plan_remedies = [r for r in remedies if r != _CLEANUP]
+    if count:
+        parts = [
+            never_delivered_sentence(count),
+            _NEUTRAL_REVIEW_TEXT if neutral else _REVIEW_TEXT,
+        ]
+        parts.extend(f"Or {remedy_text[r]}." for r in plan_remedies)
+        return " ".join(parts)
+    text = ", or ".join(remedy_text[r] for r in [_CLEANUP, *plan_remedies])
+    return f"{text[0].upper()}{text[1:]}."
+
+
+def memory_cap_neutral_help(payload: Mapping[str, Any]) -> str | None:
+    """A total-cap refusal's ``help`` without a tool name (the ``google`` profile).
+
+    Built from the reply's own ``remedies`` and ``never_delivered_count``;
+    ``None`` when the reply is not such a refusal (its remedies must start
+    with ``cleanup``, which only the memory cap offers).
+    """
+    remedies = payload.get("remedies")
+    if (
+        not isinstance(remedies, list)
+        or not remedies
+        or remedies[0] != _CLEANUP
+        or not all(r in (_CLEANUP, _UPGRADE, _ADMIN) for r in remedies)
+    ):
+        return None
+    count = payload.get("never_delivered_count")
+    if not isinstance(count, int) or isinstance(count, bool):
+        count = None
+    return memory_cap_help(count, list(remedies), neutral=True)
 
 
 def _notice(dimension: str, reading: QuotaReading, *, billing: bool) -> dict[str, Any] | None:

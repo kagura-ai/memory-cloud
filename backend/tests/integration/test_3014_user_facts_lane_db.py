@@ -9,6 +9,9 @@ filters, supersede shadowing, the rows and the lane's session run on the
 database.
 
 Not executed in the local unit run — needs the DB container.
+
+These tests commit, so each deletes what it wrote: later files in the same CI
+shard read whole tables and expect them empty.
 """
 
 from __future__ import annotations
@@ -18,22 +21,59 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
+from models.config import ContextSearchConfig
 from models.memory import (
     EDGE_ORIGIN_DECLARED,
     EDGE_TYPE_SUPERSEDES,
     SOURCE_TYPE_CONNECTOR,
     Memory,
+    MemoryRevision,
     NeuralMemoryEdge,
 )
+from models.operation_history import OperationHistory
 from models.schemas import RecallRequest, RememberRequest
 from repositories.config_repository import ContextSearchConfigRepository
 from services.memory_service import MemoryService
 from services.quota_service import DailyReservation
 from services.search_service import SearchService
 from services.user_facts_lane import USER_FACTS_POOL_MARGIN, USER_FACTS_QUERY
+
+# (owner user id, workspace id) of every scope the running test committed.
+_created: list[tuple[str, UUID]] = []
+
+
+@pytest.fixture(autouse=True)
+async def _delete_committed_rows(db_session):
+    """Delete every row the test committed, by its own owners and workspaces."""
+    _created.clear()
+    yield
+    owners = [owner for owner, _ in _created]
+    workspaces = [ws_id for _, ws_id in _created]
+    memories = select(Memory.id).where(Memory.workspace_id.in_(workspaces))
+    contexts = select(Context.id).where(Context.workspace_id.in_(workspaces))
+    await db_session.rollback()
+    await db_session.execute(
+        delete(OperationHistory).where(OperationHistory.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(
+        delete(NeuralMemoryEdge).where(NeuralMemoryEdge.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(MemoryRevision).where(MemoryRevision.memory_id.in_(memories)))
+    await db_session.execute(delete(Memory).where(Memory.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(ContextSearchConfig).where(ContextSearchConfig.context_id.in_(contexts))
+    )
+    await db_session.execute(delete(Context).where(Context.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(Workspace).where(Workspace.id.in_(workspaces)))
+    await db_session.execute(delete(User).where(User.user_id.in_(owners)))
+    await db_session.commit()
+    _created.clear()
 
 
 @pytest.fixture
@@ -68,6 +108,7 @@ async def _scope(db, *, lane: bool = True) -> tuple[str, Workspace, Context]:
     )
     db.add(ws)
     await db.flush()
+    _created.append((owner, ws.id))
     db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
     ctx = await _context(db, owner, ws)
     await _switch(db, ctx.id, on=lane)

@@ -288,6 +288,7 @@ export const QUOTA_TYPE_TO_GATE_KEY: Readonly<Record<string, GateKey>> = {
   contexts: "contexts",
   members: "members",
   workspace_limit_reached: "workspaces",
+  memories: "memories",
   memories_per_day: "memories",
   memory_analysis: "memory_analysis",
   sleep_enabled_contexts: "sleep_reports",
@@ -459,8 +460,8 @@ function asString(v: unknown): string | undefined {
  * Status 402 is not mapped — nothing on the server emits it (#1641 P-4).
  *
  * `QUOTA-001` alone is not enough: the server also raises it for limits no
- * tier lifts (the 1 MB memory-size guard, the total memory cap, a missing
- * workspace), and those carry no `quota_type`. Only a `quota_type` from the
+ * tier lifts (the 1 MB memory-size guard, a missing workspace), and those
+ * carry no `quota_type` (the total memory cap is typed `memories` since #3022). Only a `quota_type` from the
  * frozen vocabulary makes it a quota gate — the same rule the server applies
  * before it stamps `gate: "quota"`. Counts alone do not qualify: they name
  * no cap to render, and no server ever sent them without a type. Every
@@ -659,31 +660,65 @@ function matrixPredicate(
 }
 
 /**
- * The matrix column holding each quota's cap, for "which tier raises it?".
- * Exactly the caps the server itself derives an upgrade tier for
- * (`lowest_tier_with_limit`, #1644). `storage` and `agents` are absent on
- * purpose — neither has an upgrade path (P-6) — so a quota gate on them
- * never carries `requiredPlan`, and therefore never a CTA.
+ * The matrix column holding each quota's cap, for "which tier raises it?",
+ * keyed by `quota_type`. Exactly the caps the server itself derives an
+ * upgrade tier for (`lowest_tier_with_limit`, #1644). `storage_bytes` and
+ * `agents` are absent on purpose — neither has an upgrade path (P-6) — so a
+ * quota gate on them never carries `requiredPlan`, and therefore never a CTA.
+ *
+ * Keyed by quota type, not gate key, because one gate key can name two caps:
+ * the total memory cap (`memories`, #3022) and the daily one
+ * (`memories_per_day`) both answer as the `memories` gate.
  */
-const QUOTA_CAP_FIELDS: Partial<Record<GateKey, NumericPlanTierKey>> = {
+const QUOTA_TYPE_CAP_FIELDS: Readonly<
+  Partial<Record<string, NumericPlanTierKey>>
+> = {
   contexts: "max_contexts",
   members: "max_members",
   resource_tokens: "max_resource_tokens",
   connectors: "max_connectors",
-  memories: "memories_per_day",
+  memories: "memory_limit",
+  memories_per_day: "memories_per_day",
   memory_analysis: "analysis_runs_per_day",
-  sleep_reports: "sleep_enabled_contexts_limit",
+  sleep_enabled_contexts: "sleep_enabled_contexts_limit",
 };
 
-/** The lowest served tier whose cap for `key` is above `limit`. */
+/**
+ * The cap column for a quota refusal: the column of `quotaType` when it is a
+ * frozen quota type; else (no type: `quotaGate` without one, a bare
+ * `gate: "quota"`) the column every quota type mapped onto `key` shares, and
+ * none when they differ — the `memories` key names two caps, so it guesses no
+ * tier rather than the wrong one.
+ */
+function capField(
+  key: GateKey,
+  quotaType: string | undefined,
+): NumericPlanTierKey | undefined {
+  if (quotaType !== undefined && hasOwn(QUOTA_TYPE_TO_GATE_KEY, quotaType)) {
+    return hasOwn(QUOTA_TYPE_CAP_FIELDS, quotaType)
+      ? QUOTA_TYPE_CAP_FIELDS[quotaType]
+      : undefined;
+  }
+  const fields = new Set(
+    Object.keys(QUOTA_TYPE_TO_GATE_KEY)
+      .filter((type) => QUOTA_TYPE_TO_GATE_KEY[type] === key)
+      .map((type) =>
+        hasOwn(QUOTA_TYPE_CAP_FIELDS, type)
+          ? QUOTA_TYPE_CAP_FIELDS[type]
+          : undefined,
+      ),
+  );
+  return fields.size === 1 ? [...fields][0] : undefined;
+}
+
+/** The lowest served tier whose cap for `key` / `quotaType` is above `limit`. */
 function tierRaisingCap(
   key: GateKey,
+  quotaType: string | undefined,
   limit: number,
   tiers: readonly PlanTierFeature[] | null | undefined,
 ): string | undefined {
-  const field = hasOwn(QUOTA_CAP_FIELDS, key)
-    ? QUOTA_CAP_FIELDS[key]
-    : undefined;
+  const field = capField(key, quotaType);
   if (!field || !tiers) return undefined;
   return requiredTierFor(tiers, (t) => (t[field] ?? 0) > limit)?.name;
 }
@@ -789,7 +824,7 @@ export function gateFromFacts(
     requiredPlan =
       facts.requiredPlan ??
       (facts.limit !== undefined
-        ? tierRaisingCap(feature, facts.limit, tiers)
+        ? tierRaisingCap(feature, facts.quotaType, facts.limit, tiers)
         : undefined);
   }
   const currentPlan =
@@ -869,6 +904,7 @@ export function deploymentFlagOff(
 
 function quotaDescriptor(args: {
   key: GateKey;
+  quotaType?: string;
   current: number;
   limit: number;
   planName: string | null | undefined;
@@ -876,7 +912,12 @@ function quotaDescriptor(args: {
   canUpgrade: boolean;
   locale: string | undefined;
 }): FeatureGate {
-  const requiredPlan = tierRaisingCap(args.key, args.limit, args.tiers);
+  const requiredPlan = tierRaisingCap(
+    args.key,
+    args.quotaType,
+    args.limit,
+    args.tiers,
+  );
   return {
     state: "quota",
     feature: args.key,
@@ -1085,9 +1126,14 @@ export function withOwnerGuidance(gate: FeatureGate, role: string | null | undef
  * the first served tier whose cap for `key` exceeds `limit`, absent when
  * none does or the matrix is unresolved — which is what keeps the storage
  * and agents caps, and a still-loading matrix, from offering an upgrade.
+ * `quotaType` names the cap where the key has two (`memories`: the total
+ * `memories` or the daily `memories_per_day`); without it that key offers
+ * no tier.
  */
 export function quotaGate(args: {
   key: GateKey;
+  /** The `quota_type` the counts are for; needed only by a two-cap key. */
+  quotaType?: string;
   current: number;
   limit: number;
   planName: string | null | undefined;

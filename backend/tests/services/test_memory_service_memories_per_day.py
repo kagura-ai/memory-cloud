@@ -112,7 +112,9 @@ class TestRememberCharges:
         result = await _remember(service, ctx, current_workspace_id=None)
 
         assert result.memory_id is not None
-        quota_service.check_memory_quota.assert_awaited_once_with(ws_b, raise_on_exceeded=True)
+        quota_service.check_memory_quota.assert_awaited_once_with(
+            ws_b, raise_on_exceeded=True, replacing=()
+        )
         quota_service.check_memories_per_day.assert_awaited_once_with(
             ws_b, count=1, raise_on_exceeded=True
         )
@@ -133,7 +135,9 @@ class TestRememberCharges:
 
         await _remember(service, ctx, current_workspace_id=ws_a)
 
-        quota_service.check_memory_quota.assert_awaited_once_with(ws_b, raise_on_exceeded=True)
+        quota_service.check_memory_quota.assert_awaited_once_with(
+            ws_b, raise_on_exceeded=True, replacing=()
+        )
         quota_service.check_memories_per_day.assert_awaited_once_with(
             ws_b, count=1, raise_on_exceeded=True
         )
@@ -186,7 +190,9 @@ class TestRememberCharges:
 
         await _remember(service, ctx, current_workspace_id=None, _skip_daily_quota=True)
 
-        quota_service.check_memory_quota.assert_awaited_once_with(ws_b, raise_on_exceeded=True)
+        quota_service.check_memory_quota.assert_awaited_once_with(
+            ws_b, raise_on_exceeded=True, replacing=()
+        )
         quota_service.check_memories_per_day.assert_not_awaited()
 
 
