@@ -18,7 +18,8 @@ The statistics read gives the same body whether a day is closed or not.
 
 Every row a test adds is deleted afterwards: its events and rollup rows by
 endpoint, its closed marks by day (days 50 to 70 back, which no other test
-of the suite closes).
+of the suite closes). The purge mark (``public_mcp_usage_retention``, which
+the purge test moves) is put back as the test found it.
 """
 
 from __future__ import annotations
@@ -61,6 +62,18 @@ _ROLLUP_GROUPS = text(
     "FROM public_mcp_usage_day_counts WHERE endpoint_id = ANY(:endpoints)"
 )
 _CLOSED = text("SELECT day FROM public_mcp_usage_closed_days WHERE day = ANY(:days)")
+_MARK = text(
+    "SELECT purged_through_txid, purged_through_id, purged_total, purged_at "
+    "FROM public_mcp_usage_retention WHERE id = 1"
+)
+_PUT_MARK_BACK = text(
+    "INSERT INTO public_mcp_usage_retention "
+    "(id, purged_through_txid, purged_through_id, purged_total, purged_at) "
+    "VALUES (1, :purged_through_txid, :purged_through_id, :purged_total, :purged_at) "
+    "ON CONFLICT (id) DO UPDATE SET purged_through_txid = EXCLUDED.purged_through_txid, "
+    "purged_through_id = EXCLUDED.purged_through_id, purged_total = EXCLUDED.purged_total, "
+    "purged_at = EXCLUDED.purged_at"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -111,10 +124,17 @@ async def env(async_engine: AsyncEngine) -> AsyncIterator[Env]:
     factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
     state = Env(factory)
     days = [state.today - timedelta(days=n) for n in range(FIRST_BACK, LAST_BACK + 1)]
+    async with factory() as s:
+        found = (await s.execute(_MARK)).mappings().first()
+        mark = dict(found) if found is not None else None
     try:
         yield state
     finally:
         async with factory() as s:
+            if mark is None:
+                await s.execute(text("DELETE FROM public_mcp_usage_retention WHERE id = 1"))
+            else:
+                await s.execute(_PUT_MARK_BACK, mark)
             ids = {"endpoints": state.endpoints, "days": days}
             await s.execute(
                 text("DELETE FROM public_mcp_usage_events WHERE endpoint_id = ANY(:endpoints)"),
