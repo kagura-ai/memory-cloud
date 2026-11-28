@@ -25,7 +25,7 @@ from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE, reject_reserve
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import APIKey, Context
+from models.auth import APIKey, Context, User
 from services.credential_default_context import default_context_names, readable_context
 from services.security_notification_service import (
     SecurityEvent,
@@ -90,6 +90,25 @@ async def _key_workspace_held(db: AsyncSession, key: APIKey, *, live_context: bo
             db, user_id=key.user_id, context_id=key.bound_context_id, live_context=live_context
         )
     return True
+
+
+async def _lock_key_owner(db: AsyncSession, user_id: str) -> None:
+    """Lock the rotating user's ``users`` row ``FOR KEY SHARE``, before any context or key.
+
+    #2370: users before api_keys. User deletion, account erasure and member
+    removal lock the user's row ``FOR UPDATE`` before they sweep the user's
+    contexts and keys. A rotation that takes the row first either finishes
+    before such a sweep starts or reads the key after the sweep committed (a
+    swept key is the route's 404), so it never mints a replacement the sweep
+    has passed, and it holds no context or key the sweep waits on while it
+    waits itself. ``FOR KEY SHARE`` does not wait on an ordinary edit of the
+    user row. The key read that follows decides; the lock only orders.
+    """
+    await db.execute(
+        select(User.user_id)
+        .where(User.user_id == user_id)
+        .with_for_update(read=True, key_share=True)
+    )
 
 
 async def _bound_context_locked(db: AsyncSession, key: APIKey) -> bool:
@@ -580,6 +599,11 @@ async def regenerate_api_key(
     """
     try:
         user_id = get_user_id(user)
+
+        # #2370: the caller's users row before anything else, so the key is
+        # read after any deletion, erasure or member removal of the caller
+        # that holds the row has committed.
+        await _lock_key_owner(db, user_id)
 
         # Get existing key
         result = await db.execute(

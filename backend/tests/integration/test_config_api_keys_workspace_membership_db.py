@@ -14,10 +14,13 @@ On real PostgreSQL rows, over HTTP with the session dependency:
   same rules for a bound key whose owner has no membership row there, and for
   a member's bound key; a bound key of a soft-deleted context is not rotated
   (the same 404);
-* lock order: a bound key's rotation locks its context (``FOR KEY SHARE``)
-  before it revokes the key, the order user deletion takes (the doomed
-  contexts, then the keys bound to them); an edit of the context does not
-  hold the rotation up.
+* lock order: a rotation locks the caller's ``users`` row (``FOR KEY SHARE``)
+  first, as user deletion, account erasure and member removal take that row
+  before they sweep the user's contexts and keys, so a rotation never mints a
+  replacement such a sweep has passed; a bound key's rotation then locks its
+  context (``FOR KEY SHARE``) before it revokes the key, the order user
+  deletion takes (the doomed contexts, then the keys bound to them); an edit
+  of the context does not hold the rotation up.
 """
 
 from __future__ import annotations
@@ -357,6 +360,49 @@ async def test_a_bound_key_rotation_waits_on_its_context_before_the_key(world, b
 
     assert (response.status_code, response.json()) == (404, NOT_FOUND)
     assert await _keys_of(world, world.member) == [k for k in before if k[0] != bound.member_key]
+    assert await _history(world) == []
+
+
+@pytest.mark.timeout(90)
+@pytest.mark.parametrize("kind", ["bound", "workspace"])
+async def test_a_rotation_waits_on_the_callers_user_row_before_anything_else(world, bound, kind):
+    """User deletion, account erasure and member removal lock the user's row
+    ``FOR UPDATE`` before they sweep the user's contexts and keys. A rotation
+    waits on that row first, holding no context or key: the sweep takes both
+    at once and deletes the key, and the rotation then reads the key gone and
+    answers 404 instead of minting a replacement the sweep has passed."""
+    key = bound.member_key if kind == "bound" else world.member_key
+    before = await _keys_of(world, world.member)
+    async with world.factory() as holder:
+        await holder.execute(
+            select(User.user_id).where(User.user_id == world.member).with_for_update()
+        )
+        pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(_call(world, "POST", f"/{key}/regenerate", world.member))
+        try:
+            waiting = await _blocked_by(world, pid, task)
+            assert waiting is not None, "the rotation never waited on the user row"
+            assert waiting.startswith("SELECT users.user_id"), waiting
+            assert "FOR KEY SHARE" in waiting, waiting
+            await holder.execute(
+                select(Context.id)
+                .where(Context.id == bound.context_id)
+                .with_for_update(nowait=True)
+            )
+            await holder.execute(
+                select(APIKey.id)
+                .where(APIKey.user_id == world.member)
+                .order_by(APIKey.id)
+                .with_for_update(nowait=True)
+            )
+            await holder.execute(delete(APIKey).where(APIKey.public_id == key))
+            await holder.commit()
+        finally:
+            await holder.rollback()
+            response = await asyncio.wait_for(task, 30)
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert await _keys_of(world, world.member) == [k for k in before if k[0] != key]
     assert await _history(world) == []
 
 
