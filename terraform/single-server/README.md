@@ -775,6 +775,14 @@ discard the old log file (`up -d --no-deps --force-recreate caddy`, as in the
 rotation step above) and delete any exported copies. Commands:
 [`docs/deployment.md` → Credential headers in the proxy log](../../docs/deployment.md#credential-headers-in-the-proxy-log).
 
+**Visitor values.** Both `log` blocks also drop the `Kagura-Visitor` request
+header: the visitor value a server may send with an API key bound to a public
+context on the REST public search, so the owner's statistics can count daily
+visitors (#3035). The application turns the value into a keyed hash at once
+and never stores it as sent, so the proxy log does not keep it either. Redeploy
+the template (and drop the header in any other proxy or CDN in front of the
+server) before an operator turns on `PUBLIC_SEARCH_TELEMETRY_ENABLED`.
+
 ### Manual snapshot
 
 ```bash

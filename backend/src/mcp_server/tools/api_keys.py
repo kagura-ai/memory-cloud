@@ -57,13 +57,13 @@ _KEY_ID_RE = re.compile(public_id_pattern(PublicIdPrefix.API_KEY))
 
 
 def _key_scope_conditions() -> list[Any]:
-    """The bindings shown: the caller holds the live workspace of the bound
-    context (the condition the REST public search serves a bound key by),
-    and under a workspace-scoped key (#963) that workspace only."""
+    """The bindings shown: the bound context is live and the caller holds its
+    live workspace (the condition the REST public search serves a bound key
+    by), and under a workspace-scoped key (#963) that workspace only."""
     from auth.api_keys import bound_key_owner_holds
     from models.auth import APIKey, Context
 
-    held = bound_key_owner_holds(APIKey.user_id, APIKey.bound_context_id)
+    held = bound_key_owner_holds(APIKey.user_id, APIKey.bound_context_id, live_context=True)
     key_workspace_id = get_mcp_key_workspace_scope()
     if key_workspace_id is None:
         return [held]

@@ -169,6 +169,9 @@ class UserDeletionResult:
     agents_reowned: int = 0
     # #2930: the share keys the user created, deleted with its API keys.
     share_keys: int = 0
+    # Other members' keys bound to the contexts deleted here (not of
+    # ``api_keys``, the user's own).
+    bound_api_keys: int = 0
     contexts: int = 0
     released_bytes: dict[UUID, int] = field(default_factory=dict)
     purged_workspaces: list[PurgedWorkspace] = field(default_factory=list)
@@ -900,9 +903,7 @@ async def delete_user_rows(
                 APIKey.id.in_(locked_ids(APIKey, lambda k: (k.bound_context_id.in_(ctx_ids),)))
             )
         )
-        bound_keys = cast(CursorResult[Any], bound).rowcount or 0
-        if bound_keys:
-            logger.info("user_deletion_bound_keys_deleted", count=bound_keys)
+        result.bound_api_keys = cast(CursorResult[Any], bound).rowcount or 0
     released = await FileStorageService(db).purge_files_for_contexts(ctx_ids)
     # Redis follows the committed state: only a workspace that survives this
     # deletion keeps a quota counter to release.

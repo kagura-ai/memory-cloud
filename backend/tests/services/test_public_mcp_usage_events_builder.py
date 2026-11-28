@@ -278,3 +278,115 @@ def test_bad_cursors_are_refused(bad):
         decode_cursor(bad)
     assert exc.value.status_code == 400
     assert exc.value.error_code == "cursor_invalid"
+
+
+# ---------------------------------------------------------------------------
+# #3035: route, caller and the daily visitor key
+# ---------------------------------------------------------------------------
+
+
+def test_route_and_caller_default_to_a_public_mcp_call():
+    row = _build().row
+    assert (row["route"], row["caller"]) == ("mcp", "anonymous")
+
+
+def test_a_rest_bound_key_row_stores_its_route_and_caller():
+    row = _build(route="rest", caller="bound_key", era="stateless").row
+    assert (row["route"], row["caller"], row["era"]) == ("rest", "bound_key", "stateless")
+
+
+@pytest.mark.parametrize(("field", "default"), [("route", "mcp"), ("caller", "anonymous")])
+def test_an_unknown_route_or_caller_becomes_the_default(field, default):
+    assert _build(**{field: "x"}).row[field] == default
+
+
+def test_gap_rows_have_neither_route_nor_caller():
+    row = build_gap_row(
+        dropped_count=1,
+        started_at=datetime(2026, 11, 6, 9, 0),
+        ended_at=datetime(2026, 11, 6, 9, 0),
+        reason="queue_full",
+    )
+    assert row["route"] is None
+    assert row["caller"] is None
+
+
+def test_visitor_key_is_deterministic_32_hex_and_scoped():
+    from datetime import date
+
+    from services.public_mcp_usage_events import visitor_key
+
+    day = date(2026, 11, 6)
+    first = visitor_key(ENDPOINT, "vis-1", day, KEY)
+    assert first == visitor_key(ENDPOINT, "vis-1", day, KEY)
+    assert len(first) == 32 and set(first) <= set("0123456789abcdef")
+    assert first != visitor_key(ENDPOINT, "vis-1", date(2026, 11, 7), KEY)
+    assert first != visitor_key(uuid4(), "vis-1", day, KEY)
+    assert first != visitor_key(ENDPOINT, "vis-2", day, KEY)
+    assert first != visitor_key(ENDPOINT, "vis-1", day, "j" * 40)
+
+
+def _visitor_build(**overrides):
+    from datetime import date
+
+    from services.public_mcp_usage_events import visitor_key
+
+    values = {
+        "route": "rest",
+        "caller": "bound_key",
+        "era": "stateless",
+        "visitor_key": visitor_key(ENDPOINT, "vis-1", date(2026, 11, 6), KEY),
+    }
+    values.update(overrides)
+    return _build(**values)
+
+
+@pytest.mark.parametrize("outcome", ["success", "degraded"])
+def test_a_served_bound_search_with_a_key_makes_a_visitor(outcome):
+    from datetime import date
+
+    from services.public_mcp_usage_events import visitor_key
+
+    built = _visitor_build(outcome=outcome)
+    assert built.visitor is not None
+    assert built.visitor.endpoint_id == ENDPOINT
+    assert built.visitor.day == STARTED.date()
+    assert built.visitor.workspace_id == _input().workspace_id
+    assert built.visitor.visitor_key == visitor_key(ENDPOINT, "vis-1", date(2026, 11, 6), KEY)
+    # The key never rides on the event row.
+    assert "visitor_key" not in built.row
+    assert built.visitor.visitor_key not in json.dumps(built.row, default=str)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"caller": "anonymous"},
+        {"outcome": "rate_limited"},
+        {"outcome": "error"},
+        {"outcome": "cancelled"},
+        {"outcome": "denied"},
+        {"visitor_key": None},
+        {"visitor_key": "vis-raw-value"},
+        {"visitor_key": "A" * 32},
+    ],
+)
+def test_no_visitor_otherwise(overrides):
+    assert _visitor_build(**overrides).visitor is None
+
+
+def test_the_visitor_key_is_not_in_the_input_repr():
+    from services.public_mcp_usage_events import UsageEventInput
+
+    event = _input(visitor_key="f" * 32)
+    assert isinstance(event, UsageEventInput)
+    assert "f" * 32 not in repr(event)
+
+
+def test_empty_doc_ids_keep_the_ranks_of_later_documents():
+    """A REST result that is not a resource document is ``""``: no key, rank kept."""
+    built = _build(doc_ids=("", "doc-b", "", "doc-c"))
+    assert built.row["documents"] == [
+        {"doc_key": doc_key(RESOURCE, "doc-b", KEY), "chunks": 1, "rank": 2},
+        {"doc_key": doc_key(RESOURCE, "doc-c", KEY), "chunks": 1, "rank": 4},
+    ]

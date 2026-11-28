@@ -129,7 +129,8 @@ Exempt (the authenticated control-UI read projection):
 - REST public search with a public-bound API key. A signed-in session is no
   credential there: the route does not read the session cookie, so a request
   that carries one is served, counted and charged like an anonymous one
-  (#2823).
+  (#2823). In the owner's statistics these searches are shown separately by
+  caller (`bound_key`) while the operator records them (#3035).
 
 Not counted and still served when the budget is exhausted: `initialize`,
 `tools/list`, `ping`, `server/discover`, `GET /api/v1/public/{context_id}/info`,

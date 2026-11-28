@@ -1,8 +1,9 @@
 """Bounded per-process writer of public MCP usage events (#2678).
 
-The public ``tools/call`` path only calls ``offer``: it builds the row
-(a few small HMACs) and ``put_nowait``s it on a bounded queue. It never
-awaits and never raises, so a slow or absent database cannot slow a search.
+The public ``tools/call`` path, and the REST public search for a key bound to
+the context (#3035), only call ``offer``: it builds the row (a few small
+HMACs) and ``put_nowait``s it on a bounded queue. It never awaits and never
+raises, so a slow or absent database cannot slow a search.
 
 A drainer task batches up to ``PUBLIC_TELEMETRY_BATCH_MAX`` rows or one
 flush interval and writes them in one transaction (events, then the batch's
@@ -12,6 +13,20 @@ queue full, write failed, shutdown — is counted and becomes a ``gap`` row
 written at the head of the next successful batch, so the stream says where
 it is incomplete instead of skipping silently. A process crash loses at most
 the queue.
+
+Daily visitors (#3035) are written apart from the events: a visitor a
+served bound-key search reported joins a bounded per-process pending set,
+grouped by endpoint and UTC day, once its event was queued. On every drainer
+pass, in a transaction of its own that writes no event row, the writer stores
+every group that holds at least ``VISITOR_FLUSH_MIN_KEYS`` distinct keys and
+every group whose day ended at least ``VISITOR_DAY_GRACE`` ago; ``stop``
+stores every group. A search that started before midnight and answers after
+it joins its day's last group; a visitor of a day whose last group was already
+due is dropped and counted, never written alone. So a visitor row is never
+written in the transaction of a call, and is written among at least that many
+visitors' calls except for a day's (or a process's) last few values. Rows are
+inserted sorted, ``ON CONFLICT DO NOTHING``; a failed write is retried once,
+then its keys are dropped (an undercount) and counted.
 
 One writer per process (``start_usage_writer`` in the API lifespan); its
 health numbers are process-local.
@@ -23,19 +38,21 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import CHAR, String, Uuid, bindparam, cast, exists, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from config.settings import get_settings
-from models.public_mcp_usage import PublicMcpDocKey, PublicMcpUsageEvent
+from models.public_mcp_usage import PublicMcpDailyVisitor, PublicMcpDocKey, PublicMcpUsageEvent
 from models.resource import Resource
 from services.public_mcp_usage_events import (
     BuiltUsageEvent,
     UsageEventInput,
+    VisitorRow,
     build_gap_row,
     build_usage_event_row,
 )
@@ -45,6 +62,18 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 PUBLIC_TELEMETRY_BATCH_MAX = 200
+# #3035: a group of one endpoint and UTC day is written once it holds this many
+# distinct visitor keys (or its day ended VISITOR_DAY_GRACE ago, or the writer
+# stops). Ten is the usual minimum cell size of published counts. A constant,
+# never a setting.
+VISITOR_FLUSH_MIN_KEYS = 10
+# A finished day's group waits this long after midnight UTC, far longer than a
+# search runs, so searches that started before midnight and answer after it
+# join that day's last group. A visitor of a day past this point is dropped
+# (and counted) rather than written in a group of its own.
+VISITOR_DAY_GRACE = timedelta(minutes=10)
+# Visitor keys held per process before a new one is dropped (and counted).
+VISITOR_PENDING_MAX = 50_000
 _RETRY_BACKOFF_CAP_SECONDS = 30.0
 _LOG_EVERY_SECONDS = 60.0
 
@@ -83,6 +112,7 @@ class PublicMcpUsageWriter:
         session_details_enabled: bool,
         retry_backoff: float = 1.0,
         batch_max: int = PUBLIC_TELEMETRY_BATCH_MAX,
+        visitor_flush_min_keys: int = VISITOR_FLUSH_MIN_KEYS,
     ) -> None:
         self._session_factory = session_factory
         self._capacity = queue_size
@@ -104,6 +134,14 @@ class PublicMcpUsageWriter:
         self._last_flush_ok: bool | None = None
         self._last_drop_log: float | None = None
         self._last_failure_log: float | None = None
+        # #3035: pending visitor keys per (endpoint, UTC day).
+        self._visitor_flush_min_keys = max(1, visitor_flush_min_keys)
+        self._visitors: dict[tuple[UUID, date], dict[str, VisitorRow]] = {}
+        self._visitors_pending = 0
+        self._inflight_visitors = 0
+        self._visitors_dropped = 0
+        self._last_visitor_drop_log: float | None = None
+        self._last_visitor_failure_log: float | None = None
 
     # ------------------------------------------------------------------
     # Request path
@@ -127,8 +165,44 @@ class PublicMcpUsageWriter:
                 now = utcnow()
                 self._record_drop("queue_full", 1, now, now)
                 self._log_drop("public_mcp_telemetry_dropped", reason="queue_full")
+                return
+            # #3035: only an event that was queued adds its visitor, so the
+            # visitors and the answered searches share one base.
+            if built.visitor is not None:
+                self._add_visitor(built.visitor)
         except Exception:  # noqa: BLE001, S110 - counting itself failed; nothing to add
             pass
+
+    def _add_visitor(self, visitor: VisitorRow) -> None:
+        # The day's last group is due (or written): one decision, the same
+        # one ``_flush_visitors`` makes, so no group of a finished day can
+        # start after that day's last group was released.
+        if visitor.day < _last_due_day():
+            self._drop_visitor("late")
+            return
+        group_key = (visitor.endpoint_id, visitor.day)
+        group = self._visitors.get(group_key)
+        if group is not None and visitor.visitor_key in group:
+            return
+        if self._visitors_pending >= VISITOR_PENDING_MAX:
+            self._drop_visitor("pending_full")
+            return
+        if group is None:
+            group = self._visitors[group_key] = {}
+        group[visitor.visitor_key] = visitor
+        self._visitors_pending += 1
+
+    def _drop_visitor(self, reason: str) -> None:
+        self._visitors_dropped += 1
+        now = time.monotonic()
+        last = self._last_visitor_drop_log
+        if last is None or now - last >= _LOG_EVERY_SECONDS:
+            self._last_visitor_drop_log = now
+            logger.warning(
+                "public_mcp_visitors_dropped",
+                reason=reason,
+                count=self._visitors_dropped,
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -159,8 +233,12 @@ class PublicMcpUsageWriter:
         lost = self._inflight_events + self._drain_queue()
         lost += sum(g.count for g in self._inflight_gaps.values())
         lost += sum(g.count for g in self._gaps.values())
-        if lost:
-            logger.warning("public_mcp_telemetry_lost_at_shutdown", count=lost)
+        lost_visitors = self._visitors_pending + self._inflight_visitors
+        if lost or lost_visitors:
+            fields: dict[str, int] = {"count": lost}
+            if lost_visitors:
+                fields["visitors"] = lost_visitors
+            logger.warning("public_mcp_telemetry_lost_at_shutdown", **fields)
 
     def health(self) -> WriterHealth:
         """Queue depth, drops and the last flush, for the owner health route."""
@@ -185,20 +263,23 @@ class PublicMcpUsageWriter:
             if self._stopping and self._queue.empty():
                 if self._gaps:
                     await self._flush([])
+                await self._flush_visitors(final=True)
                 return
             batch = await self._collect()
-            if not batch and not self._gaps:
-                continue
-            ok = await self._flush(batch)
-            if not ok and self._stopping:
-                # The database is not answering: what is left becomes one
-                # shutdown gap, written if the database answers once more.
-                now = utcnow()
-                left = self._drain_queue()
-                if left:
-                    self._record_drop("shutdown", left, now, now)
-                await self._flush([])
-                return
+            if batch or self._gaps:
+                ok = await self._flush(batch)
+                if not ok and self._stopping:
+                    # The database is not answering: what is left becomes one
+                    # shutdown gap, written if the database answers once more.
+                    now = utcnow()
+                    left = self._drain_queue()
+                    if left:
+                        self._record_drop("shutdown", left, now, now)
+                    await self._flush([])
+                    await self._flush_visitors(final=True)
+                    return
+            # #3035: every pass, whether or not it wrote events.
+            await self._flush_visitors(final=False)
 
     async def _collect(self) -> list[BuiltUsageEvent]:
         """Up to ``batch_max`` events, waiting at most two flush intervals."""
@@ -294,6 +375,75 @@ class PublicMcpUsageWriter:
             await session.commit()
 
     # ------------------------------------------------------------------
+    # Daily visitors (#3035)
+    # ------------------------------------------------------------------
+
+    async def _flush_visitors(self, *, final: bool) -> None:
+        """Write the groups the crowd rule releases, in a transaction of their own.
+
+        Released: every group with at least ``visitor_flush_min_keys``
+        distinct keys, every group whose UTC day ended at least
+        ``VISITOR_DAY_GRACE`` ago, and, when ``final``, every group. The rest
+        waits.
+        """
+        if not self._visitors:
+            return
+        due_before = _last_due_day()
+        ready = [
+            group_key
+            for group_key, group in self._visitors.items()
+            if final or len(group) >= self._visitor_flush_min_keys or group_key[1] < due_before
+        ]
+        if not ready:
+            return
+        visitors: list[VisitorRow] = []
+        for group_key in ready:
+            visitors.extend(self._visitors.pop(group_key).values())
+        # Moved from pending to in flight with no await between: a write that
+        # ``stop`` cancels leaves them in flight, so the shutdown line counts
+        # them. Only the two normal exits below clear the in-flight count.
+        self._visitors_pending -= len(visitors)
+        self._inflight_visitors = len(visitors)
+        # One order for every process: no deadlock on the primary key.
+        visitors.sort(key=lambda v: (v.endpoint_id, v.day, v.visitor_key))
+        rows = [
+            {
+                "endpoint_id": v.endpoint_id,
+                "day": v.day,
+                "visitor_key": v.visitor_key,
+                "workspace_id": v.workspace_id,
+            }
+            for v in visitors
+        ]
+        error: Exception | None = None
+        for attempt in range(2):
+            try:
+                await asyncio.wait_for(self._write_visitors(rows), timeout=self._write_timeout)
+            except Exception as exc:  # noqa: BLE001 - includes the write timeout
+                error = exc
+                if attempt == 0:
+                    await asyncio.sleep(min(self._retry_backoff, _RETRY_BACKOFF_CAP_SECONDS))
+                continue
+            self._inflight_visitors = 0
+            return
+        self._inflight_visitors = 0
+        self._visitors_dropped += len(rows)
+        now = time.monotonic()
+        last = self._last_visitor_failure_log
+        if last is None or now - last >= _LOG_EVERY_SECONDS or self._stopping:
+            self._last_visitor_failure_log = now
+            logger.warning(
+                "public_mcp_visitors_write_failed",
+                error_type=type(error).__name__,
+                dropped=len(rows),
+            )
+
+    async def _write_visitors(self, rows: list[dict[str, Any]]) -> None:
+        async with self._session_factory() as session:
+            await session.execute(_VISITOR_INSERT, rows)
+            await session.commit()
+
+    # ------------------------------------------------------------------
     # Gap bookkeeping
     # ------------------------------------------------------------------
 
@@ -330,7 +480,15 @@ class PublicMcpUsageWriter:
         logger.warning(event, dropped_since_start=self._dropped_since_start, **fields)
 
 
+def _last_due_day() -> date:
+    """Groups of a day before this one are due: that day ended ``VISITOR_DAY_GRACE`` ago."""
+    return (utcnow() - VISITOR_DAY_GRACE).date()
+
+
 _EVENT_INSERT = pg_insert(PublicMcpUsageEvent).on_conflict_do_nothing(index_elements=["event_id"])
+_VISITOR_INSERT = pg_insert(PublicMcpDailyVisitor).on_conflict_do_nothing(
+    index_elements=["endpoint_id", "day", "visitor_key"]
+)
 
 _DOC_KEY_PK = cast(bindparam("resource_pk"), Uuid)
 _DOC_KEY_INSERT = (
@@ -349,7 +507,11 @@ _DOC_KEY_INSERT = (
 
 
 def _doc_key_rows(batch: list[BuiltUsageEvent]) -> list[dict[str, Any]]:
-    """The batch's (resource_pk, doc_key) → doc id pairs, once each."""
+    """The batch's (resource_pk, doc_key) → doc id pairs, once each, sorted.
+
+    Sorted so that two processes inserting the same keys take the unique
+    index entries in the same order and cannot deadlock (#3035).
+    """
     seen: dict[tuple[Any, str], str] = {}
     for built in batch:
         if built.resource_pk is None:
@@ -357,8 +519,8 @@ def _doc_key_rows(batch: list[BuiltUsageEvent]) -> list[dict[str, Any]]:
         for key, doc_id in built.doc_keys:
             seen.setdefault((built.resource_pk, key), doc_id)
     return [
-        {"resource_pk": pk, "doc_key": key, "resource_doc_id": doc_id}
-        for (pk, key), doc_id in seen.items()
+        {"resource_pk": pk, "doc_key": key, "resource_doc_id": seen[(pk, key)]}
+        for pk, key in sorted(seen)
     ]
 
 

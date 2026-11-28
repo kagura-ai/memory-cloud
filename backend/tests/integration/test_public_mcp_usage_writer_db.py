@@ -176,3 +176,90 @@ async def test_retry_after_a_commit_that_landed_is_not_a_loss(maker):
     health = writer.health()
     assert health.dropped_since_start == 0
     assert health.last_flush_ok is True
+
+
+async def test_route_caller_and_visitors_reach_postgres_apart(maker):
+    """#3035: route and caller stored (gap rows NULL); visitor rows in a
+    transaction of their own, sorted, and a second write of a key is a no-op."""
+    from models.public_mcp_usage import PublicMcpDailyVisitor
+    from services.public_mcp_usage_events import visitor_key
+
+    workspace_id, resource_pk = await _resource(maker)
+    endpoint = uuid4()
+    day = datetime.now(UTC)
+    values = [f"v-{i}" for i in range(3)]
+
+    def bound(value: str) -> UsageEventInput:
+        return _event(
+            workspace_id,
+            resource_pk,
+            endpoint_id=endpoint,
+            era="stateless",
+            route="rest",
+            caller="bound_key",
+            started_at=day,
+            visitor_key=visitor_key(endpoint, value, day.date(), KEY),
+        )
+
+    def make_writer(queue_size: int) -> PublicMcpUsageWriter:
+        return PublicMcpUsageWriter(
+            session_factory=maker,
+            queue_size=queue_size,
+            flush_interval=0.05,
+            write_timeout=5.0,
+            key=KEY,
+            session_details_enabled=False,
+            visitor_flush_min_keys=3,
+        )
+
+    try:
+        writer = make_writer(queue_size=4)
+        for value in values:
+            writer.offer(bound(value))
+        writer.offer(_event(workspace_id, resource_pk, endpoint_id=endpoint))  # a public MCP call
+        writer.offer(_event(workspace_id, resource_pk, endpoint_id=endpoint))  # dropped: a gap
+        writer.start()
+        await writer.stop(timeout=5)
+
+        # The same values again, from a second writer: no new row, no error.
+        again = make_writer(queue_size=10)
+        for value in values:
+            again.offer(bound(value))
+        again.start()
+        await again.stop(timeout=5)
+
+        async with maker() as s:
+            rows = (
+                (await s.execute(select(PublicMcpUsageEvent).order_by(PublicMcpUsageEvent.id)))
+                .scalars()
+                .all()
+            )
+            visitors = (
+                await s.execute(
+                    text(
+                        "SELECT visitor_key, xmin::text::bigint FROM public_mcp_daily_visitors "
+                        "WHERE endpoint_id = :e ORDER BY ctid"
+                    ),
+                    {"e": endpoint},
+                )
+            ).all()
+        gap = next(r for r in rows if r.kind == "gap")
+        assert (gap.route, gap.caller) == (None, None)
+        calls = [r for r in rows if r.kind == "tool_call"]
+        assert sorted((r.route, r.caller) for r in calls) == sorted(
+            [("rest", "bound_key")] * 6 + [("mcp", "anonymous")]
+        )
+        assert len(visitors) == 3
+        keys = [v[0] for v in visitors]
+        assert keys == sorted(keys), "inserted in key order"
+        assert len({v[1] for v in visitors}) == 1, "one transaction"
+        assert all(r.txid % 2**32 != visitors[0][1] for r in rows), "never with events"
+    finally:
+        async with maker() as s:
+            await s.execute(
+                delete(PublicMcpDailyVisitor).where(PublicMcpDailyVisitor.endpoint_id == endpoint)
+            )
+            # The workspace and its resource (and with it the doc keys).
+            await s.execute(text("DELETE FROM resources WHERE id = :id"), {"id": resource_pk})
+            await s.execute(text("DELETE FROM workspaces WHERE id = :id"), {"id": workspace_id})
+            await s.commit()

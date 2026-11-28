@@ -106,7 +106,7 @@ describe("OverviewTabPanel public endpoint card", () => {
     role = "owner";
     renderPanel();
     expect(
-      await screen.findByText("Public MCP endpoint usage"),
+      await screen.findByText("Public endpoint usage"),
     ).toBeInTheDocument();
     expect(mockGetStats).toHaveBeenCalledWith("catalog", 7);
   });
@@ -118,7 +118,7 @@ describe("OverviewTabPanel public endpoint card", () => {
       renderPanel();
       expect(await screen.findByTestId("public-api-stats")).toBeInTheDocument();
       expect(
-        screen.queryByText("Public MCP endpoint usage"),
+        screen.queryByText("Public endpoint usage"),
       ).not.toBeInTheDocument();
       expect(mockGetStats).not.toHaveBeenCalled();
     },
@@ -134,7 +134,7 @@ describe("OverviewTabPanel public endpoint card", () => {
       expect(screen.getByTestId("public-api-stats")).toBeInTheDocument(),
     );
     expect(
-      screen.queryByText("Public MCP endpoint usage"),
+      screen.queryByText("Public endpoint usage"),
     ).not.toBeInTheDocument();
     expect(mockGetStats).not.toHaveBeenCalled();
   });

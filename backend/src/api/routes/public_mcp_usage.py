@@ -7,9 +7,12 @@ recorded: the last 24 hours of events by outcome, the deployment's gap rows
 writer numbers are process-local; the gap rows are the persistent view.
 
 ``GET /api/v1/resources/{resource_id}/public-mcp/usage-stats`` gives the
-owner the live endpoint's calls, searches and search outcomes per UTC day and
+owner the live endpoint's calls, searches and search outcomes per UTC day, by
+route and caller, the daily visitors a server with a bound key reported, and
 the documents its searches returned most often, with their public title and
-URL while the endpoint serves (``services.public_mcp_usage_stats``).
+URL while the endpoint serves (``services.public_mcp_usage_stats``). The
+installation-bound read of the same statistics
+(``api.routes.sync_installations``) answers through ``usage_stats_response``.
 """
 
 from __future__ import annotations
@@ -29,15 +32,19 @@ from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.public_mcp import PublicMcpEndpoint
+from models.public_mcp_usage import PMU_ROUTE_REST
 from services.permission_service import PermissionService
 from services.public_mcp_usage_events import usage_health_counts
 from services.public_mcp_usage_stats import (
     USAGE_STATS_DEFAULT_DAYS,
     USAGE_STATS_MAX_DAYS,
+    DayCounts,
+    LiveEndpoint,
     UsageStats,
     check_usage_stats_rate_limit,
     read_usage_stats,
     resolve_stats_endpoint,
+    usage_recording_flags,
 )
 from services.public_mcp_usage_writer import get_usage_writer
 from utils.datetime import utcnow
@@ -106,7 +113,9 @@ async def get_public_mcp_usage_health(
 
     Owner-only: ``WorkspaceOwner`` refuses non-owners (403) and
     ``resolve_resource_by_slug(required_role="owner")`` answers 404 for a
-    slug of another workspace.
+    slug of another workspace. The live endpoint's events include the REST
+    public searches recorded for it (#3035): this tells whether usage is being
+    recorded at all.
     """
     user_id, _ = owner
     context = await PermissionService(db).resolve_resource_by_slug(
@@ -156,14 +165,32 @@ async def get_public_mcp_usage_health(
     )
 
 
-class PublicMcpUsageStatsCounts(TZAwareBaseModel):
-    """Calls to the public MCP endpoint, searches and search outcomes."""
+_CALLS_BY_ROUTE = (
+    "Calls by route: `mcp` (the public MCP endpoint) and `rest` (REST public searches of the "
+    "context made with a key bound to it); every route is a key"
+)
+_SEARCHES_BY_ROUTE = "Searches by route, whatever their outcome"
+_ANSWERED_BY_ROUTE = (
+    "Answered searches (outcome success or degraded) by route; every route is a key"
+)
+_CALLS_BY_CALLER = (
+    "`anonymous` (public MCP calls), or `bound_key` (REST searches made with a key bound to "
+    "the context); every caller is a key"
+)
 
-    calls: int = Field(..., description="Tool calls of the endpoint, any tool and outcome")
-    searches: int = Field(..., description="Calls of the `recall` tool")
+
+class PublicMcpUsageStatsCounts(TZAwareBaseModel):
+    """Calls, searches and search outcomes, by route and caller."""
+
+    calls: int = Field(..., description="Calls of the endpoint, any tool, route and outcome")
+    searches: int = Field(..., description="Calls of the `recall` tool, whatever their outcome")
     search_outcomes: dict[str, int] = Field(
         ..., description="Searches by outcome; every outcome is a key (zero-filled)"
     )
+    calls_by_route: dict[str, int] = Field(..., description=_CALLS_BY_ROUTE)
+    searches_by_route: dict[str, int] = Field(..., description=_SEARCHES_BY_ROUTE)
+    searches_answered_by_route: dict[str, int] = Field(..., description=_ANSWERED_BY_ROUTE)
+    calls_by_caller: dict[str, int] = Field(..., description=_CALLS_BY_CALLER)
 
 
 class PublicMcpUsageStatsDay(TZAwareBaseModel):
@@ -173,6 +200,17 @@ class PublicMcpUsageStatsDay(TZAwareBaseModel):
     calls: int
     searches: int
     search_outcomes: dict[str, int]
+    calls_by_route: dict[str, int] = Field(..., description=_CALLS_BY_ROUTE)
+    searches_by_route: dict[str, int] = Field(..., description=_SEARCHES_BY_ROUTE)
+    searches_answered_by_route: dict[str, int] = Field(..., description=_ANSWERED_BY_ROUTE)
+    calls_by_caller: dict[str, int] = Field(..., description=_CALLS_BY_CALLER)
+    visitors: int | None = Field(
+        ...,
+        description=(
+            "Distinct visitor values a server reported with a bound key that UTC day; null when "
+            "visitors could not be read"
+        ),
+    )
 
 
 class PublicMcpUsageStatsDocument(TZAwareBaseModel):
@@ -198,15 +236,37 @@ class PublicMcpUsageStatsDocuments(TZAwareBaseModel):
     )
     searches_scanned: int = Field(..., description="Searches read for this list (newest first)")
     scan_limit: int = Field(..., description="At most this many searches are read")
+    scanned_since: datetime | None = Field(
+        None,
+        description=(
+            "The time of the oldest search the list is based on, UTC; null when no search was "
+            "scanned"
+        ),
+    )
     items: list[PublicMcpUsageStatsDocument]
+
+
+class PublicMcpUsageStatsVisitors(TZAwareBaseModel):
+    """Whether the daily visitors could be read, and whether they are counted."""
+
+    status: Literal["ok", "unavailable"] = Field(
+        ..., description="`unavailable`: visitors could not be read; the counts still are"
+    )
+    counting_enabled: bool = Field(
+        ..., description="This server counts the visitors servers report with a bound key"
+    )
 
 
 class PublicMcpUsageStatsResponse(TZAwareBaseModel):
     """Usage statistics of the resource's live public MCP endpoint.
 
-    Calls to the public MCP endpoint only: searches through the REST public
-    search are not included. Answers a cache in front of the endpoint served
-    are not counted. These are calls, not visitors.
+    Calls to the resource's public MCP endpoint and, while the server records
+    them, REST public searches of its context made with a key bound to it
+    (`calls_by_route`). Anonymous REST public searches are not included.
+    `calls_by_caller` tells anonymous calls from searches made with a bound
+    key. Visitors are distinct values such a caller reported, per UTC day;
+    anonymous calls are never visitors. The numbers count what this server
+    answered; answers a cache in front of it served are not counted.
     """
 
     resource_id: str
@@ -216,12 +276,31 @@ class PublicMcpUsageStatsResponse(TZAwareBaseModel):
     last_day: date = Field(..., description="Last UTC day of the window (today, partial)")
     retention_days: int = Field(..., description="How long usage events are kept")
     recording_enabled: bool = Field(..., description="Usage events are being recorded")
+    rest_recording_enabled: bool = Field(
+        ...,
+        description=(
+            "REST public searches made with a key bound to the context are being recorded"
+        ),
+    )
+    visitors: PublicMcpUsageStatsVisitors
     totals: PublicMcpUsageStatsCounts
     days: list[PublicMcpUsageStatsDay] = Field(
         ..., description="Every day of the window, oldest first"
     )
     documents: PublicMcpUsageStatsDocuments
     generated_at: datetime
+
+
+def _counts(counts: DayCounts) -> dict:
+    return {
+        "calls": counts.calls,
+        "searches": counts.searches,
+        "search_outcomes": counts.search_outcomes,
+        "calls_by_route": counts.calls_by_route,
+        "searches_by_route": counts.searches_by_route,
+        "searches_answered_by_route": counts.searches_answered_by_route,
+        "calls_by_caller": counts.calls_by_caller,
+    }
 
 
 def _stats_response(
@@ -235,18 +314,13 @@ def _stats_response(
         last_day=stats.last_day,
         retention_days=stats.retention_days,
         recording_enabled=stats.recording_enabled,
-        totals=PublicMcpUsageStatsCounts(
-            calls=stats.totals.calls,
-            searches=stats.totals.searches,
-            search_outcomes=stats.totals.search_outcomes,
+        rest_recording_enabled=stats.rest_recording_enabled,
+        visitors=PublicMcpUsageStatsVisitors(
+            status=stats.visitors_status, counting_enabled=stats.visitor_counting_enabled
         ),
+        totals=PublicMcpUsageStatsCounts(**_counts(stats.totals)),
         days=[
-            PublicMcpUsageStatsDay(
-                date=day,
-                calls=counts.calls,
-                searches=counts.searches,
-                search_outcomes=counts.search_outcomes,
-            )
+            PublicMcpUsageStatsDay(date=day, visitors=counts.visitors, **_counts(counts))
             for day, counts in stats.days
         ],
         documents=PublicMcpUsageStatsDocuments(
@@ -254,6 +328,7 @@ def _stats_response(
             publication_serving=stats.documents.publication_serving,
             searches_scanned=stats.documents.searches_scanned,
             scan_limit=stats.documents.scan_limit,
+            scanned_since=stats.documents.scanned_since,
             items=[
                 PublicMcpUsageStatsDocument(
                     doc_key=item.doc_key,
@@ -267,6 +342,51 @@ def _stats_response(
         ),
         generated_at=utcnow(),
     )
+
+
+async def usage_stats_response(
+    db: AsyncSession, *, endpoint: LiveEndpoint, workspace_id: UUID, resource_id: str, days: int
+) -> PublicMcpUsageStatsResponse:
+    """Count the read in the workspace's bucket, read the statistics and build the body.
+
+    The owner route and the installation-bound read answer through this one
+    function, after their own authorization: the same rate bucket, read, time
+    budget and body.
+
+    Args:
+        db: The request's session.
+        endpoint: The authorized live endpoint.
+        workspace_id: Its workspace (the rate bucket and the read's scope).
+        resource_id: The resource slug the body names.
+        days: UTC days to cover, ending today.
+
+    Returns:
+        The statistics body.
+    """
+    await check_usage_stats_rate_limit(workspace_id)
+    settings = get_settings()
+    recording, rest_recording, visitor_counting = usage_recording_flags()
+    stats = await read_usage_stats(
+        db,
+        endpoint=endpoint,
+        workspace_id=workspace_id,
+        days=days,
+        retention_days=settings.mcp_public_telemetry_retention_days,
+        recording_enabled=recording,
+        rest_recording_enabled=rest_recording,
+        visitor_counting_enabled=visitor_counting,
+    )
+    logger.info(
+        "public_mcp_usage_stats_read",
+        endpoint_id=str(endpoint.id),
+        window_days=stats.window_days,
+        calls=stats.totals.calls,
+        rest_calls=stats.totals.calls_by_route.get(PMU_ROUTE_REST, 0),
+        documents=len(stats.documents.items),
+        documents_status=stats.documents.status,
+        visitors_status=stats.visitors_status,
+    )
+    return _stats_response(resource_id, endpoint.id, stats)
 
 
 @router.get(
@@ -290,9 +410,11 @@ async def get_public_mcp_usage_stats(
     ),
     db: AsyncSession = Depends(get_db),
 ) -> PublicMcpUsageStatsResponse:
-    """Calls, searches and the most returned documents of the live public endpoint.
+    """Calls, searches, visitors and the most returned documents of the live public endpoint.
 
-    Workspace owner only. An unknown slug, a resource without a live
+    Calls of the public MCP endpoint and, while the server records them, REST
+    public searches of its context made with a key bound to it; anonymous REST
+    public searches are not included. Workspace owner only. An unknown slug, a resource without a live
     endpoint, or a context the credential cannot read are one 404. 429 when
     the workspace read its statistics too often this minute; 503 when the day
     counts could not be read (``Retry-After``).
@@ -301,22 +423,6 @@ async def get_public_mcp_usage_stats(
     endpoint = await resolve_stats_endpoint(
         db, user_id=user_id, workspace_id=workspace_id, resource_id=resource_id
     )
-    await check_usage_stats_rate_limit(workspace_id)
-    settings = get_settings()
-    stats = await read_usage_stats(
-        db,
-        endpoint=endpoint,
-        workspace_id=workspace_id,
-        days=days,
-        retention_days=settings.mcp_public_telemetry_retention_days,
-        recording_enabled=bool(settings.mcp_public_telemetry_enabled),
+    return await usage_stats_response(
+        db, endpoint=endpoint, workspace_id=workspace_id, resource_id=resource_id, days=days
     )
-    logger.info(
-        "public_mcp_usage_stats_read",
-        endpoint_id=str(endpoint.id),
-        window_days=stats.window_days,
-        calls=stats.totals.calls,
-        documents=len(stats.documents.items),
-        documents_status=stats.documents.status,
-    )
-    return _stats_response(resource_id, endpoint.id, stats)

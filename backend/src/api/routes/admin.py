@@ -1199,8 +1199,10 @@ async def delete_user(
     workspace someone else owns, the user's connector keys and the agents it
     registered go to that owner (``reowned``), its agent-bound keys are deleted
     (``deleted.agent_api_keys``) and an agent left without a key is suspended
-    (``suspended``, #2373). Initial/last admin and self-deletion protections
-    remain in force. The transfer and deletion commit together.
+    (``suspended``, #2373). The keys other members bound to a context deleted
+    with the user are deleted too (``deleted.bound_api_keys``, apart from the
+    user's own ``deleted.api_keys``). Initial/last admin and self-deletion
+    protections remain in force. The transfer and deletion commit together.
     """
     from services.ownership_notifications import notify_new_owner_best_effort
     from services.system_admin_service import SystemAdminService
@@ -1273,6 +1275,7 @@ async def delete_user(
         contexts_deleted=result.contexts,
         connector_api_keys_reowned=result.connector_api_keys,
         agent_api_keys_deleted=result.agent_api_keys,
+        bound_api_keys_deleted=result.bound_api_keys,
         agents_suspended=result.agents_suspended,
         agents_reowned=result.agents_reowned,
         workspaces_transferred=[str(ws_id) for ws_id in transferred],
@@ -1287,6 +1290,8 @@ async def delete_user(
             "contexts": result.contexts,
             # #2373: of ``api_keys``, the live agent-bound keys (never handed over)
             "agent_api_keys": result.agent_api_keys,
+            # Other members' keys bound to the deleted contexts (not of ``api_keys``)
+            "bound_api_keys": result.bound_api_keys,
         },
         "reowned": {
             "connector_api_keys": result.connector_api_keys,

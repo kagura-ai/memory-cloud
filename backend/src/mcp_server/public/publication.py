@@ -15,6 +15,11 @@ claimable (an operator reserved it after activation) is ``None`` before any
 statement, so every reader of this answer (the request path, the permission
 endpoint, the owner's ``serving``) agrees with the Host guard.
 
+``load_context_publication`` (#3035) is the same SELECT keyed by a context:
+the publication this endpoint serves for it, so a REST public search made with
+a bound key is recorded under the card the endpoint serves, never under a
+stale publication of a slug the context no longer holds.
+
 ``check_publishable`` backs the owner's publish route with the same
 preconditions, as typed errors naming the one that failed (the owner may see
 why).
@@ -206,6 +211,37 @@ async def load_serving_endpoint_for_alias(
         logger.debug("public_mcp_alias_not_served")
         return None
     return _serving_endpoint(row)
+
+
+async def load_context_publication(
+    db: AsyncSession, *, context_id: UUID, workspace_id: UUID
+) -> ServingEndpoint | None:
+    """Return the publication the endpoint serves for a context, or ``None`` (#3035).
+
+    The serving SELECT keyed by the context instead of an address: the live
+    endpoint of the context whose context still holds its slug and whose
+    resource row is the bound one, the context live, public and not private,
+    the workspace not deleted. At most one row (one live endpoint per
+    context). The operator switch and the serving pauses are not consulted:
+    the REST route runs its own gates.
+
+    Args:
+        db: Session.
+        context_id: The searched context.
+        workspace_id: The context's workspace.
+
+    Returns:
+        The ``ServingEndpoint``, or ``None`` when the context has none.
+    """
+    row = (
+        await db.execute(
+            _serving_select().where(
+                PublicMcpEndpoint.context_id == context_id,
+                PublicMcpEndpoint.workspace_id == workspace_id,
+            )
+        )
+    ).first()
+    return None if row is None else _serving_endpoint(row)
 
 
 async def serving_paused(db: AsyncSession, endpoint: ServingEndpoint) -> bool:

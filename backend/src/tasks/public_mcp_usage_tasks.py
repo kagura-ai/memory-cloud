@@ -11,6 +11,9 @@ harmless.
 
 Doc keys of resources that have had no live public endpoint since before the
 cutoff are deleted too: no retained event can name them any more.
+
+Daily visitor rows (#3035) whose UTC day is before the cutoff's day go last,
+in batches, whatever the switches say.
 """
 
 from __future__ import annotations
@@ -52,6 +55,13 @@ _ADVANCE_MARK = text(
     "    THEN :i ELSE r.purged_through_id END, "
     "  purged_total = r.purged_total + :n, "
     "  purged_at = :now"
+)
+
+_DELETE_VISITOR_BATCH = text(
+    "DELETE FROM public_mcp_daily_visitors WHERE (endpoint_id, day, visitor_key) IN ("
+    "  SELECT endpoint_id, day, visitor_key FROM public_mcp_daily_visitors"
+    "  WHERE day < :cutoff_day LIMIT :limit"
+    ") RETURNING day"
 )
 
 _DELETE_STALE_DOC_KEYS = text(
@@ -97,10 +107,23 @@ async def purge_public_mcp_usage_events(
             break
     keys = await db.execute(_DELETE_STALE_DOC_KEYS, {"cutoff": cutoff})
     await db.commit()
+    # #3035: a day's visitor rows go once the whole day is before the cutoff.
+    visitors = 0
+    while True:
+        gone = (
+            await db.execute(
+                _DELETE_VISITOR_BATCH, {"cutoff_day": cutoff.date(), "limit": batch_size}
+            )
+        ).all()
+        await db.commit()
+        visitors += len(gone)
+        if len(gone) < batch_size:
+            break
     logger.info(
         "public_mcp_usage_purged",
         deleted=total,
         doc_keys_deleted=int(getattr(keys, "rowcount", 0) or 0),
+        visitors_deleted=visitors,
     )
     return total
 

@@ -34,6 +34,7 @@ advertise no enabled capabilities. A release version is never evidence of suppor
 | `public.domains.observation.v1` | Installations, public budget, `MCP_PUBLIC_DOMAINS_ENABLED` |
 | `public.domains.operations.v1` (experimental) | Domain observation, `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` |
 | `public.text.operations.v1` (experimental) | Installations, `SYNC_PUBLICATION_TEXT_OPERATIONS_ENABLED` |
+| `public.usage.stats.v1` (experimental) | Installations, `SYNC_PUBLICATION_USAGE_STATS_ENABLED` |
 
 These profiles conservatively describe support for complete consumer workflows;
 they do not remove diagnostic reads which intentionally survive worker shutdown.
@@ -46,8 +47,10 @@ verifying and removing it through the installation's browser client needs
 `public.domains.operations.v1` (experimental, optional for a consumer).
 Setting the public description and usage guide of the installation's endpoint
 through the installation's browser client needs `public.text.operations.v1`
-(experimental, optional for a consumer, #2995). A client that does not see a
-capability keeps to the paths it already supports.
+(experimental, optional for a consumer, #2995). Reading the usage statistics
+of the installation's endpoint through the installation's browser client needs
+`public.usage.stats.v1` (experimental, optional for a consumer, #3035). A
+client that does not see a capability keeps to the paths it already supports.
 
 The producer model is `models.sync_contract.SyncConfigurationV1`. The pure
 `services.sync_contract.require_sync_contract` helper is an executable consumer

@@ -359,6 +359,47 @@ Content-Type: application/json
   `integrations:manage` grant of an installation's client this power; no new
   scope or consent is involved.
 
+**Usage statistics of the installation's endpoint (experimental, #3035).** The
+canonical owner can read the usage statistics of the installation's public
+endpoint through the installation's registered browser client, advertised as
+`public.usage.stats.v1` while the operator turns
+`SYNC_PUBLICATION_USAGE_STATS_ENABLED` on (off: `404` before authentication, no
+statement, and the discovery document stays as it was):
+
+```
+GET /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-usage-stats?days=7
+Authorization: Bearer kmc_oidc_at_...
+
+200 { ...the body of GET /api/v1/resources/{resource_id}/public-mcp/usage-stats... }
+```
+
+- **Body**: exactly the owner route's statistics body for the endpoint the
+  installation's binding names ([Statistics for the
+  owner](../public-mcp-usage-events.md#statistics-for-the-owner)): calls,
+  searches and outcomes per UTC day by route and caller, the daily visitors and
+  the most returned documents. `days` is 1–90 (default 7); a value out of range,
+  a repeated or an unknown query key is `400` `invalid_request`.
+- **Who**: the current canonical owner with a token of the installation's
+  browser client whose token, grant and client carry `workspaces:read`
+  (without it: `403` `insufficient_scope`). A current member who is not the
+  canonical owner and whom the member read of the installation
+  (`GET .../sync-installations/{installation_id}`) admits gets `403`
+  `owner_required`; any other member, a non-member, another workspace or
+  installation, another client of a member, and an installation whose public
+  endpoint is not live (unpublished or republished) get `404` `not_found`. A
+  slot-suspended workspace is `403` `SLOT-001`; the owner through a client
+  without a service registration (as on the domain observation), or while a
+  row of the admission, the installation row included, is held by another
+  transaction (send the same request again), `409` `RES-002`. The
+  installation is answered in every state, as the observation is.
+- **Bounds**: the owner route's: one time budget of about six seconds per read,
+  and the workspace's 30 reads per minute counted together with that route
+  (`429` `RATE-001`, `Retry-After: 60`); `503` `usage_stats_unavailable`
+  (`Retry-After: 60`) when the day counts could not be read. The admission is
+  committed before the read, so no authority lock is held while it runs. The
+  route counts in the `sync-human` OIDC burst bucket with the other
+  installation routes and writes nothing.
+
 The sync service id can never be `public-mcp-domains`: `sync_service register`
 refuses that reserved id.
 

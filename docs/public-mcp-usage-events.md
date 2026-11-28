@@ -8,6 +8,8 @@ Operator settings: [Deployment › Public MCP usage events](deployment.md#public
 
 Exactly one event per completed outer public `tools/call`, on both protocol eras (session and stateless). Nothing is recorded for `initialize`, `tools/list`, `server/discover`, `ping`, notifications, or for a handler calling another handler internally. Refused calls (an unknown tool name, a bad argument, the rate limit) are recorded too, with their outcome.
 
+**REST public searches made with a bound key ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)).** While the operator switch `PUBLIC_SEARCH_TELEMETRY_ENABLED` is on, a REST public search (`POST /api/v1/public/{context_id}/search`) made with an API key bound to the context is recorded too, as an event of the endpoint the context's resource is published at: tool `recall`, era `stateless` (a REST request has no session), stored with route `rest` and caller `bound_key` (public MCP calls: `mcp`, `anonymous`). It is recorded when the key's own per-minute limit refuses it (`rate_limited`), when it fails (`error`), is cancelled, or answers (`success` / `degraded`); a search the workspace's capacity lock or slot suspension refuses is not, as on the MCP endpoint. Anonymous REST searches are never recorded; nor are searches of a context whose endpoint is not serving (none published, the slug moved, revoked), or with a key whose plan gives bound keys no allowance. The route and caller are not part of schema v1: **the export stream does not carry REST rows**; a gap row can also count dropped REST events.
+
 ### Schema v1
 
 Every event and every page carries `schema_version: 1`. Representative events for all five tools, the refusals, a gap and a full page are in [`backend/tests/fixtures/public_mcp_usage_events_v1.json`](../backend/tests/fixtures/public_mcp_usage_events_v1.json); a test validates them against the export models.
@@ -68,7 +70,7 @@ So the stream says where it is incomplete instead of skipping silently. If the d
 
 ## Retention
 
-A daily job (04:50 UTC, on the scheduler leader) deletes events older than `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` (default 90), gap rows included, and the document keys of resources that have had no live public endpoint since before that cutoff.
+A daily job (04:50 UTC, on the scheduler leader) deletes events older than `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` (default 90), gap rows included, and the document keys of resources that have had no live public endpoint since before that cutoff. Daily visitor rows ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) go in the same run once their UTC day is before the cutoff's day.
 
 ## Reading the stream: the commit-safe cursor
 
@@ -94,26 +96,44 @@ A page envelope: `{schema_version, deployment_id, as_of, events, next_cursor, ha
 {
   "resource_id": "catalog", "endpoint_id": "…", "window_days": 7,
   "first_day": "2026-11-21", "last_day": "2026-11-27", "retention_days": 90, "recording_enabled": true,
-  "totals": {"calls": 42, "searches": 30, "search_outcomes": {"success": 25, "degraded": 3, "denied": 0, "rate_limited": 2, "invalid_request": 0, "error": 0, "cancelled": 0}},
-  "days": [{"date": "2026-11-21", "calls": 5, "searches": 4, "search_outcomes": {"success": 4, …}}, …],
+  "rest_recording_enabled": true, "visitors": {"status": "ok", "counting_enabled": true},
+  "totals": {"calls": 42, "searches": 30, "search_outcomes": {"success": 25, "degraded": 3, "denied": 0, "rate_limited": 2, "invalid_request": 0, "error": 0, "cancelled": 0},
+             "calls_by_route": {"mcp": 30, "rest": 12}, "searches_by_route": {"mcp": 20, "rest": 10},
+             "searches_answered_by_route": {"mcp": 19, "rest": 9}, "calls_by_caller": {"anonymous": 30, "bound_key": 12}},
+  "days": [{"date": "2026-11-21", "calls": 5, "searches": 4, "search_outcomes": {"success": 4, …},
+            "calls_by_route": {…}, "searches_by_route": {…}, "searches_answered_by_route": {…}, "calls_by_caller": {…}, "visitors": 3}, …],
   "documents": {"status": "ok", "publication_serving": true, "searches_scanned": 28, "scan_limit": 20000,
+                "scanned_since": "2026-11-21T00:00:12Z",
                 "items": [{"doc_key": "…", "searches": 12, "best_rank": 1, "title": "Trail shoe", "source_url": "https://example.com/p/1"}]},
   "generated_at": "2026-11-27T10:00:00Z"
 }
 ```
 
-- The numbers are **calls to the resource's public MCP endpoint**. Searches through the REST public search (`/api/v1/public/{context_id}/search`) write no usage event and are not included; they are in the context's "Public API Usage" numbers.
-- A **call** is one `tool_call` event of the endpoint: any tool, any outcome, refusals included. A **search** is a call of `recall`; `search_outcomes` has every outcome as a key, per day and in `totals`.
+- The numbers are **calls to the public MCP endpoint and, while `PUBLIC_SEARCH_TELEMETRY_ENABLED` is on, REST public searches of the context made with a key bound to it** (`calls_by_route`: `mcp`, `rest`; `rest_recording_enabled` says whether the REST ones are recorded now). Anonymous REST public searches, and searches of a context whose endpoint is not serving, are not included; every REST search is in the context's "Public API Usage" numbers.
+- A **call** is one `tool_call` event of the endpoint: any tool, any outcome, refusals included. A **search** is a call of `recall`; `searches` and `searches_by_route` count every search whatever its outcome, `searches_answered_by_route` the answered ones (`success` or `degraded`); `search_outcomes` has every outcome as a key, per day and in `totals`. Every route and caller is a key too.
 - `days` has exactly `window_days` entries, oldest first, zero-filled. A zero can also mean that recording was off (`recording_enabled` says whether it is on now) or that the events were already deleted under a shorter retention.
-- **Calls, not visitors.** One visitor can make many calls; the route does not report visitors.
-- **Cached answers are not counted.** A cache in front of the endpoint that answers a call itself leaves no event.
+- **Calls and visitors.** `calls_by_caller` tells `anonymous` calls (the public MCP endpoint) from searches made with a `bound_key`. One visitor can make many calls. `days[].visitors` is the number of distinct visitor values servers reported with a bound key that UTC day ([Daily visitors](#daily-visitors)); `null` when they could not be read (`visitors.status: "unavailable"`), and `visitors.counting_enabled` says whether they are counted now. Your application decides what one visitor is: one value per page view counts page views. There is no total over the window: distinct values of different days cannot be added up.
+- **Cached answers are not counted.** A cache in front of the server that answers a call itself leaves no event.
 - **Undercount.** Calls the server could not record are missing (see the gap rows above); the [health route](#health) shows them.
-- `documents.items`: at most 10 documents returned by `recall` calls that ended `success` or `degraded`; `searches` = how many of those calls returned the document, `best_rank` its best position; ordered by `searches`, then `best_rank`. They are computed from the newest `scan_limit` such calls of the window; `searches_scanned` equal to `scan_limit` means older searches were not read.
+- `documents.items`: at most 10 documents returned by `recall` calls that ended `success` or `degraded`, on both routes together; `searches` = how many of those calls returned the document, `best_rank` its best position; ordered by `searches`, then `best_rank`. They are computed from the newest `scan_limit` such calls of the window, starting at `scanned_since` (the time of the oldest of them); `searches_scanned` equal to `scan_limit` means older searches were not read. A document has the same key on both routes. For a REST search, a returned row that the endpoint does not serve (a member's note in the context) keeps its rank but has no key.
 - `title` and `source_url` are what the public endpoint itself shows for the document (for an unedited feed record its title or question and URL), and only **while the endpoint serves right now**; otherwise `publication_serving` is `false` and every title and URL is `null`. While serving, a document that was deleted or is no longer public has `title: null`. No document id or memory id is ever returned.
-- `documents.status` is `unavailable` (no items) when that part could not be read in time; the counts are still returned.
+- `documents.status` and `visitors.status` are `unavailable` when that part could not be read in time; the counts are still returned.
 - Bounds: one read has a time budget of about six seconds, each statement a timeout of at most five seconds; a workspace can read its statistics 30 times per minute (`429` `RATE-001` with `Retry-After: 60`). When the day counts cannot be read the answer is `503` `usage_stats_unavailable` with `Retry-After: 60`. The route writes nothing.
 
 Statistics exist for the live endpoint only: publishing again creates a new endpoint that starts at zero.
+
+The canonical owner can read the same body for a synchronization installation's endpoint through the installation's registered browser client (`GET /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-usage-stats`, experimental, `public.usage.stats.v1`; [Workspace sync installations](ops/workspace-sync-installations.md)). Its reads count in the same 30 reads per minute of the workspace.
+
+## Daily visitors
+
+A server that calls the REST public search with a key bound to the context may send `Kagura-Visitor: <value>` with each search ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035); format and examples in [API Reference › Public Read API](api-reference.md#visitors-kagura-visitor)). The owner's statistics then count distinct visitors per UTC day.
+
+- **Who reports them.** Only holders of a valid key bound to the context, at most one value per search and within the key's per-minute limit; an anonymous caller's header is never read, so it cannot change the count. The owner stops a key's reports by revoking the key, without unpublishing.
+- **What is stored.** The value (1–64 characters of `[A-Za-z0-9_-]`) is turned at once into a 32-hex key: an HMAC of the UTC day, the endpoint and the value under `AUDIT_HMAC_KEY`; the value itself is never stored or logged. The same value on another day or another endpoint gives another key, and the API key that reported it is not part of it: two keys of one application that send the same value count once. Rotating `AUDIT_HMAC_KEY` during a day can count a value twice that day.
+- **Stored apart from the call records.** Visitor keys go to their own table (`public_mcp_daily_visitors`: endpoint, day, key, workspace), never in the transaction that writes events, and in groups: a group of one endpoint and UTC day is written once at least ten distinct values are pending, ten minutes after that UTC day ends, and when the server stops. So the current day's count can be behind; on an endpoint with fewer than ten visitors a day it appears ten minutes after the UTC day ends. A search that started before midnight UTC and answers after it counts for its own day; one that answers more than ten minutes after its day ended counts no visitor. A process crash loses that process's pending values.
+- **Only answered searches** (`success` or `degraded`) count a visitor, so the answered searches, the documents and the visitors share one base. A malformed or repeated header is ignored and logged by reason only (`repeated`, `format`).
+- **No total.** Distinct values of separate days are not added up.
+- **Retention.** Visitor rows are deleted by the daily retention job once their day is before the events' cutoff day (`MCP_PUBLIC_TELEMETRY_RETENTION_DAYS`).
 
 ## What a public call leaves on the server
 
@@ -133,8 +153,8 @@ For a call to the public MCP endpoint:
 
 For a request to the REST public search:
 
-10. **No usage event.** One `usage_stats` row per request: the path (it contains the context id), method, status, response time and, for a key bound to the context, the key's owner and key id; the application sets no time limit on these rows. For the "Public API Usage" numbers and per-key attribution.
-11. A log line with the query's length and a keyed hash of the query, not the text; the per-minute counters; the usage budget charge for an anonymous search of a published context; with a bound key that asks for reranking, the query and the candidate texts are sent to the reranking provider. Items 6 and 7 apply to its search as well.
+10. One `usage_stats` row per request: the path (it contains the context id), method, status, response time and, for a key bound to the context, the key's owner and key id; the application sets no time limit on these rows. For the "Public API Usage" numbers and per-key attribution. With `PUBLIC_SEARCH_TELEMETRY_ENABLED` on, a search made with a key bound to a context whose endpoint is serving also leaves **one usage event** of that endpoint (route `rest`, caller `bound_key`; no key id or user id on it), and, when the server sent a well-formed `Kagura-Visitor` value and the search was answered, one daily visitor key per day and value ([Daily visitors](#daily-visitors)). An anonymous search, or one of a context without a serving endpoint, leaves no usage event.
+11. Log lines with the query's length and a keyed hash of the query, not the text, and the stage timings of the search; the per-minute counters; the usage budget charge for an anonymous search of a published context. No caller is reranked. Items 6 and 7 apply to its search as well. The shipped single-server proxy drops `Kagura-Visitor` from its own logs (any other proxy or CDN in front of the server must drop it too).
 
 For either:
 

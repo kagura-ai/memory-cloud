@@ -25,7 +25,7 @@ from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE, reject_reserve
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import APIKey, Context
+from models.auth import APIKey, Context, User
 from services.credential_default_context import default_context_names, readable_context
 from services.security_notification_service import (
     SecurityEvent,
@@ -71,13 +71,15 @@ async def get_api_key_manager(db: AsyncSession = Depends(get_db)) -> APIKeyManag
 # ============================================================================
 
 
-async def _key_workspace_held(db: AsyncSession, key: APIKey) -> bool:
+async def _key_workspace_held(db: AsyncSession, key: APIKey, *, live_context: bool = False) -> bool:
     """Whether the key's owner holds the key's workspace (#2928).
 
     A workspace-scoped key needs the condition key verification applies: a
     live workspace its owner owns or has a membership row in. A public-bound
     key needs the same of the workspace of its bound context, the condition
-    the REST public search applies. True for a global key.
+    the REST public search applies, and with ``live_context`` a bound context
+    that is not soft-deleted (a rotation re-mints the binding). True for a
+    global key.
     """
     if key.workspace_id is not None:
         return await key_owner_holds_workspace(
@@ -85,9 +87,50 @@ async def _key_workspace_held(db: AsyncSession, key: APIKey) -> bool:
         )
     if key.bound_context_id is not None:
         return await bound_key_owner_holds_context_workspace(
-            db, user_id=key.user_id, context_id=key.bound_context_id
+            db, user_id=key.user_id, context_id=key.bound_context_id, live_context=live_context
         )
     return True
+
+
+async def _lock_key_owner(db: AsyncSession, user_id: str) -> None:
+    """Lock the rotating user's ``users`` row ``FOR KEY SHARE``, before any context or key.
+
+    #2370: users before api_keys. User deletion, account erasure and member
+    removal lock the user's row ``FOR UPDATE`` before they sweep the user's
+    contexts and keys. A rotation that takes the row first either finishes
+    before such a sweep starts or reads the key after the sweep committed (a
+    swept key is the route's 404), so it never mints a replacement the sweep
+    has passed, and it holds no context or key the sweep waits on while it
+    waits itself. ``FOR KEY SHARE`` does not wait on an ordinary edit of the
+    user row. The key read that follows decides; the lock only orders.
+    """
+    await db.execute(
+        select(User.user_id)
+        .where(User.user_id == user_id)
+        .with_for_update(read=True, key_share=True)
+    )
+
+
+async def _bound_context_locked(db: AsyncSession, key: APIKey) -> bool:
+    """Lock a public-bound key's context ``FOR KEY SHARE``; True for any other key.
+
+    Lock order: the bound context before the key, the order user deletion
+    takes (the doomed contexts, then the keys bound to them). ``FOR KEY
+    SHARE`` is the lock the replacement's foreign key takes anyway: it waits
+    on a hard delete of the context, not on an edit of it, and a soft delete
+    is such an edit. False when the context is gone after that wait, or was
+    already soft-deleted when the statement started: ``deleted_at`` is read
+    as committed at statement start, so a soft delete still in flight is not
+    seen.
+    """
+    if key.bound_context_id is None:
+        return True
+    locked = await db.execute(
+        select(Context.id)
+        .where(Context.id == key.bound_context_id, Context.deleted_at.is_(None))
+        .with_for_update(read=True, key_share=True)
+    )
+    return locked.scalar_one_or_none() is not None
 
 
 def _record_workspace_key(db: AsyncSession, key: APIKey, actor: str, operation: str) -> None:
@@ -560,6 +603,11 @@ async def regenerate_api_key(
     try:
         user_id = get_user_id(user)
 
+        # #2370: the caller's users row before anything else, so the key is
+        # read after any deletion, erasure or member removal of the caller
+        # that holds the row has committed.
+        await _lock_key_owner(db, user_id)
+
         # Get existing key
         result = await db.execute(
             select(APIKey).where(
@@ -572,9 +620,15 @@ async def regenerate_api_key(
         old_key = result.scalar_one_or_none()
 
         # #2928: a workspace-scoped key is rotated only while its owner holds
-        # the workspace, the condition key verification applies; otherwise the
-        # same 404, before anything is minted or recorded.
-        if not old_key or not await _key_workspace_held(db, old_key):
+        # the workspace, the condition key verification applies, and a bound
+        # key only while its context is live, locked before the key is
+        # revoked; otherwise the same 404, before anything is minted or
+        # recorded.
+        if (
+            not old_key
+            or not await _key_workspace_held(db, old_key, live_context=True)
+            or not await _bound_context_locked(db, old_key)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="API key not found or not owned by you",

@@ -450,7 +450,8 @@ class TestPublicSearch:
             order.append("workspace_loaded")
             return workspace
 
-        db = MagicMock(get=AsyncMock(side_effect=get))
+        # The bound path commits the key's use after the context check (#3035).
+        db = MagicMock(get=AsyncMock(side_effect=get), commit=AsyncMock())
         search = AsyncMock()
 
         async def anon_bucket(*_a, **_k):

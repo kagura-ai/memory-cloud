@@ -21,19 +21,33 @@ horizon gives a cursor that cannot skip a late commit
 (``services/public_mcp_usage_events.py``).
 
 CHECK constraints are rendered from the module tuples below byte-identically
-to the migration literals (``f28_2678_public_mcp_usage_events``); new values
-are APPENDED, never reordered.
+to the migration literals (``f28_2678_public_mcp_usage_events``,
+``f67_3035_public_visitors``); new values are APPENDED, never reordered.
+
+``route`` and ``caller`` (#3035) say where a ``tool_call`` row came from: the
+public MCP endpoint (``mcp``, always ``anonymous``) or a REST public search of
+the endpoint's context made with an API key bound to that context (``rest``,
+``bound_key``). Anonymous REST public searches are never recorded. A REST row
+has no session, so its ``era`` is ``stateless`` and its tool is the search
+tool. NULL in either column is a gap row, or a row written before the columns
+existed (all of those were public MCP calls).
+
+``public_mcp_daily_visitors`` (#3035) holds the distinct visitor keys a
+server reported with a bound key, one row per endpoint, UTC day and key. A
+key is an HMAC of the day, the endpoint and the reported value; no column
+refers to an event, a call, a time of day or an API key.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -69,6 +83,20 @@ PMU_OUTCOMES: tuple[str, ...] = (
 )
 PMU_ERAS: tuple[str, ...] = ("session", "stateless")
 PMU_GAP_REASONS: tuple[str, ...] = ("queue_full", "write_failed", "shutdown")
+
+# Who made a recorded call (#3035): an anonymous public MCP caller, or a server
+# holding an API key bound to the context (REST public search only).
+PMU_CALLER_ANONYMOUS = "anonymous"
+PMU_CALLER_BOUND_KEY = "bound_key"
+PMU_CALLERS: tuple[str, ...] = (PMU_CALLER_ANONYMOUS, PMU_CALLER_BOUND_KEY)
+# Which surface answered it (#3035).
+PMU_ROUTE_MCP = "mcp"
+PMU_ROUTE_REST = "rest"
+PMU_ROUTES: tuple[str, ...] = (PMU_ROUTE_MCP, PMU_ROUTE_REST)
+# The search tool: a call with this tool is a search (a REST row's tool).
+PMU_SEARCH_TOOL = "recall"
+# A REST request has no session: its era.
+PMU_REST_ERA = "stateless"
 
 # 4 KB JSONB cap (the llm_call_log / memory_access_events precedent).
 PMU_DOCUMENTS_MAX_BYTES = 4096
@@ -133,6 +161,10 @@ class PublicMcpUsageEvent(Base):
     gap_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     gap_ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     gap_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # #3035: who made the call and which surface answered it (NULL: a gap row,
+    # or a row written before f67).
+    caller: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    route: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
     __table_args__ = (
         CheckConstraint(f"kind IN ({_in_list(PMU_KINDS)})", name="valid_pmue_kind"),
@@ -154,6 +186,12 @@ class PublicMcpUsageEvent(Base):
         ),
         CheckConstraint(PMU_TOOL_CALL_SHAPE, name="pmue_tool_call_shape"),
         CheckConstraint(PMU_GAP_SHAPE, name="pmue_gap_shape"),
+        CheckConstraint(
+            f"caller IS NULL OR caller IN ({_in_list(PMU_CALLERS)})", name="valid_pmue_caller"
+        ),
+        CheckConstraint(
+            f"route IS NULL OR route IN ({_in_list(PMU_ROUTES)})", name="valid_pmue_route"
+        ),
         Index("ix_pmue_txid_id", "txid", "id"),
         Index("ix_pmue_occurred_at", "occurred_at"),
         Index(
@@ -162,6 +200,10 @@ class PublicMcpUsageEvent(Base):
             "occurred_at",
             postgresql_where=text("endpoint_id IS NOT NULL"),
         ),
+        # f67 adds the statistics ``pmue_day_counts_stats`` (day, tool,
+        # outcome) for the owner's day counts and a lower
+        # ``autovacuum_vacuum_insert_scale_factor`` on the table; neither is
+        # declared here (create_all does not build them).
     )
 
 
@@ -183,6 +225,31 @@ class PublicMcpDocKey(Base):
     resource_doc_id: Mapped[str] = mapped_column(String(255), nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
+    )
+
+
+# The shape of a stored visitor key: 32 lowercase hex, never a raw value.
+PMDV_VISITOR_KEY_SHAPE = "visitor_key ~ '^[0-9a-f]{32}$'"
+
+
+class PublicMcpDailyVisitor(Base):
+    """One distinct visitor key of one endpoint and UTC day (#3035).
+
+    Written by the usage writer in transactions of their own, never with
+    event rows, and only in groups (``services/public_mcp_usage_writer.py``).
+    No foreign key (the events' audit posture); aged out with the events.
+    """
+
+    __tablename__ = "public_mcp_daily_visitors"
+
+    endpoint_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    visitor_key: Mapped[str] = mapped_column(CHAR(32), primary_key=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(PMDV_VISITOR_KEY_SHAPE, name="pmdv_visitor_key_shape"),
+        Index("ix_pmdv_day", "day"),
     )
 
 

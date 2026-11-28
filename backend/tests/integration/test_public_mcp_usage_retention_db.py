@@ -210,3 +210,58 @@ async def test_doc_keys_are_dropped_only_for_long_unpublished_resources(maker):
     assert recently_gone in kept
     assert long_gone not in kept
     assert never_published not in kept
+
+
+async def test_visitor_rows_go_once_their_day_is_before_the_cutoff_day(maker, monkeypatch):
+    """#3035: ``day < cutoff.date()`` deleted, ``day == cutoff.date()`` kept, switches off."""
+    from config.settings import get_settings
+    from models.public_mcp_usage import PublicMcpDailyVisitor
+
+    monkeypatch.setattr(get_settings(), "public_search_telemetry_enabled", False)
+    monkeypatch.setattr(get_settings(), "mcp_public_telemetry_enabled", False)
+    now = utcnow()
+    cutoff_day = (now - timedelta(days=RETENTION_DAYS)).date()
+    endpoint, workspace = uuid4(), uuid4()
+    days = {
+        "old": cutoff_day - timedelta(days=1),
+        "older": cutoff_day - timedelta(days=30),
+        "cutoff": cutoff_day,
+        "today": now.date(),
+    }
+    async with maker() as s:
+        await s.execute(
+            insert(PublicMcpDailyVisitor).values(
+                [
+                    {
+                        "endpoint_id": endpoint,
+                        "day": day,
+                        "visitor_key": f"{i:032x}",
+                        "workspace_id": workspace,
+                    }
+                    for i, day in enumerate(days.values())
+                ]
+            )
+        )
+        await s.commit()
+    try:
+        async with maker() as s:
+            await purge_public_mcp_usage_events(s, now, batch_size=1)
+        async with maker() as s:
+            kept = set(
+                (
+                    await s.execute(
+                        select(PublicMcpDailyVisitor.day).where(
+                            PublicMcpDailyVisitor.endpoint_id == endpoint
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert kept == {days["cutoff"], days["today"]}
+    finally:
+        async with maker() as s:
+            await s.execute(
+                delete(PublicMcpDailyVisitor).where(PublicMcpDailyVisitor.endpoint_id == endpoint)
+            )
+            await s.commit()

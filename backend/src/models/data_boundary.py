@@ -147,6 +147,11 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "public_mcp_usage_events",
         "public_mcp_doc_keys",
         "public_mcp_usage_retention",
+        # Per-day distinct visitor keys of a public endpoint (#3035): an HMAC
+        # of a value a server reported with a key bound to the context, the
+        # UTC day and the endpoint. No person, call, time or key column; no
+        # foreign key; aged out with the usage events.
+        "public_mcp_daily_visitors",
         # Workspace-wide seven-day budget of anonymous public calls (#2805):
         # the workspace id, the running period's start, count and number. No
         # person, no address, no content; cascades with the workspace.

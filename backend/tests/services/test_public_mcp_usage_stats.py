@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from models.public_mcp_usage import PMU_OUTCOMES
+from models.public_mcp_usage import PMU_CALLERS, PMU_OUTCOMES, PMU_ROUTES, PMU_SEARCH_TOOL
 from services import public_mcp_usage_stats as stats
 from services.public_mcp_usage_stats import (
     USAGE_STATS_RATE_LIMIT_PER_MINUTE,
@@ -41,12 +41,12 @@ WORKSPACE = uuid4()
 def test_days_are_zero_filled_in_order_with_every_outcome() -> None:
     first = date(2026, 11, 21)
     rows = [
-        (date(2026, 11, 22), "recall", "success", 3),
-        (date(2026, 11, 22), "recall", "rate_limited", 1),
-        (date(2026, 11, 22), "reference", "success", 4),
-        (date(2026, 11, 27), "list_tags", "error", 2),
-        (date(2026, 11, 27), "recall", "degraded", 5),
-        (date(2026, 11, 20), "recall", "success", 99),  # before the window
+        (date(2026, 11, 22), "recall", "success", "mcp", "anonymous", 3),
+        (date(2026, 11, 22), "recall", "rate_limited", "mcp", "anonymous", 1),
+        (date(2026, 11, 22), "reference", "success", "mcp", "anonymous", 4),
+        (date(2026, 11, 27), "list_tags", "error", "mcp", "anonymous", 2),
+        (date(2026, 11, 27), "recall", "degraded", "mcp", "anonymous", 5),
+        (date(2026, 11, 20), "recall", "success", "mcp", "anonymous", 99),  # before the window
     ]
     days, totals = assemble_days(rows, first, 7)
     assert [d for d, _ in days] == [first + timedelta(days=i) for i in range(7)]
@@ -164,6 +164,8 @@ async def _read(db: _Session, clock: _Clock, days: int = 7):
         days=days,
         retention_days=90,
         recording_enabled=True,
+        rest_recording_enabled=True,
+        visitor_counting_enabled=True,
         clock=clock,
     )
 
@@ -172,7 +174,7 @@ async def test_statements_get_a_naive_utc_bound_and_both_ids(serving) -> None:
     clock = _Clock()
     db = _Session(clock)
     db.results[stats.TOP_DOCUMENTS] = [
-        SimpleNamespace(scanned=2, doc_key="a" * 32, searches=2, best_rank=1)
+        SimpleNamespace(scanned=2, scanned_since=None, doc_key="a" * 32, searches=2, best_rank=1)
     ]
     result = await _read(db, clock, days=7)
     bound = [p for s, p in db.executed if s in (stats.DAY_COUNTS, stats.TOP_DOCUMENTS)]
@@ -188,15 +190,33 @@ async def test_statements_get_a_naive_utc_bound_and_both_ids(serving) -> None:
     assert result.documents.status == "ok"
     assert result.documents.items[0].title == "T-aaaa"
     assert serving == [["a" * 32]]
-    # Each section is read-only inside its own savepoint.
-    assert db.savepoints == 2
-    assert db.sql().count(str(stats._READ_ONLY)) == 2
+    # Each section (counts, visitors, documents) is read-only in its own savepoint.
+    assert db.savepoints == 3
+    assert db.sql().count(str(stats._READ_ONLY)) == 3
+
+
+async def test_every_statement_is_planned_for_its_own_window(serving) -> None:
+    """The driver keeps statements prepared per connection; a cached generic plan
+    of a statement would serve a 7-day and a 90-day window with one plan."""
+    step_sql = str(stats._STATEMENT_TIMEOUT)
+    assert "set_config('plan_cache_mode', 'force_custom_plan', true)" in step_sql
+    assert "set_config('statement_timeout', :ms, true)" in step_sql
+    clock = _Clock()
+    db = _Session(clock)
+    db.results[stats.TOP_DOCUMENTS] = [
+        SimpleNamespace(scanned=1, scanned_since=None, doc_key="b" * 32, searches=1, best_rank=1)
+    ]
+    await _read(db, clock)
+    statements = [s for s, _ in db.executed]
+    for read in (stats.DAY_COUNTS, stats.VISITORS_BY_DAY, stats.TOP_DOCUMENTS):
+        at = statements.index(read)
+        assert stats._STATEMENT_TIMEOUT in statements[:at]
 
 
 async def test_both_sections_take_search_from_one_definition(serving) -> None:
     """The document scan and the day counts agree on which tool is a search.
 
-    The document statement binds the tool from ``_SEARCH_TOOL`` (no literal
+    The document statement binds the tool from ``PMU_SEARCH_TOOL`` (no literal
     tool name in its text), and the day counts classify searches with the
     same constant.
     """
@@ -207,9 +227,11 @@ async def test_both_sections_take_search_from_one_definition(serving) -> None:
     await _read(db, clock)
     [params] = [p for s, p in db.executed if s is stats.TOP_DOCUMENTS]
     assert params is not None
-    assert params["search_tool"] == stats._SEARCH_TOOL
+    assert params["search_tool"] == PMU_SEARCH_TOOL
     _, totals = assemble_days(
-        [(date(2026, 11, 27), stats._SEARCH_TOOL, "success", 2)], date(2026, 11, 27), 1
+        [(date(2026, 11, 27), PMU_SEARCH_TOOL, "success", "mcp", "anonymous", 2)],
+        date(2026, 11, 27),
+        1,
     )
     assert totals.searches == 2
 
@@ -218,14 +240,18 @@ async def test_no_document_statement_once_the_budget_is_spent(serving) -> None:
     clock = _Clock()
     db = _Session(clock)
     db.cost[stats.DAY_COUNTS] = stats.USAGE_STATS_BUDGET_SECONDS + 1
-    db.results[stats.DAY_COUNTS] = [(stats.utcnow().date(), "recall", "success", 4)]
+    db.results[stats.DAY_COUNTS] = [
+        (stats.utcnow().date(), "recall", "success", "mcp", "anonymous", 4)
+    ]
     result = await _read(db, clock)
     assert result.totals.calls == 4
     assert result.documents.status == "unavailable"
     assert result.documents.publication_serving is False
     assert result.documents.items == []
-    # Nothing of section B ran: the last statement is the day count.
+    # Neither section V nor B ran: the last statement is the day count.
     assert db.executed[-1][0] is stats.DAY_COUNTS
+    assert result.visitors_status == "unavailable"
+    assert all(counts.visitors is None for _, counts in result.days)
     assert db.savepoints == 1
     assert serving == []
 
@@ -235,7 +261,7 @@ async def test_budget_spent_inside_the_document_section(serving) -> None:
     db = _Session(clock)
     db.cost[stats.TOP_DOCUMENTS] = stats.USAGE_STATS_BUDGET_SECONDS
     db.results[stats.TOP_DOCUMENTS] = [
-        SimpleNamespace(scanned=1, doc_key="b" * 32, searches=1, best_rank=2)
+        SimpleNamespace(scanned=1, scanned_since=None, doc_key="b" * 32, searches=1, best_rank=2)
     ]
     result = await _read(db, clock)
     assert result.documents.status == "unavailable"
@@ -249,11 +275,12 @@ async def test_statement_timeout_is_the_smaller_of_five_seconds_and_the_time_lef
     db = _Session(clock)
     db.cost[stats.DAY_COUNTS] = 3.5  # 2.5 s left for section B
     db.results[stats.TOP_DOCUMENTS] = [
-        SimpleNamespace(scanned=1, doc_key="c" * 32, searches=1, best_rank=1)
+        SimpleNamespace(scanned=1, scanned_since=None, doc_key="c" * 32, searches=1, best_rank=1)
     ]
     db.cost[stats.TOP_DOCUMENTS] = 2.4996  # 0.4 ms left for the next steps
     await _read(db, clock)
-    assert db.timeouts() == ["5000", "2500", "1", "1"]
+    # A, then V and B with what is left, then B's two later steps.
+    assert db.timeouts() == ["5000", "2500", "2500", "1", "1"]
 
 
 async def test_day_count_failure_is_unavailable(monkeypatch) -> None:
@@ -283,7 +310,7 @@ async def test_not_serving_gives_no_title(monkeypatch, serving) -> None:
     clock = _Clock()
     db = _Session(clock)
     db.results[stats.TOP_DOCUMENTS] = [
-        SimpleNamespace(scanned=3, doc_key="d" * 32, searches=3, best_rank=1)
+        SimpleNamespace(scanned=3, scanned_since=None, doc_key="d" * 32, searches=3, best_rank=1)
     ]
     result = await _read(db, clock)
     assert result.documents.status == "ok"
@@ -302,7 +329,7 @@ async def test_another_endpoint_serving_at_the_address_gives_no_title(monkeypatc
     clock = _Clock()
     db = _Session(clock)
     db.results[stats.TOP_DOCUMENTS] = [
-        SimpleNamespace(scanned=1, doc_key="e" * 32, searches=1, best_rank=1)
+        SimpleNamespace(scanned=1, scanned_since=None, doc_key="e" * 32, searches=1, best_rank=1)
     ]
     result = await _read(db, clock)
     assert result.documents.publication_serving is False
@@ -314,7 +341,7 @@ async def test_scanned_is_reported_when_no_document_was_returned(serving) -> Non
     clock = _Clock()
     db = _Session(clock)
     db.results[stats.TOP_DOCUMENTS] = [
-        SimpleNamespace(scanned=5, doc_key=None, searches=None, best_rank=None)
+        SimpleNamespace(scanned=5, scanned_since=None, doc_key=None, searches=None, best_rank=None)
     ]
     result = await _read(db, clock)
     assert result.documents.searches_scanned == 5
@@ -378,6 +405,11 @@ async def test_rate_store_failure_serves_and_warns(monkeypatch) -> None:
 # ----------------------------------------------------------------------------
 
 FORBIDDEN = {
+    # #3035: nothing about the caller's key or its raw visitor value.
+    "visitor_key",
+    "bound_key_id",
+    "api_key_id",
+    "authorization",
     "query",
     "query_text",
     "query_hash",
@@ -413,3 +445,129 @@ def test_response_schema_carries_no_forbidden_name() -> None:
     names = _property_names(schema)
     assert {"doc_key", "title", "source_url", "search_outcomes", "days"} <= names
     assert not names & FORBIDDEN, names & FORBIDDEN
+
+
+# ----------------------------------------------------------------------------
+# #3035: routes, callers, visitors and the documents window
+# ----------------------------------------------------------------------------
+
+
+def test_routes_callers_and_answered_searches_are_zero_filled() -> None:
+    first = date(2026, 11, 26)
+    rows = [
+        (date(2026, 11, 26), "recall", "success", "rest", "bound_key", 6),
+        (date(2026, 11, 26), "recall", "rate_limited", "rest", "bound_key", 2),
+        (date(2026, 11, 26), "recall", "degraded", "mcp", "anonymous", 3),
+        (date(2026, 11, 26), "recall", "error", "rest", "bound_key", 1),
+        (date(2026, 11, 26), "explore", "success", "mcp", "anonymous", 4),
+        # Not a known route or caller: a public MCP call by an anonymous caller.
+        (date(2026, 11, 27), "recall", "success", "x", "y", 5),
+    ]
+    days, totals = assemble_days(rows, first, 2)
+    for _, counts in [*days, (None, totals)]:
+        assert set(counts.calls_by_route) == set(PMU_ROUTES)
+        assert set(counts.searches_by_route) == set(PMU_ROUTES)
+        assert set(counts.searches_answered_by_route) == set(PMU_ROUTES)
+        assert set(counts.calls_by_caller) == set(PMU_CALLERS)
+    assert totals.calls == 21
+    assert totals.calls_by_route == {"mcp": 12, "rest": 9}
+    assert totals.calls_by_caller == {"anonymous": 12, "bound_key": 9}
+    assert totals.searches == 17
+    assert totals.searches_by_route == {"mcp": 8, "rest": 9}
+    # Only success and degraded are answered.
+    assert totals.searches_answered_by_route == {"mcp": 8, "rest": 6}
+    quiet = dict(days)[date(2026, 11, 27)]
+    assert quiet.calls_by_route == {"mcp": 5, "rest": 0}
+    assert totals.visitors is None, "no window total of visitors"
+
+
+def test_day_counts_bind_every_default() -> None:
+    sql = str(stats.DAY_COUNTS)
+    for literal in ("'anonymous'", "'mcp'", "'rest'", "'bound_key'"):
+        assert literal not in sql
+    assert ":default_route" in sql and ":default_caller" in sql
+    assert "GROUP BY 1, 2, 3, 4, 5" in sql
+
+
+async def test_the_defaults_are_bound_to_the_constants(serving) -> None:
+    from models.public_mcp_usage import PMU_CALLER_ANONYMOUS, PMU_ROUTE_MCP
+
+    clock = _Clock()
+    db = _Session(clock)
+    await _read(db, clock)
+    [params] = [p for s, p in db.executed if s is stats.DAY_COUNTS]
+    assert params is not None
+    assert params["default_route"] == PMU_ROUTE_MCP
+    assert params["default_caller"] == PMU_CALLER_ANONYMOUS
+
+
+async def test_visitors_are_one_int_per_day(serving) -> None:
+    clock = _Clock()
+    db = _Session(clock)
+    today = stats.utcnow().date()
+    db.results[stats.VISITORS_BY_DAY] = [(today, 4), (today - timedelta(days=2), 1)]
+    result = await _read(db, clock)
+    assert result.visitors_status == "ok"
+    by_day = {day: counts.visitors for day, counts in result.days}
+    assert by_day[today] == 4
+    assert by_day[today - timedelta(days=2)] == 1
+    assert by_day[today - timedelta(days=1)] == 0
+    [params] = [p for s, p in db.executed if s is stats.VISITORS_BY_DAY]
+    assert params == {
+        "endpoint_id": ENDPOINT.id,
+        "workspace_id": WORKSPACE,
+        "first_day": today - timedelta(days=6),
+    }
+    # The counts come first, then the visitors, then the documents.
+    order = [s for s, _ in db.executed if s in (stats.DAY_COUNTS, stats.VISITORS_BY_DAY)]
+    assert order == [stats.DAY_COUNTS, stats.VISITORS_BY_DAY]
+    assert db.executed[-1][0] is not stats.VISITORS_BY_DAY
+
+
+async def test_a_visitor_failure_leaves_the_counts(serving) -> None:
+    clock = _Clock()
+    db = _Session(clock)
+    today = stats.utcnow().date()
+    db.results[stats.DAY_COUNTS] = [(today, "recall", "success", "rest", "bound_key", 2)]
+    real = db.execute
+
+    async def broken(stmt, params=None):
+        if stmt is stats.VISITORS_BY_DAY:
+            raise RuntimeError("boom")
+        return await real(stmt, params)
+
+    db.execute = broken  # type: ignore[method-assign]
+    result = await _read(db, clock)
+    assert result.visitors_status == "unavailable"
+    assert all(counts.visitors is None for _, counts in result.days)
+    assert result.totals.calls_by_route["rest"] == 2
+    assert result.documents.status == "ok"
+
+
+async def test_the_documents_window_starts_at_the_oldest_scanned_search(serving) -> None:
+    clock = _Clock()
+    db = _Session(clock)
+    since = datetime(2026, 11, 27, 9, 30)
+    db.results[stats.TOP_DOCUMENTS] = [
+        SimpleNamespace(scanned=2, scanned_since=since, doc_key="a" * 32, searches=2, best_rank=1)
+    ]
+    assert (await _read(db, clock)).documents.scanned_since == since
+    db.results[stats.TOP_DOCUMENTS] = [
+        SimpleNamespace(scanned=0, scanned_since=None, doc_key=None, searches=None, best_rank=None)
+    ]
+    assert (await _read(db, clock)).documents.scanned_since is None
+
+
+def test_the_recording_flags_follow_both_switches(monkeypatch) -> None:
+    from config.settings import get_settings
+
+    settings = get_settings()
+    for telemetry, rest, expected in (
+        (True, True, (True, True, True)),
+        (True, False, (True, False, False)),
+        (False, True, (False, False, False)),
+        (False, False, (False, False, False)),
+    ):
+        monkeypatch.setattr(settings, "mcp_public_telemetry_enabled", telemetry)
+        monkeypatch.setattr(settings, "public_search_telemetry_enabled", rest)
+        assert stats.usage_recording_flags() == expected

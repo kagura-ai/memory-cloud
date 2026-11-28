@@ -37,7 +37,12 @@ from models.agent import AGENT_ENFORCEMENT_ENFORCE, AGENT_ENFORCEMENT_SHADOW
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.memory import Memory
 from models.public_mcp import PublicMcpEndpoint
-from models.public_mcp_usage import PMU_OUTCOMES, PublicMcpDocKey, PublicMcpUsageEvent
+from models.public_mcp_usage import (
+    PMU_OUTCOMES,
+    PublicMcpDailyVisitor,
+    PublicMcpDocKey,
+    PublicMcpUsageEvent,
+)
 from models.resource import Resource
 from services import public_mcp_usage_stats as stats
 from services.public_mcp_usage_events import UsageEventInput, build_usage_event_row, doc_key
@@ -284,6 +289,11 @@ async def world(async_engine) -> AsyncIterator[World]:
                 )
             )
             await s.execute(
+                delete(PublicMcpDailyVisitor).where(
+                    PublicMcpDailyVisitor.endpoint_id.in_(list(w.endpoint.values()))
+                )
+            )
+            await s.execute(
                 delete(PublicMcpDocKey).where(
                     PublicMcpDocKey.resource_pk.in_(list(w.resource_pk.values()))
                 )
@@ -386,6 +396,8 @@ async def _read(db: AsyncSession, w: World, days: int = 7):
         days=days,
         retention_days=90,
         recording_enabled=True,
+        rest_recording_enabled=True,
+        visitor_counting_enabled=True,
     )
 
 
@@ -643,6 +655,20 @@ async def test_statement_timeout_is_set_in_the_reading_transaction(world: World)
     assert after == before
 
 
+async def test_the_reading_transaction_plans_each_statement_for_its_window(
+    world: World,
+) -> None:
+    async with world.factory() as db:
+        before = (await db.execute(text("SHOW plan_cache_mode"))).scalar()
+        await _read(db, world)
+        during = (await db.execute(text("SHOW plan_cache_mode"))).scalar()
+        await db.rollback()
+        after = (await db.execute(text("SHOW plan_cache_mode"))).scalar()
+    assert before == "auto"
+    assert during == "force_custom_plan"
+    assert after == before
+
+
 async def test_nothing_is_written(world: World) -> None:
     async def counts() -> tuple[int, int]:
         async with world.factory() as db:
@@ -720,3 +746,118 @@ async def test_days_default_and_retention_cap(world: World, monkeypatch) -> None
     body = (await _get(world, world.slug["cat"], days=60)).json()
     assert (body["window_days"], body["retention_days"]) == (20, 20)
     assert len(body["days"]) == 20
+
+
+# ----------------------------------------------------------------------------
+# #3035: routes, callers, visitors and the documents window, on real rows
+# ----------------------------------------------------------------------------
+
+
+def _rest(w: World, outcome: str, at: datetime, docs: tuple[str, ...] = (), **kw: Any) -> dict:
+    row = _event(w, "cat", kw.pop("endpoint", w.endpoint["L"]), "recall", outcome, at, docs, **kw)
+    row.update(route="rest", caller="bound_key")
+    return row
+
+
+def _visitor(endpoint: UUID, day: Any, n: int, workspace: UUID) -> dict:
+    return {
+        "endpoint_id": endpoint,
+        "day": day,
+        "visitor_key": f"{n:032x}",
+        "workspace_id": workspace,
+    }
+
+
+async def test_routes_callers_answered_searches_and_visitors(world: World) -> None:
+    w = world
+    now = utcnow().replace(microsecond=0)
+    today = now.date()
+    L = w.endpoint["L"]
+    async with w.factory() as s:
+        await s.execute(
+            insert(PublicMcpUsageEvent).values(
+                [
+                    _rest(w, "success", now - timedelta(seconds=2), ("d2",)),
+                    _rest(w, "degraded", now - timedelta(seconds=1), ("d2",)),
+                    _rest(w, "rate_limited", now),
+                    # Not L's: another workspace under L's id, another endpoint.
+                    _rest(w, "success", now, workspace_id=w.other_ws),
+                    _rest(w, "success", now, endpoint=w.endpoint["T"]),
+                ]
+            )
+        )
+        await s.execute(
+            insert(PublicMcpDailyVisitor).values(
+                [
+                    *(_visitor(L, today, i, w.ws) for i in range(3)),
+                    *(_visitor(L, today - timedelta(days=1), i, w.ws) for i in range(2)),
+                    # Not counted: before the window, another endpoint, another workspace.
+                    _visitor(L, w.first_day - timedelta(days=1), 9, w.ws),
+                    *(_visitor(w.endpoint["T"], today, 10 + i, w.ws) for i in range(5)),
+                    _visitor(L, today, 20, w.other_ws),
+                ]
+            )
+        )
+        await s.commit()
+
+    r = await _get(w, w.slug["cat"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    totals = body["totals"]
+    assert totals["calls"] == 13
+    assert totals["calls_by_route"] == {"mcp": 10, "rest": 3}
+    assert totals["calls_by_caller"] == {"anonymous": 10, "bound_key": 3}
+    assert totals["searches"] == 10
+    assert totals["searches_by_route"] == {"mcp": 7, "rest": 3}
+    # Answered: success and degraded only.
+    assert totals["searches_answered_by_route"] == {"mcp": 6, "rest": 2}
+    assert "visitors" not in totals, "no window total of visitors"
+    days = body["days"]
+    assert days[-1]["visitors"] == 3
+    assert days[-2]["visitors"] == 2
+    assert [d["visitors"] for d in days[:-2]] == [0] * 5
+    assert days[-1]["calls_by_route"]["rest"] == 3
+    assert days[-1]["searches_answered_by_route"] == {"mcp": 5, "rest": 2}
+    assert body["visitors"]["status"] == "ok"
+    docs = body["documents"]
+    assert docs["searches_scanned"] == 8
+    start = datetime.combine(w.first_day, day_time.min)
+    assert docs["scanned_since"] == start.isoformat() + "Z"
+    # The REST searches' document counts join the MCP ones under one key.
+    by_key = {i["doc_key"]: i for i in docs["items"]}
+    assert by_key[w.key("d2")]["searches"] == 4
+
+
+@pytest.mark.parametrize(
+    ("telemetry", "rest", "expected"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+async def test_the_flags_follow_the_switches(
+    world: World, monkeypatch, telemetry: bool, rest: bool, expected: bool
+) -> None:
+    monkeypatch.setattr(get_settings(), "mcp_public_telemetry_enabled", telemetry)
+    monkeypatch.setattr(get_settings(), "public_search_telemetry_enabled", rest)
+    body = (await _get(world, world.slug["cat"])).json()
+    assert body["recording_enabled"] is telemetry
+    assert body["rest_recording_enabled"] is expected
+    assert body["visitors"] == {"status": "ok", "counting_enabled": expected}
+
+
+async def test_a_visitor_failure_keeps_the_counts_and_the_documents(
+    world: World, monkeypatch
+) -> None:
+    monkeypatch.setattr(stats, "VISITORS_BY_DAY", text("SELECT 1/0 AS day"))
+    r = await _get(world, world.slug["cat"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["visitors"]["status"] == "unavailable"
+    assert all(d["visitors"] is None for d in body["days"])
+    assert body["totals"]["calls"] == 10
+    assert body["documents"]["status"] == "ok"
+
+
+async def test_searches_that_returned_nothing_still_give_the_window_start(world: World) -> None:
+    body = (await _get(world, world.slug["two"])).json()
+    assert body["documents"]["searches_scanned"] == 2
+    assert body["documents"]["scanned_since"] is not None
+    assert body["documents"]["scanned_since"].endswith("Z")

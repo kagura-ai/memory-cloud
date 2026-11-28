@@ -1,9 +1,11 @@
 /**
- * PublicEndpointUsage (#3035): the owner card for the public MCP endpoint.
+ * PublicEndpointUsage (#3035): the owner card for the public MCP endpoint and
+ * the REST public searches made with a bound key.
  *
  * Rendered with the REAL en / ja catalogues so a missing key or ICU argument
  * fails here; `afterEach` fails the test on any error the provider reports.
- * Recharts is replaced by a pass-through (happy-dom has no layout).
+ * Recharts is replaced by a pass-through (happy-dom has no layout); a line
+ * renders its data key and the tooltip renders the label of each series.
  */
 
 import {
@@ -34,13 +36,27 @@ vi.mock("recharts", () => {
     <div data-testid="chart">{children}</div>
   );
   const Nothing = () => null;
+  const Line = ({ dataKey }: { dataKey: string }) => (
+    <span data-testid="chart-line" data-key={dataKey} />
+  );
+  const Tooltip = ({
+    formatter,
+  }: {
+    formatter?: (value: number, name: string) => [number, string];
+  }) => (
+    <span data-testid="chart-tooltip">
+      {["calls", "searches", "visitors"]
+        .map((name) => formatter?.(1, name)?.[1])
+        .join("|")}
+    </span>
+  );
   return {
     ResponsiveContainer: Pass,
     LineChart: Pass,
-    Line: Nothing,
+    Line,
     XAxis: Nothing,
     YAxis: Nothing,
-    Tooltip: Nothing,
+    Tooltip,
     CartesianGrid: Nothing,
     Legend: Nothing,
   };
@@ -91,6 +107,20 @@ const OUTCOMES = {
   cancelled: 0,
 };
 
+const BY_ROUTE = {
+  calls_by_route: { mcp: 30, rest: 12 },
+  searches_by_route: { mcp: 20, rest: 10 },
+  searches_answered_by_route: { mcp: 19, rest: 9 },
+  calls_by_caller: { anonymous: 30, bound_key: 12 },
+};
+
+const NO_ROUTES = {
+  calls_by_route: { mcp: 0, rest: 0 },
+  searches_by_route: { mcp: 0, rest: 0 },
+  searches_answered_by_route: { mcp: 0, rest: 0 },
+  calls_by_caller: { anonymous: 0, bound_key: 0 },
+};
+
 function stats(
   over: Partial<PublicMcpUsageStatsResponse> = {},
 ): PublicMcpUsageStatsResponse {
@@ -102,10 +132,13 @@ function stats(
     last_day: "2026-11-27",
     retention_days: 90,
     recording_enabled: true,
+    rest_recording_enabled: true,
+    visitors: { status: "ok", counting_enabled: true },
     totals: {
       calls: 42,
       searches: 30,
       search_outcomes: { ...OUTCOMES, success: 25, degraded: 3, rate_limited: 2 },
+      ...BY_ROUTE,
     },
     days: [
       {
@@ -113,6 +146,8 @@ function stats(
         calls: 42,
         searches: 30,
         search_outcomes: { ...OUTCOMES, success: 25, degraded: 3, rate_limited: 2 },
+        ...BY_ROUTE,
+        visitors: 7,
       },
     ],
     documents: {
@@ -120,6 +155,7 @@ function stats(
       publication_serving: true,
       searches_scanned: 28,
       scan_limit: 20000,
+      scanned_since: "2026-11-21T00:00:00Z",
       items: [
         {
           doc_key: "a".repeat(32),
@@ -221,59 +257,177 @@ describe("PublicEndpointUsage", () => {
           publication_serving: false,
           searches_scanned: 0,
           scan_limit: 20000,
+          scanned_since: null,
           items: [],
         },
       }),
     );
     await show();
     expect(
-      await screen.findByText(/could not be read right now/),
+      await screen.findByText(/most returned documents could not be read/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/not serving right now/)).not.toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.getAllByTestId("public-endpoint-tile")).toHaveLength(3);
   });
 
-  it("says when the scan limit was reached and when recording is off", async () => {
+  it("says when the scan limit was reached, since when, and when recording is off", async () => {
     mockGetStats.mockResolvedValue(
       stats({
         recording_enabled: false,
+        rest_recording_enabled: false,
         documents: {
           ...stats().documents,
           searches_scanned: 20000,
+          scanned_since: "2026-11-27T08:05:00Z",
         },
       }),
     );
     await show();
     expect(
       await screen.findByText(
-        "This list is based on the most recent 20,000 searches of the period.",
+        "This list is based on the 20,000 most recent answered searches of the period, on the public MCP endpoint and the REST public search together, since 11/27, 08:05 (UTC).",
       ),
     ).toBeInTheDocument();
     expect(screen.getByText(/recording is switched off/)).toBeInTheDocument();
+    // Nothing is recorded at all: the REST line would say MCP is counted.
+    expect(
+      screen.queryByText(/does not record REST public searches/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("states the scan window only when the scan limit was reached", async () => {
+    mockGetStats.mockResolvedValue(stats());
+    await show();
+    await screen.findAllByTestId("public-endpoint-tile");
+    expect(screen.queryByText(/most recent answered searches/)).not.toBeInTheDocument();
   });
 
   it.each(["en", "ja"] as const)(
-    "renders the five notes in %s with the retention and section name",
+    "renders the six notes in %s with the retention and section name",
     async (locale) => {
       mockGetStats.mockResolvedValue(stats({ retention_days: 45 }));
       await show(locale);
       const notes = await screen.findByTestId("public-endpoint-notes");
       const items = within(notes).getAllByRole("listitem");
-      expect(items).toHaveLength(5);
+      expect(items).toHaveLength(6);
       const text = notes.textContent ?? "";
       const t = CATALOGUES[locale].contextStats;
       expect(text).toContain(t.publicAPIUsage);
       expect(text).toContain("45");
-      const cache =
+      const pe = t.publicEndpoint;
+      expect(text).toContain(pe.cacheNote);
+      expect(text).toContain(pe.callsNote);
+      expect(text).toContain(pe.callersNote);
+      expect(text).toContain(pe.undercountNote);
+      const anonymousExcluded =
         locale === "en"
-          ? "Answers served from a cache in front of the endpoint are not included."
-          : "エンドポイントの手前にあるキャッシュが返した応答は含まれません。";
-      expect(text).toContain(cache);
-      expect(text).toContain(t.publicEndpoint.callsNote);
-      expect(text).toContain(t.publicEndpoint.undercountNote);
+          ? "Anonymous REST public searches are not included"
+          : "匿名の REST 公開検索は含まれません";
+      expect(text).toContain(anonymousExcluded);
+      const behind =
+        locale === "en"
+          ? "the current day's count can be behind"
+          : "当日の数は遅れて反映されることがあります";
+      expect(text).toContain(behind);
+      const restCounted =
+        locale === "en"
+          ? "on the public MCP endpoint and the REST public search"
+          : "公開 MCP エンドポイントと REST 公開検索で応答した件数";
+      expect(text).toContain(restCounted);
     },
   );
+
+  it.each(["en", "ja"] as const)(
+    "lists calls and answered searches per route and calls per caller in %s",
+    async (locale) => {
+      mockGetStats.mockResolvedValue(stats());
+      await show(locale);
+      const routes = await screen.findByTestId("public-endpoint-routes");
+      const callers = screen.getByTestId("public-endpoint-callers");
+      const routeText = within(routes)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent);
+      const callerText = within(callers)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent);
+      if (locale === "en") {
+        expect(routeText).toEqual([
+          "Public MCP endpoint30 calls, 19 searches answered",
+          "REST public search12 calls, 9 searches answered",
+        ]);
+        expect(callerText).toEqual([
+          "Anonymous30",
+          "Server with a key bound to this context12",
+        ]);
+      } else {
+        expect(routeText).toEqual([
+          "公開 MCP エンドポイント呼び出し 30 件、応答した検索 19 件",
+          "REST 公開検索呼び出し 12 件、応答した検索 9 件",
+        ]);
+        expect(callerText).toEqual([
+          "匿名30",
+          "このコンテキストに紐づいたキーを使うサーバー12",
+        ]);
+      }
+    },
+  );
+
+  it("draws the visitors line, titled, with its own tooltip label", async () => {
+    mockGetStats.mockResolvedValue(stats());
+    await show();
+    await screen.findAllByTestId("public-endpoint-tile");
+    expect(
+      screen.getAllByTestId("chart-line").map((l) => l.dataset.key),
+    ).toEqual(["calls", "searches", "visitors"]);
+    expect(
+      screen.getByText("Calls, searches and visitors per day (UTC)"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("chart-tooltip")).toHaveTextContent(
+      "Calls|Searches|Visitors",
+    );
+    // The tiles stay as they are.
+    expect(
+      screen.getAllByTestId("public-endpoint-tile").map((t) => t.dataset.value),
+    ).toEqual(["42", "30", "28"]);
+  });
+
+  it("draws no visitors line when visitors are unavailable, and says so", async () => {
+    mockGetStats.mockResolvedValue(
+      stats({ visitors: { status: "unavailable", counting_enabled: true } }),
+    );
+    await show();
+    expect(
+      await screen.findByText(
+        "Visitors could not be read right now. The numbers above are complete.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByTestId("chart-line").map((l) => l.dataset.key),
+    ).toEqual(["calls", "searches"]);
+    expect(
+      screen.getByText("Calls and searches per day (UTC)"),
+    ).toBeInTheDocument();
+  });
+
+  it("says when REST public searches are not recorded", async () => {
+    mockGetStats.mockResolvedValue(
+      stats({
+        rest_recording_enabled: false,
+        visitors: { status: "ok", counting_enabled: false },
+      }),
+    );
+    await show();
+    expect(
+      await screen.findByText(
+        "This server does not record REST public searches; only calls to the public MCP endpoint are counted.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByTestId("chart-line").map((l) => l.dataset.key),
+    ).toEqual(["calls", "searches"]);
+    expect(screen.queryByText(/Visitors could not be read/)).not.toBeInTheDocument();
+  });
 
   it("shows the rate-limited line on 429", async () => {
     mockGetStats.mockRejectedValue(
@@ -315,7 +469,12 @@ describe("PublicEndpointUsage", () => {
   it("shows the empty state when the period has no call", async () => {
     mockGetStats.mockResolvedValue(
       stats({
-        totals: { calls: 0, searches: 0, search_outcomes: { ...OUTCOMES } },
+        totals: {
+          calls: 0,
+          searches: 0,
+          search_outcomes: { ...OUTCOMES },
+          ...NO_ROUTES,
+        },
         days: [],
         documents: { ...stats().documents, searches_scanned: 0, items: [] },
       }),

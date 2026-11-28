@@ -3,7 +3,8 @@
 Three parts:
 
 * **Row builder.** ``build_usage_event_row`` turns a neutral
-  ``UsageEventInput`` (what one public ``tools/call`` did) into the column
+  ``UsageEventInput`` (what one public ``tools/call`` did, or one REST public
+  search made with a key bound to the context, #3035) into the column
   values of one ``public_mcp_usage_events`` row. Everything the client typed
   is normalised away: ``tool`` is one of the five public names or ``other``,
   ``error_code`` matches ``^[a-z_]{1,64}$`` or is ``other``, the protocol
@@ -12,11 +13,15 @@ Three parts:
   scoped to the resource identity), deduplicated, capped at 25. The raw
   session id and the client name are used only when the session-details
   switch is on, and then only as a daily HMAC and a reduced family string.
+  A visitor value a bound-key caller reported arrives only as its daily
+  ``visitor_key`` (``visitor_key()``); a served bound-key search turns it into
+  a ``VisitorRow`` the writer stores apart from the events.
 
 * **Export models.** ``PublicMcpUsageEventV1`` / ``PublicMcpUsageGapV1`` /
   ``PublicMcpUsagePageV1``: the wire contract a self-hosted dashboard reads.
 
-* **Cursor.** ``read_usage_events_page`` publishes rows in ``(txid, id)``
+* **Cursor.** ``read_usage_events_page`` publishes rows (never a REST row:
+  schema v1 carries public MCP calls only, #3035) in ``(txid, id)``
   order and only those whose inserting transaction is below the snapshot's
   ``xmin`` horizon, read in ONE statement so the horizon and the visible
   rows come from the same snapshot. Every transaction below the horizon has
@@ -43,6 +48,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.api_base import TZAwareBaseModel
 from models.public_mcp_usage import (
+    PMU_CALLER_ANONYMOUS,
+    PMU_CALLER_BOUND_KEY,
+    PMU_CALLERS,
+    PMU_ROUTE_MCP,
+    PMU_ROUTE_REST,
+    PMU_ROUTES,
     PMU_TOOLS,
     PublicMcpUsageEvent,
     PublicMcpUsageRetention,
@@ -62,6 +73,10 @@ USAGE_PAGE_MAX = 1000
 
 _DOC_KEY_DOMAIN = "public-mcp-doc"
 _SESSION_KEY_DOMAIN = "public-mcp-session"
+_VISITOR_KEY_DOMAIN = "public-mcp-visitor"
+_VISITOR_KEY_RE = re.compile(r"^[0-9a-f]{32}$")
+# Outcomes that answered the caller: only these make a visitor (#3035).
+_SERVED_OUTCOMES = frozenset({"success", "degraded"})
 _ERROR_CODE_RE = re.compile(r"^[a-z_]{1,64}$")
 _PROTOCOL_VERSION_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _CLIENT_FAMILY_DROP_RE = re.compile(r"[^a-z0-9._-]")
@@ -109,6 +124,18 @@ def session_key(endpoint_id: UUID, session_id: str, day: date, key: str) -> str:
     return hmac_sha256_hex(message, key)[:KEY_HEX_CHARS]
 
 
+def visitor_key(endpoint_id: UUID, value: str, day: date, key: str) -> str:
+    """A daily key for one reported visitor value on one endpoint (32 hex, #3035).
+
+    The UTC day and the endpoint are inputs, so the same value on another day
+    or endpoint gives another key and nothing stored joins two days. The API
+    key that reported it is not an input: two keys of one application that
+    send the same value count once.
+    """
+    message = f"{_VISITOR_KEY_DOMAIN}\n{day.isoformat()}\n{endpoint_id}\n{value}"
+    return hmac_sha256_hex(message, key)[:KEY_HEX_CHARS]
+
+
 def normalise_tool(name: str | None) -> str:
     """One of the five public tool names, else ``other`` (never the typed string)."""
     return name if name in _PUBLIC_TOOL_NAMES else "other"
@@ -145,8 +172,12 @@ def normalise_client_family(name: str | None) -> str | None:
 class UsageEventInput:
     """What one public ``tools/call`` did, as the hook hands it to the writer.
 
-    ``doc_ids`` are the raw document ids in rank order (not deduplicated);
+    ``doc_ids`` are the raw document ids in rank order (not deduplicated;
+    ``""`` keeps a rank for a result that is no document of the resource);
     ``session_id`` and ``client_name`` are transient and never stored as given.
+    ``route`` and ``caller`` default to a public MCP call (#3035); a REST
+    search made with a bound key sets ``rest`` / ``bound_key`` and may carry
+    the daily ``visitor_key`` of the value it reported (never the value).
     """
 
     endpoint_id: UUID
@@ -166,6 +197,19 @@ class UsageEventInput:
     doc_ids: tuple[str, ...] = ()
     session_id: str | None = None
     client_name: str | None = None
+    route: str = PMU_ROUTE_MCP
+    caller: str = PMU_CALLER_ANONYMOUS
+    visitor_key: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class VisitorRow:
+    """One ``public_mcp_daily_visitors`` row: an endpoint, a UTC day, a key (#3035)."""
+
+    endpoint_id: UUID
+    day: date
+    visitor_key: str = field(repr=False)
+    workspace_id: UUID
 
 
 @dataclass(frozen=True)
@@ -176,6 +220,8 @@ class BuiltUsageEvent:
     # (doc_key, resource_doc_id) for every kept document.
     doc_keys: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     resource_pk: UUID | None = None
+    # #3035: the visitor a served bound-key search reported, stored apart.
+    visitor: VisitorRow | None = None
 
 
 # Every row carries every column so a batch is one multi-row INSERT.
@@ -204,6 +250,8 @@ _ROW_KEYS: tuple[str, ...] = (
     "gap_started_at",
     "gap_ended_at",
     "gap_reason",
+    "caller",
+    "route",
 )
 
 
@@ -279,13 +327,32 @@ def build_usage_event_row(
         documents=documents,
         documents_truncated=truncated,
     )
+    # #3035: an unknown route or caller is stored as a public MCP call.
+    route = event.route if event.route in PMU_ROUTES else PMU_ROUTE_MCP
+    caller = event.caller if event.caller in PMU_CALLERS else PMU_CALLER_ANONYMOUS
+    row.update(route=route, caller=caller)
     if session_details_enabled and event.era == "session":
         if event.session_id:
             row["session_key"] = session_key(
                 event.endpoint_id, event.session_id, started.date(), key
             )
         row["client_family"] = normalise_client_family(event.client_name)
-    return BuiltUsageEvent(row=row, doc_keys=doc_keys, resource_pk=event.resource_pk)
+    visitor = None
+    if (
+        caller == PMU_CALLER_BOUND_KEY
+        and outcome in _SERVED_OUTCOMES
+        and event.visitor_key is not None
+        and _VISITOR_KEY_RE.fullmatch(event.visitor_key)
+    ):
+        visitor = VisitorRow(
+            endpoint_id=event.endpoint_id,
+            day=started.date(),
+            visitor_key=event.visitor_key,
+            workspace_id=event.workspace_id,
+        )
+    return BuiltUsageEvent(
+        row=row, doc_keys=doc_keys, resource_pk=event.resource_pk, visitor=visitor
+    )
 
 
 def build_gap_row(
@@ -454,9 +521,17 @@ class UsageEventsPage:
 
 
 def _scope(workspace_id: UUID, resource_pk: UUID | None) -> list[Any]:
-    """Rows of the workspace (and resource); gap rows belong to every scope."""
+    """Rows of the workspace (and resource); gap rows belong to every scope.
+
+    REST rows (#3035) are never in schema v1: a v1 reader would count them as
+    stateless public MCP recalls. Gap rows (route NULL) stay in every scope;
+    one can also count dropped REST events.
+    """
     e = PublicMcpUsageEvent
-    conditions: list[Any] = [or_(e.kind == "gap", e.workspace_id == workspace_id)]
+    conditions: list[Any] = [
+        or_(e.kind == "gap", e.workspace_id == workspace_id),
+        or_(e.route.is_(None), e.route != PMU_ROUTE_REST),
+    ]
     if resource_pk is not None:
         conditions.append(or_(e.kind == "gap", e.resource_pk == resource_pk))
     return conditions
@@ -612,7 +687,8 @@ async def usage_health_counts(
 ) -> UsageHealthCounts:
     """Events of one endpoint and the deployment's gap rows since ``since``.
 
-    Gap rows carry no workspace (they say how much was lost, not whose), so
+    The endpoint's events include its REST rows (#3035): the health route
+    tells whether usage is being recorded at all. Gap rows carry no workspace (they say how much was lost, not whose), so
     every owner sees the deployment's gaps: a hidden gap would defeat them.
     """
     e = PublicMcpUsageEvent

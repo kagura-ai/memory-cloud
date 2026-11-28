@@ -1,21 +1,29 @@
 """Owner statistics of a public MCP endpoint, from its usage events (#3035).
 
 ``GET /api/v1/resources/{resource_id}/public-mcp/usage-stats`` reads the
-usage events the public MCP endpoint already writes: calls, searches and
-search outcomes per UTC day, and the documents searches returned most often.
-Nothing is written and nothing new is stored.
+usage events of the resource's live endpoint: calls, searches and search
+outcomes per UTC day, by route (the public MCP endpoint; REST public searches
+of the context made with a key bound to it, while the server records them)
+and by caller (anonymous, or a bound key), the distinct visitors such a key
+reported per UTC day, and the documents searches returned most often.
+Anonymous REST public searches are never recorded, so never counted here.
+Nothing is written.
 
 Bounds: one wall-clock budget for the whole read (no step starts after it);
 before each step a transaction-local ``statement_timeout`` of the smaller of
-``USAGE_STATS_STATEMENT_TIMEOUT_MS`` and the time left; each section runs
+``USAGE_STATS_STATEMENT_TIMEOUT_MS`` and the time left, and custom plans
+(``plan_cache_mode``): the driver keeps statements prepared per connection,
+and a cached generic plan would read every window, 7 or 90 days, with the
+plan of none of them; each section runs
 read-only inside its own savepoint, so a failure in it leaves the session
 usable; the document scan reads at most ``USAGE_STATS_DOCUMENT_SCAN_LIMIT``
 events; reads are counted per workspace and minute.
 
 The day counts are the answer: when they cannot be read the read fails
-(``PublicMcpUsageStatsUnavailableError``, 503). The document section is
-optional: when it fails or the budget is spent it is ``unavailable`` and the
-counts are still returned. Titles and URLs appear only while the endpoint
+(``PublicMcpUsageStatsUnavailableError``, 503). The visitor and document
+sections are optional: when one fails or the budget is spent it is
+``unavailable`` and the counts are still returned. Visitors of separate days
+are never added up: a distinct count per day is not a count of people. Titles and URLs appear only while the endpoint
 serves right now, through the resolver the observability API uses
 (``resolve_public_documents``): what an anonymous caller could read.
 """
@@ -33,9 +41,17 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import get_settings
 from db.redis import increment_counter
 from mcp_server.public.publication import load_serving_endpoint, serving_paused
-from models.public_mcp_usage import PMU_OUTCOMES
+from models.public_mcp_usage import (
+    PMU_CALLER_ANONYMOUS,
+    PMU_CALLERS,
+    PMU_OUTCOMES,
+    PMU_ROUTE_MCP,
+    PMU_ROUTES,
+    PMU_SEARCH_TOOL,
+)
 from services.observability_documents import resolve_public_documents
 from services.permission_service import CapacityPolicy, PermissionService
 from utils.datetime import utcnow
@@ -56,26 +72,40 @@ USAGE_STATS_STATEMENT_TIMEOUT_MS = 5_000
 USAGE_STATS_BUDGET_SECONDS = 6.0
 USAGE_STATS_RATE_LIMIT_PER_MINUTE = 30
 
-# The search tool: a call with this tool is a search. Both sections use it:
-# the day counts classify rows with it, the document scan binds it.
-_SEARCH_TOOL = "recall"
+# A search the endpoint answered (the base of the documents and visitors).
+_ANSWERED = frozenset({"success", "degraded"})
 
 _LIVE_ENDPOINT = text(
     "SELECT id, public_id, resource_pk, context_id FROM public_mcp_endpoints "
     "WHERE workspace_id = :workspace_id AND resource_id = :slug AND revoked_at IS NULL"
 )
 _READ_ONLY = text("SET TRANSACTION READ ONLY")
-_STATEMENT_TIMEOUT = text("SELECT set_config('statement_timeout', :ms, true)")
+# Each step: its timeout, and a plan made for this execution's window (see the
+# module docstring). Both end with the transaction.
+_STATEMENT_TIMEOUT = text(
+    "SELECT set_config('statement_timeout', :ms, true), "
+    "set_config('plan_cache_mode', 'force_custom_plan', true)"
+)
+# Route and caller: NULL (a row written before f67) is a public MCP call by
+# an anonymous caller; both defaults are bound, never written in the SQL.
 DAY_COUNTS = text(
-    "SELECT (occurred_at)::date AS day, tool, outcome, count(*) AS calls "
+    "SELECT (occurred_at)::date AS day, tool, outcome, "
+    "COALESCE(route, :default_route) AS route, "
+    "COALESCE(caller, :default_caller) AS caller, "
+    "count(*) AS calls "
     "FROM public_mcp_usage_events "
     "WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id "
     "AND kind = 'tool_call' AND occurred_at >= :first_day_start "
-    "GROUP BY 1, 2, 3"
+    "GROUP BY 1, 2, 3, 4, 5"
+)
+VISITORS_BY_DAY = text(
+    "SELECT day, count(*) AS visitors FROM public_mcp_daily_visitors "
+    "WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id AND day >= :first_day "
+    "GROUP BY day"
 )
 TOP_DOCUMENTS = text(
     "WITH recent AS ("
-    " SELECT documents FROM public_mcp_usage_events"
+    " SELECT documents, occurred_at FROM public_mcp_usage_events"
     " WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id"
     " AND kind = 'tool_call' AND tool = :search_tool AND outcome IN ('success', 'degraded')"
     " AND occurred_at >= :first_day_start"
@@ -90,8 +120,9 @@ TOP_DOCUMENTS = text(
     " ORDER BY searches DESC, best_rank ASC, d.doc_key ASC"
     " LIMIT :top"
     ") "
-    "SELECT s.scanned, top.doc_key, top.searches, top.best_rank "
-    "FROM (SELECT count(*) AS scanned FROM recent) AS s LEFT JOIN top ON true "
+    "SELECT s.scanned, s.scanned_since, top.doc_key, top.searches, top.best_rank "
+    "FROM (SELECT count(*) AS scanned, min(occurred_at) AS scanned_since FROM recent) AS s "
+    "LEFT JOIN top ON true "
     "ORDER BY top.searches DESC NULLS LAST, top.best_rank ASC, top.doc_key ASC"
 )
 
@@ -108,11 +139,24 @@ class LiveEndpoint:
 
 @dataclass
 class DayCounts:
-    """Calls, searches and search outcomes of one UTC day (or of the window)."""
+    """Calls, searches and search outcomes of one UTC day (or of the window).
+
+    ``searches`` counts every recorded search whatever its outcome;
+    ``searches_answered_by_route`` only the answered ones (success or
+    degraded), the base the documents and visitors share. ``visitors`` is set
+    on days only (no window total), ``None`` when it could not be read.
+    """
 
     calls: int = 0
     searches: int = 0
     search_outcomes: dict[str, int] = field(default_factory=lambda: dict.fromkeys(PMU_OUTCOMES, 0))
+    calls_by_route: dict[str, int] = field(default_factory=lambda: dict.fromkeys(PMU_ROUTES, 0))
+    searches_by_route: dict[str, int] = field(default_factory=lambda: dict.fromkeys(PMU_ROUTES, 0))
+    searches_answered_by_route: dict[str, int] = field(
+        default_factory=lambda: dict.fromkeys(PMU_ROUTES, 0)
+    )
+    calls_by_caller: dict[str, int] = field(default_factory=lambda: dict.fromkeys(PMU_CALLERS, 0))
+    visitors: int | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +179,8 @@ class DocumentStats:
     searches_scanned: int
     scan_limit: int
     items: list[DocumentItem]
+    # The oldest search the list is based on; None when none was scanned.
+    scanned_since: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +192,9 @@ class UsageStats:
     last_day: date
     retention_days: int
     recording_enabled: bool
+    rest_recording_enabled: bool
+    visitor_counting_enabled: bool
+    visitors_status: Literal["ok", "unavailable"]
     totals: DayCounts
     days: list[tuple[date, DayCounts]]
     documents: DocumentStats
@@ -227,24 +276,49 @@ def window(days: int, retention_days: int, today: date) -> tuple[int, date, date
     return window_days, first_day, datetime.combine(first_day, day_time.min)
 
 
+def usage_recording_flags() -> tuple[bool, bool, bool]:
+    """``(recording_enabled, rest_recording_enabled, visitor_counting_enabled)``.
+
+    One reading of the switches for every statistics response (the owner
+    route and any route that nests its body), so they cannot disagree. One
+    switch governs REST recording and visitor counting together.
+    """
+    settings = get_settings()
+    recording = bool(settings.mcp_public_telemetry_enabled)
+    rest = recording and bool(settings.public_search_telemetry_enabled)
+    return recording, rest, rest
+
+
 def assemble_days(
     rows: Sequence[Any], first_day: date, window_days: int
 ) -> tuple[list[tuple[date, DayCounts]], DayCounts]:
-    """Zero-filled days (oldest first) and totals from ``(day, tool, outcome, calls)`` rows."""
+    """Zero-filled days (oldest first) and totals.
+
+    From ``(day, tool, outcome, route, caller, calls)`` rows; a route or
+    caller outside the stored vocabularies counts as a public MCP call by an
+    anonymous caller.
+    """
     days = [(first_day + timedelta(days=i), DayCounts()) for i in range(window_days)]
     by_day = dict(days)
     totals = DayCounts()
-    for day, tool, outcome, calls in rows:
+    for day, tool, outcome, route, caller, calls in rows:
         counts = by_day.get(day)
         if counts is None:
             continue
         calls = int(calls)
+        route = route if route in PMU_ROUTES else PMU_ROUTE_MCP
+        caller = caller if caller in PMU_CALLERS else PMU_CALLER_ANONYMOUS
         for target in (counts, totals):
             target.calls += calls
-            if tool == _SEARCH_TOOL:
+            target.calls_by_route[route] += calls
+            target.calls_by_caller[caller] += calls
+            if tool == PMU_SEARCH_TOOL:
                 target.searches += calls
+                target.searches_by_route[route] += calls
                 if outcome in target.search_outcomes:
                     target.search_outcomes[outcome] += calls
+                if outcome in _ANSWERED:
+                    target.searches_answered_by_route[route] += calls
     return days, totals
 
 
@@ -271,6 +345,8 @@ async def read_usage_stats(
     days: int,
     retention_days: int,
     recording_enabled: bool,
+    rest_recording_enabled: bool,
+    visitor_counting_enabled: bool,
     budget_seconds: float = USAGE_STATS_BUDGET_SECONDS,
     clock: Callable[[], float] = time.monotonic,
 ) -> UsageStats:
@@ -310,11 +386,45 @@ async def read_usage_stats(
         time_left_ms()
         async with db.begin_nested():
             await section_start()
-            rows = (await db.execute(DAY_COUNTS, scope)).all()
+            rows = (
+                await db.execute(
+                    DAY_COUNTS,
+                    {
+                        **scope,
+                        "default_route": PMU_ROUTE_MCP,
+                        "default_caller": PMU_CALLER_ANONYMOUS,
+                    },
+                )
+            ).all()
     except Exception as exc:
         logger.warning("public_mcp_usage_stats_counts_failed", error_type=type(exc).__name__)
         raise PublicMcpUsageStatsUnavailableError() from None
     day_list, totals = assemble_days(rows, first_day, window_days)
+
+    # V. Visitors per day: optional; on any failure every day is None.
+    visitors_status: Literal["ok", "unavailable"] = "unavailable"
+    try:
+        time_left_ms()
+        async with db.begin_nested():
+            await section_start()
+            visitor_rows = (
+                await db.execute(
+                    VISITORS_BY_DAY,
+                    {
+                        "endpoint_id": endpoint.id,
+                        "workspace_id": workspace_id,
+                        "first_day": first_day,
+                    },
+                )
+            ).all()
+        by_day = {day: int(n) for day, n in visitor_rows}
+        for day, counts in day_list:
+            counts.visitors = by_day.get(day, 0)
+        visitors_status = "ok"
+    except Exception as exc:
+        logger.warning("public_mcp_usage_stats_visitors_unavailable", error_type=type(exc).__name__)
+        for _, counts in day_list:
+            counts.visitors = None
 
     # B. Documents: optional; on any failure the counts are still returned.
     documents = _unavailable_documents()
@@ -327,13 +437,14 @@ async def read_usage_stats(
                     TOP_DOCUMENTS,
                     {
                         **scope,
-                        "search_tool": _SEARCH_TOOL,
+                        "search_tool": PMU_SEARCH_TOOL,
                         "scan_limit": USAGE_STATS_DOCUMENT_SCAN_LIMIT,
                         "top": USAGE_STATS_TOP_DOCUMENTS,
                     },
                 )
             ).all()
             scanned = int(top[0].scanned) if top else 0
+            scanned_since = top[0].scanned_since if top and scanned else None
             ranked = [r for r in top if r.doc_key is not None]
             await step()
             serving = await load_serving_endpoint(db, endpoint.public_id)
@@ -364,6 +475,7 @@ async def read_usage_stats(
                 searches_scanned=scanned,
                 scan_limit=USAGE_STATS_DOCUMENT_SCAN_LIMIT,
                 items=items,
+                scanned_since=scanned_since,
             )
     except Exception as exc:
         logger.warning(
@@ -377,6 +489,9 @@ async def read_usage_stats(
         last_day=first_day + timedelta(days=window_days - 1),
         retention_days=retention_days,
         recording_enabled=recording_enabled,
+        rest_recording_enabled=rest_recording_enabled,
+        visitor_counting_enabled=visitor_counting_enabled,
+        visitors_status=visitors_status,
         totals=totals,
         days=day_list,
         documents=documents,
