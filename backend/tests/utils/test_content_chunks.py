@@ -328,6 +328,54 @@ class TestRerankDocument:
             chunk[: min(RERANK_CHUNK_TEXT_MAX_CHARS, RERANK_RESOURCE_DOC_MAX_CHARS)]
         )
 
+    def test_a_chunk_two_short_of_the_cap_leaves_the_body_one_character(self):
+        chunk = "c" * (RERANK_RESOURCE_DOC_MAX_CHARS - 2)
+        doc = rerank_document(
+            {"payload": {"content": "title: T\n" + "d" * 2000}, "matched_chunk_text": chunk}
+        )
+        assert doc == "t\n" + chunk
+
+    def test_a_long_body_with_a_user_summary_and_a_chunk_cuts_the_body(self):
+        # The body gives way: the user summary keeps its room and the matched
+        # chunk follows it whole.
+        payload = {"content": "body: " + "b" * 3000, "context_summary": "u" * 1000}
+        doc = rerank_document({"payload": payload, "matched_chunk_text": "MATCHED chunk text"})
+        assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
+        assert doc.startswith("body: b")
+        assert doc.endswith(
+            "b\n" + "u" * RERANK_RESOURCE_USER_SUMMARY_ROOM + "\nMATCHED chunk text"
+        )
+
+    def test_a_short_user_summary_survives_a_long_body_and_a_chunk(self):
+        content = "body: " + "b" * 3000
+        chunk = "MATCHED chunk text"
+        doc = rerank_document(
+            {"payload": {"content": content, "context_summary": "why"}, "matched_chunk_text": chunk}
+        )
+        body_room = RERANK_RESOURCE_DOC_MAX_CHARS - len("\nwhy\n") - len(chunk)
+        assert doc == f"{content[:body_room]}\nwhy\n{chunk}"
+        assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
+
+    def test_a_short_body_leaves_the_user_summary_the_room_the_chunk_does_not_take(self):
+        payload = {"content": "title: T", "context_summary": "u" * 2000}
+        doc = rerank_document({"payload": payload, "matched_chunk_text": "MATCHED"})
+        room = RERANK_RESOURCE_DOC_MAX_CHARS - len("title: T\n") - len("\nMATCHED")
+        assert doc == "title: T\n" + "u" * room + "\nMATCHED"
+
+    def test_a_chunk_at_its_own_cap_leaves_the_user_summary_its_room(self):
+        # The chunk alone would fill the cap; the user summary keeps its room
+        # and the chunk takes the rest, the body nothing.
+        payload = {"content": "body: " + "b" * 3000, "context_summary": "u" * 1000}
+        chunk = "c" * (RERANK_CHUNK_TEXT_MAX_CHARS + 10)
+        doc = rerank_document({"payload": payload, "matched_chunk_text": chunk})
+        room = RERANK_RESOURCE_USER_SUMMARY_ROOM
+        assert doc == "u" * room + "\n" + "c" * (RERANK_RESOURCE_DOC_MAX_CHARS - room - 1)
+
+    def test_a_user_summary_without_a_body_comes_before_the_chunk(self):
+        payload = {"content": "", "context_summary": "why"}
+        doc = rerank_document({"payload": payload, "matched_chunk_text": "MATCHED"})
+        assert doc == "why\nMATCHED"
+
     def test_empty_summary_falls_back_to_content(self):
         assert rerank_document({"payload": {"summary": "", "content": "body"}}) == "body"
 

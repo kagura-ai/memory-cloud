@@ -55,7 +55,8 @@ CONTENT_CHUNK_DENSE_MAX_FETCH = 600
 RERANK_CHUNK_TEXT_MAX_CHARS = 1500
 
 #: The longest document the reranker sees for a payload without a ``summary``
-#: (a resource-indexed point), lead fields and context summary included.
+#: (a resource-indexed point), lead fields, context summary and matched chunk
+#: included.
 RERANK_RESOURCE_DOC_MAX_CHARS = 1500
 
 #: Fields of a resource-indexed point whose line of the indexed text is put
@@ -297,15 +298,20 @@ def _take_lead_line(text: str, name: str, value: str) -> tuple[str | None, str]:
     return text[start:end], rest
 
 
-def _resource_rerank_document(payload: dict[str, Any]) -> str:
+def _resource_rerank_document(payload: dict[str, Any], chunk: str = "") -> str:
     """Rerank document of a payload without a ``summary`` (a resource-indexed point).
 
     The lines of the lead fields first (``RERANK_RESOURCE_LEAD_FIELDS``, moved
     out of ``content`` when it holds them, see :func:`_take_lead_line`), then
     the rest of ``content``, then the ``context_summary`` unless it is the
-    indexer's own cut of ``content`` (kept when the user wrote or edited it).
-    Fits ``RERANK_RESOURCE_DOC_MAX_CHARS``: a kept context summary always gets
-    ``RERANK_RESOURCE_USER_SUMMARY_ROOM`` and the indexed text the rest.
+    indexer's own cut of ``content`` (kept when the user wrote or edited it),
+    then the matched ``chunk`` text, one line break between the parts.
+
+    Fits ``RERANK_RESOURCE_DOC_MAX_CHARS``. A kept context summary always gets
+    ``RERANK_RESOURCE_USER_SUMMARY_ROOM`` (all of it when shorter), the chunk
+    the rest it needs, and the indexed text what is left; it is the indexed
+    text that is cut, so a long text never pushes the summary or the chunk
+    out. Room the indexed text does not take goes to the summary.
     """
     content = payload.get("content")
     content = content if isinstance(content, str) else ""
@@ -330,12 +336,19 @@ def _resource_rerank_document(payload: dict[str, Any]) -> str:
         or not context_summary.strip()
         or _is_indexer_context_summary(context_summary, content)
     ):
-        return body
-    if not body:
-        return context_summary[:RERANK_RESOURCE_DOC_MAX_CHARS]
-    room = max(RERANK_RESOURCE_USER_SUMMARY_ROOM, RERANK_RESOURCE_DOC_MAX_CHARS - len(body) - 1)
-    kept = context_summary[:room]
-    return f"{body[: RERANK_RESOURCE_DOC_MAX_CHARS - len(kept) - 1]}\n{kept}"
+        context_summary = ""
+    cap = RERANK_RESOURCE_DOC_MAX_CHARS
+    # Room of the user summary first, then of the chunk; each part after the
+    # first costs one more character for its line break.
+    summary_room = min(len(context_summary), RERANK_RESOURCE_USER_SUMMARY_ROOM)
+    taken = summary_room + 1 if summary_room else 0
+    chunk = chunk[: max(cap - taken, 0)]
+    taken += len(chunk) + 1 if chunk else 0
+    body = body[: max(cap - taken, 0)]
+    taken = len(body) + 1 if body else 0
+    taken += len(chunk) + 1 if chunk else 0
+    kept = context_summary[: max(cap - taken, 0)]
+    return "\n".join(part for part in (body, kept, chunk) if part)
 
 
 def rerank_document(candidate: dict[str, Any]) -> str:
@@ -348,33 +361,26 @@ def rerank_document(candidate: dict[str, Any]) -> str:
 
     No payload key is required (#3031): a payload without a ``summary`` (the
     point the resource indexer writes) is scored on its ``content`` with the
-    lead fields' lines first, then a context summary the user wrote
-    (:func:`_resource_rerank_document`), the whole document cut to
-    ``RERANK_RESOURCE_DOC_MAX_CHARS``; a matched chunk always fits (that
-    document is cut first to leave it room). A candidate with no text at all gets
-    ``RERANK_EMPTY_DOCUMENT``, so one candidate never fails the whole pool and
-    no document is empty.
+    lead fields' lines first, then a context summary the user wrote, then the
+    matched chunk (:func:`_resource_rerank_document`), the whole document
+    within ``RERANK_RESOURCE_DOC_MAX_CHARS``: the indexed text is what gets
+    cut, so the user's summary and the chunk keep their room. A candidate with
+    no text at all gets ``RERANK_EMPTY_DOCUMENT``, so one candidate never fails
+    the whole pool and no document is empty.
     """
     payload = candidate.get("payload") or {}
     summary = payload.get("summary")
-    is_memory = isinstance(summary, str) and bool(summary)
-    if is_memory:
+    chunk_text = candidate.get("matched_chunk_text")
+    cut = chunk_text[:RERANK_CHUNK_TEXT_MAX_CHARS] if chunk_text else ""
+    if isinstance(summary, str) and summary:
         # The memory point always carries the key; its value is None when the
         # memory has no context summary.
         context_summary = payload.get("context_summary")
         doc = f"{summary} {context_summary if isinstance(context_summary, str) else ''}"
+        if cut:
+            doc = f"{doc}\n{cut}"
     else:
-        doc = _resource_rerank_document(payload)
-    chunk_text = candidate.get("matched_chunk_text")
-    if chunk_text:
-        cut = chunk_text[:RERANK_CHUNK_TEXT_MAX_CHARS]
-        if not is_memory:
-            # The matched chunk always fits the cap: the resource document is
-            # cut first to leave it room.
-            doc = doc[: max(RERANK_RESOURCE_DOC_MAX_CHARS - len(cut) - 1, 0)]
-        doc = f"{doc}\n{cut}" if doc else cut
-    if not is_memory:
-        doc = doc[:RERANK_RESOURCE_DOC_MAX_CHARS]
+        doc = _resource_rerank_document(payload, cut)
     if not doc.strip():
         return RERANK_EMPTY_DOCUMENT
     return doc
