@@ -12,7 +12,9 @@ session that records the order of its calls:
   search fetches twice ``limit``, repeats are dropped, one read in a
   savepoint keeps the rows of the context that are not deleted, the list is
   cut to ``limit``; when that read fails the de-duplicated results are
-  served unfiltered.
+  served unfiltered;
+- the four rate-limit refusals say which limit refused (K9b), and a search
+  the workspace cannot run for now answers 503 without a reason (K10a).
 """
 
 from __future__ import annotations
@@ -414,3 +416,166 @@ async def test_a_failed_read_serves_the_de_duplicated_results_unfiltered(bound: 
     assert "savepoint_rollback" in rig.db.calls
     # The repeat was still dropped.
     assert _event(logs, "public_search_completed")["results_dropped"] == 1
+
+
+# ---------------------------------------------------------------------------
+# K9b: which limit refused
+# ---------------------------------------------------------------------------
+
+
+def _counter(value: int):
+    async def _incr(_key: str, amount: int = 1, ttl: int = 60) -> int:
+        return value
+
+    return _incr
+
+
+def test_a_rate_limit_error_without_a_reason_has_no_reason_key() -> None:
+    from utils.exceptions import RateLimitError
+
+    plain = RateLimitError("over", retry_after=60)
+    assert plain.details == {"retry_after": 60}
+    assert plain.error_code == "RATE-001"
+    with_reason = RateLimitError("over", retry_after=60, reason="key_limit")
+    assert with_reason.details == {"retry_after": 60, "reason": "key_limit"}
+    assert with_reason.retry_after == 60
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("check", "args", "count", "reason"),
+    [
+        ("check_public_search_rate_limit", (uuid4(),), 51, "anonymous_limit"),
+        ("check_pre_auth_rate_limit", (uuid4(),), 201, "pre_auth_limit"),
+        ("check_bound_key_rate_limit", (7, 100), 101, "key_limit"),
+        ("check_bound_key_rate_limit", (7, 0), 1, "key_not_provisioned"),
+    ],
+)
+async def test_each_refusal_names_its_limit(
+    check: str, args: tuple[Any, ...], count: int, reason: str
+) -> None:
+    from utils.exceptions import RateLimitError
+
+    with (
+        patch.object(route, "incrby_counter", _counter(count)),
+        pytest.raises(RateLimitError) as exc,
+    ):
+        await getattr(route, check)(*args)
+    assert exc.value.error_code == "RATE-001"
+    assert exc.value.status_code == 429
+    assert exc.value.details["reason"] == reason
+    assert exc.value.retry_after == 60
+
+
+@pytest.mark.asyncio
+async def test_the_pre_auth_refusal_names_its_limit_on_search_and_info() -> None:
+    from api.routes.public_search import get_public_context_info
+    from utils.exceptions import RateLimitError
+
+    context_id = uuid4()
+    for call in (
+        lambda: public_search(
+            context_id=context_id,
+            request=PublicSearchRequest(query="q"),
+            api_key="kagura_x",
+            db=MagicMock(),
+        ),
+        lambda: get_public_context_info(context_id=context_id, api_key="kagura_x", db=MagicMock()),
+    ):
+        with (
+            patch.object(route, "incrby_counter", _counter(201)),
+            pytest.raises(RateLimitError) as exc,
+        ):
+            await call()
+        assert exc.value.details["reason"] == "pre_auth_limit"
+
+
+@pytest.mark.asyncio
+async def test_the_reason_reaches_the_client_body() -> None:
+    import json
+
+    from api.main import memory_cloud_exception_handler
+    from utils.exceptions import RateLimitError
+
+    response = await memory_cloud_exception_handler(
+        MagicMock(url=SimpleNamespace(path="/api/v1/public/x/search")),
+        RateLimitError("over", retry_after=60, reason="anonymous_limit"),
+    )
+    body = json.loads(bytes(response.body))
+    assert response.status_code == 429
+    assert body["error"] == "RATE-001"
+    assert body["details"] == {"retry_after": 60, "reason": "anonymous_limit"}
+
+
+# ---------------------------------------------------------------------------
+# K10a: a search the workspace cannot run for now is a 503, without a reason
+# ---------------------------------------------------------------------------
+
+
+def _spend_cap() -> Exception:
+    from utils.exceptions import EmbeddingSpendCapExceeded
+
+    return EmbeddingSpendCapExceeded(
+        "Daily embedding spend cap reached ($1.2345/day)",
+        period="daily",
+        cap_usd=1.2345,
+        current_usd=6.789,
+        workspace_id=str(uuid4()),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+async def test_the_spend_stop_is_a_503_without_a_reason_or_figure(bound: bool) -> None:
+    import json
+
+    from api.main import memory_cloud_exception_handler
+    from utils.exceptions import TemporarilyUnavailableError
+
+    rig = _Rig()
+    _caller(rig, bound)
+    rig.search.return_value.hybrid_search = AsyncMock(side_effect=_spend_cap())
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(TemporarilyUnavailableError) as exc,
+    ):
+        await rig.run()
+    err = exc.value
+    assert err.status_code == 503
+    assert err.error_code == "temporarily_unavailable"
+    assert err.details == {}
+    assert err.response_headers == {"Retry-After": "300"}
+    assert err.__cause__ is None and err.__suppress_context__ is True
+    assert rig.log_usage.await_args.kwargs["status_code"] == 503
+    failed = _event(logs, "public_search_failed")
+    assert failed["reason"] == "embedding_spend_cap"
+    assert failed["log_level"] == "error"
+
+    with structlog.testing.capture_logs() as handler_logs:
+        response = await memory_cloud_exception_handler(
+            MagicMock(url=SimpleNamespace(path="/api/v1/public/x/search")), err
+        )
+    body = bytes(response.body).decode()
+    assert json.loads(body)["details"] == {}
+    assert response.headers["retry-after"] == "300"
+    everything = body + json.dumps(logs, default=str) + json.dumps(handler_logs, default=str)
+    for figure in ("1.2345", "6.789", "spend cap", "QUOTA-002"):
+        assert figure not in everything
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["content_size", "plain"])
+async def test_other_failures_keep_the_500(error: str) -> None:
+    from utils.exceptions import ContentSizeExceededError
+
+    rig = _Rig()
+    raised = (
+        ContentSizeExceededError(actual=10, limit=5) if error == "content_size" else RuntimeError()
+    )
+    rig.search.return_value.hybrid_search = AsyncMock(side_effect=raised)
+    with structlog.testing.capture_logs() as logs, pytest.raises(HTTPException) as exc:
+        await rig.run()
+    assert exc.value.status_code == 500
+    assert exc.value.__cause__ is raised
+    assert rig.log_usage.await_args.kwargs["status_code"] == 500
+    assert "reason" not in _event(logs, "public_search_failed")

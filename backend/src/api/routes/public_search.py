@@ -41,10 +41,12 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     APIKeyError,
     AuthorizationError,
+    EmbeddingSpendCapExceeded,
     NotFoundException,
     PublicUsageBudgetExhaustedError,
     PublicUsageBudgetUnavailableError,
     RateLimitError,
+    TemporarilyUnavailableError,
 )
 from utils.logger import get_logger
 from utils.query_log import query_log_fields
@@ -154,6 +156,7 @@ async def check_public_search_rate_limit(
             raise RateLimitError(
                 message=f"Public search rate limit exceeded: {current_count}/{limit_per_minute} per minute",
                 retry_after=60,
+                reason="anonymous_limit",
             )
 
         logger.debug(
@@ -257,6 +260,7 @@ async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> None
         raise RateLimitError(
             message="Public-bound API key quota not provisioned for this plan",
             retry_after=60,
+            reason="key_not_provisioned",
         )
 
     redis_key = f"public_bound_key:{key_id}:minute"
@@ -280,6 +284,7 @@ async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> None
                     f"{current_count}/{limit_per_minute} per minute"
                 ),
                 retry_after=60,
+                reason="key_limit",
             )
         logger.debug(
             "public_bound_key_rate_limit_checked",
@@ -334,6 +339,7 @@ async def check_pre_auth_rate_limit(context_id: UUID, limit_per_minute: int = 20
                     f"Pre-auth rate limit exceeded: {current_count}/{limit_per_minute} per minute"
                 ),
                 retry_after=60,
+                reason="pre_auth_limit",
             )
     except RateLimitError:
         raise
@@ -563,12 +569,19 @@ async def public_search(
         - 403: Context is not public, OR API key is not public-bound, OR
                API key is bound to a different context (CWE-639 IDOR)
         - 404: Context not found
-        - 429: Rate limit exceeded (anonymous or per-key bucket), or the
-               workspace's plan has no public API allowance (#1939), or
-               ``usage_budget_exhausted`` (#2805, ``Retry-After`` 60–3600 s)
+        - 429: ``RATE-001`` with ``details.reason`` (#3035):
+               ``anonymous_limit`` (the context's shared bucket),
+               ``pre_auth_limit`` (requests with ``Authorization`` per
+               context), ``key_limit`` (the bound key's own bucket) or
+               ``key_not_provisioned`` (the plan gives bound keys no
+               allowance); or the workspace's plan has no public API
+               allowance (#1939), or ``usage_budget_exhausted`` (#2805,
+               ``Retry-After`` 60–3600 s)
         - 503: ``temporarily_unavailable`` — on the budget-charged path, the
                budget store failed or the per-minute bucket could not be
-               read (#2805, ``Retry-After: 60``)
+               read (#2805, ``Retry-After: 60``); or the workspace cannot
+               run searches for now (#3035, ``Retry-After: 300``, no reason
+               given)
     """
     start_time = utcnow()
 
@@ -780,17 +793,29 @@ async def public_search(
         )
 
     except Exception as e:
+        # #3035 (K10a): the workspace cannot run searches for now. The answer
+        # is the bare 503 with no reason or figure; the operator line names
+        # the cause (its message carries the figure, so it is not logged).
+        cannot_run = isinstance(e, EmbeddingSpendCapExceeded)
         response_time_ms = int((utcnow() - start_time).total_seconds() * 1000)
         await log_usage(
             db=db,
             user_id=log_user_id,
             endpoint=f"/api/v1/public/{context_id}/search",
             method="POST",
-            status_code=500,
+            status_code=503 if cannot_run else 500,
             response_time_ms=response_time_ms,
             **log_attribution,
         )
 
+        if cannot_run:
+            logger.error(
+                "public_search_failed",
+                context_id=context_id,
+                error_type=type(e).__name__,
+                reason="embedding_spend_cap",
+            )
+            raise TemporarilyUnavailableError() from None
         logger.error(
             "public_search_failed",
             context_id=context_id,
@@ -843,7 +868,9 @@ async def get_public_context_info(
         - 403: Context is not public, OR API key is not public-bound, OR
                API key is bound to a different context (CWE-639 IDOR)
         - 404: Context not found
-        - 429: The workspace's plan has no public API allowance (#1939)
+        - 429: The workspace's plan has no public API allowance (#1939), or
+               ``RATE-001`` with ``details.reason`` ``pre_auth_limit``
+               (requests with ``Authorization`` per context, #3035)
     """
     # Issue #626: pre-auth rate limit + IDOR guard run before context
     # lookup, symmetry with /search. The pre-auth gate protects

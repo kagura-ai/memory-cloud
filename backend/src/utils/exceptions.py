@@ -1012,14 +1012,25 @@ class BetaInviteGoneError(MemoryCloudException):
 
 
 class RateLimitError(MemoryCloudException):
-    """Rate limit exceeded (429)."""
+    """Rate limit exceeded (429).
+
+    ``reason`` (optional) names which limit refused, for a client that has
+    more than one (#3035: the REST public search's ``anonymous_limit``,
+    ``pre_auth_limit``, ``key_limit``, ``key_not_provisioned``); it is in
+    ``details`` only when given.
+    """
 
     def __init__(
         self,
         message: str = "Rate limit exceeded",
         retry_after: int | None = None,
+        *,
+        reason: str | None = None,
     ):
-        super().__init__(message, status_code=429, error_code="RATE-001", retry_after=retry_after)
+        extra: dict[str, Any] = {} if reason is None else {"reason": reason}
+        super().__init__(
+            message, status_code=429, error_code="RATE-001", retry_after=retry_after, **extra
+        )
 
     @property
     def retry_after(self) -> int | None:
