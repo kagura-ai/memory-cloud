@@ -5,7 +5,8 @@ production this is a process-wide singleton.
 """
 
 import asyncio
-from typing import cast
+from dataclasses import dataclass
+from typing import Any, cast
 
 import redis.asyncio as aioredis
 
@@ -257,6 +258,149 @@ async def incrby_counter(key: str, amount: int, ttl: int | None = None) -> int:
     except Exception as e:
         logger.error("redis_incrby_failed", key=key, amount=amount, error=str(e))
         raise RedisError(f"Failed to increment counter: {e}") from e
+
+
+# ========================================================================
+# Returnable fixed-window counter (#3054)
+# ========================================================================
+
+# How far the expiry a unit was counted under may seem to differ from the live
+# window's when it is returned: both are read on the Redis server's clock as
+# ``TIME`` plus ``PTTL``, a few milliseconds apart at most. Windows of one key
+# never overlap: the next window opens after the last one expired and lives
+# ``ttl`` seconds, so it ends at least ``ttl`` after the last one did, and
+# ``take_window_slot`` refuses a ``ttl`` of two tolerances or less.
+WINDOW_SLOT_TOLERANCE_MS = 1000
+
+
+@dataclass(frozen=True)
+class WindowSlot:
+    """One unit a request counted in a fixed-window counter (``take_window_slot``).
+
+    Attributes:
+        key: The counter.
+        count: The counter's value right after this unit (the caller's limit
+            check reads it).
+        expires_at_ms: When the window the unit was counted in ends, in
+            milliseconds on the Redis server's clock: what tells the window
+            apart from the key's later ones. None when the counter had no
+            expiry (the unit is never returned).
+    """
+
+    key: str
+    count: int
+    expires_at_ms: int | None
+
+
+def _server_ms(time_reply: Any) -> int:
+    """A ``TIME`` reply (seconds, microseconds) in milliseconds."""
+    seconds, micros = time_reply
+    return int(seconds) * 1000 + int(micros) // 1000
+
+
+async def take_window_slot(key: str, ttl: int) -> WindowSlot:
+    """Count one unit in a fixed-window counter, in one transaction.
+
+    ``SET key 0 PX ttl NX`` (the window's first unit gives it its expiry),
+    ``INCR``, ``PTTL`` and ``TIME`` in one ``MULTI``: no other client's command
+    runs in between, so the unit is counted in the window that ends at
+    ``expires_at_ms``. A counter found without an expiry (an older writer's
+    increment that lost its ``EXPIRE``) gets one, and the unit names no
+    window. Works on any Redis version.
+
+    Args:
+        key: The counter.
+        ttl: The window's length in seconds; more than two
+            ``WINDOW_SLOT_TOLERANCE_MS``.
+
+    Returns:
+        The unit, for the caller's limit check and ``return_window_slot``.
+
+    Raises:
+        ValueError: ``ttl`` is too short to tell its windows apart.
+        RedisError: Redis could not be read or written.
+    """
+    if ttl * 1000 <= 2 * WINDOW_SLOT_TOLERANCE_MS:
+        raise ValueError("a returnable window must be longer than two tolerances")
+    client = get_redis_client()
+    try:
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.set(key, 0, px=ttl * 1000, nx=True)
+            pipe.incr(key)
+            pipe.pttl(key)
+            pipe.time()
+            results = await pipe.execute()
+        count, remaining = int(results[1]), int(results[2])
+        if remaining < 0:
+            await client.expire(key, ttl)
+            return WindowSlot(key=key, count=count, expires_at_ms=None)
+        return WindowSlot(key=key, count=count, expires_at_ms=_server_ms(results[3]) + remaining)
+    except Exception as e:
+        logger.error("redis_window_slot_take_failed", error_type=type(e).__name__)
+        raise RedisError(f"Failed to count a window slot: {type(e).__name__}") from e
+
+
+# KEYS[1]: the counter. ARGV[1]: when the window the unit was counted in ends
+# (ms, server clock). ARGV[2]: the tolerance (ms). Decrements only while that
+# window is the live one (the same end, within the tolerance) and holds a
+# unit; returns 1 when it did, 0 otherwise. Never creates the key.
+# ``replicate_commands`` lets Redis before 5.0 write after ``TIME`` (later
+# versions replicate a script's effects anyway; 7.0 keeps it as a no-op).
+_RETURN_WINDOW_SLOT_SCRIPT = (
+    "if redis.replicate_commands then redis.replicate_commands() end "
+    "local ttl = redis.call('pttl', KEYS[1]) "
+    "if ttl < 0 then return 0 end "
+    "local now = redis.call('time') "
+    "local ends = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) + ttl "
+    "if math.abs(ends - tonumber(ARGV[1])) > tonumber(ARGV[2]) then return 0 end "
+    "local count = tonumber(redis.call('get', KEYS[1])) "
+    "if count == nil or count <= 0 then return 0 end "
+    "redis.call('decr', KEYS[1]) "
+    "return 1"
+)
+# The registered script and the ``id()`` of the client it belongs to (as
+# ``services.storage_quota_service`` caches its own): a new client per event
+# loop registers it again.
+_return_window_slot_script: tuple[int, Any] | None = None
+
+
+async def return_window_slot(slot: WindowSlot) -> bool:
+    """Give one unit back to the window it was counted in, if still live.
+
+    Atomic (a Lua script): the counter is decremented only while the window
+    ``slot`` was counted in is the key's live window and holds a unit, so a
+    return never takes the counter below zero, never creates the key, and
+    never reaches a later window of the key, however late it runs. Each slot
+    is returned at most once by its caller.
+
+    Args:
+        slot: What ``take_window_slot`` answered.
+
+    Returns:
+        True when the unit was given back; False when its window had ended or
+        it names none.
+
+    Raises:
+        RedisError: Redis could not be read or written.
+    """
+    global _return_window_slot_script
+    if slot.expires_at_ms is None:
+        return False
+    client = get_redis_client()
+    if _return_window_slot_script is None or _return_window_slot_script[0] != id(client):
+        _return_window_slot_script = (
+            id(client),
+            client.register_script(_RETURN_WINDOW_SLOT_SCRIPT),
+        )
+    script = _return_window_slot_script[1]
+    try:
+        returned = await script(
+            keys=[slot.key], args=[slot.expires_at_ms, WINDOW_SLOT_TOLERANCE_MS]
+        )
+    except Exception as e:
+        logger.error("redis_window_slot_return_failed", error_type=type(e).__name__)
+        raise RedisError(f"Failed to return a window slot: {type(e).__name__}") from e
+    return int(returned) == 1
 
 
 # ========================================================================

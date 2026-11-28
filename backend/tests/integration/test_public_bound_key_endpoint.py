@@ -305,7 +305,8 @@ async def test_case4_bound_key_matching_succeeds_with_per_key_bucket_and_attribu
     """Bound key, matching context_id → 200.
 
     Per-key bucket is the ONLY bucket charged (attributed traffic does not
-    deplete the shared anonymous bucket). UsageStats writes the key id so
+    deplete the shared anonymous bucket, and gives its pre-key slot back,
+    #3054). UsageStats writes the key id so
     attribution survives key deletion via soft reference.
     """
     ctx, user_id = await _seed_public_context(db_session)
@@ -328,7 +329,9 @@ async def test_case4_bound_key_matching_succeeds_with_per_key_bucket_and_attribu
     # #3035: no caller is reranked, a bound key that asks for it included.
     assert stub_search_service.calls[-1]["use_rerank"] is False
 
-    await _assert_buckets(ctx.id, anon=0, pre_auth=1, key_id=key_id, bound=1)
+    # #3054: the key verified and its own bucket admitted the request, so the
+    # pre-key slot it took is given back.
+    await _assert_buckets(ctx.id, anon=0, pre_auth=0, key_id=key_id, bound=1)
 
     result = await db_session.execute(select(UsageStats).where(UsageStats.api_key_id == key_id))
     row = result.scalar_one()

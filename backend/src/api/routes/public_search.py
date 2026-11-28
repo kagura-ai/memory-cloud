@@ -24,7 +24,7 @@ from auth.api_keys import (
 from auth.dependencies import get_api_key
 from config.plan_tiers import get_plan_tier
 from db.base import get_db
-from db.redis import incrby_counter
+from db.redis import WindowSlot, incrby_counter, return_window_slot, take_window_slot
 from mcp_server.public.publication import ServingEndpoint
 from mcp_server.public.scope import public_rows
 from models.auth import Context, Workspace
@@ -245,7 +245,7 @@ async def _charge_public_usage_budget(
         )
 
 
-async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> None:
+async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> bool:
     """Per-key rate-limit bucket for public-bound API key access (#626).
 
     Uses a dedicated Redis bucket keyed on the API key id, so attributed
@@ -263,10 +263,14 @@ async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> None
             (tier gate at create time), but defensive enforcement here
             keeps the contract honest.
 
+    Returns:
+        ``True`` when the bucket counted and admitted the request; ``False``
+        when Redis could not be read (the bucket fails open, mirroring the
+        anonymous bucket, and nothing counted the request: #3054 then keeps
+        its pre-key slot).
+
     Raises:
-        RateLimitError: If the per-minute bucket is exhausted. Redis
-            errors are logged and swallowed (fail-open), mirroring the
-            anonymous bucket's behavior.
+        RateLimitError: If the per-minute bucket is exhausted.
     """
     if limit_per_minute <= 0:
         raise RateLimitError(
@@ -304,13 +308,17 @@ async def check_bound_key_rate_limit(key_id: int, limit_per_minute: int) -> None
             current=current_count,
             limit=limit_per_minute,
         )
+        return True
     except RateLimitError:
         raise
     except Exception as e:
         logger.error("redis_bound_key_rate_limit_check_failed", error=str(e))
+        return False
 
 
-async def check_pre_auth_rate_limit(context_id: UUID, limit_per_minute: int = 200) -> None:
+async def check_pre_auth_rate_limit(
+    context_id: UUID, limit_per_minute: int = 200
+) -> WindowSlot | None:
     """Pre-auth rate-limit bucket — protects against invalid-key DB DoS.
 
     Without this gate, any caller can hammer the public endpoint with
@@ -328,17 +336,30 @@ async def check_pre_auth_rate_limit(context_id: UUID, limit_per_minute: int = 20
     throttled at 200/min total per context regardless of how many
     distinct keys they cycle through.
 
+    #3054: a request whose public-bound key verified and whose own per-key
+    bucket admitted it gives its slot back (``refund_pre_auth_slot``), so a
+    valid key does not spend this limit; every other request with a key keeps
+    it. The slot is counted with ``take_window_slot`` (one transaction, the
+    first request of a window gives the counter its expiry), which remembers
+    the window it was counted in, so a slot is only ever given back to that
+    window.
+
     Args:
         context_id: Target context UUID — bucket scope.
         limit_per_minute: Pre-auth requests/minute cap (default 200).
 
+    Returns:
+        The request's slot; None when Redis could not be read (fail-open:
+        nothing was counted, so there is nothing to give back).
+
     Raises:
-        RateLimitError: If the per-minute bucket is exhausted. Redis
-            errors are logged and swallowed (fail-open).
+        RateLimitError: If the per-minute bucket is exhausted (the request
+            keeps its slot).
     """
     redis_key = f"public_search_pre_auth:{context_id}:minute"
     try:
-        current_count = await incrby_counter(redis_key, amount=1, ttl=60)
+        slot = await take_window_slot(redis_key, ttl=60)
+        current_count = slot.count
         if current_count > limit_per_minute:
             logger.warning(
                 "public_search_pre_auth_rate_limit_exceeded",
@@ -353,10 +374,30 @@ async def check_pre_auth_rate_limit(context_id: UUID, limit_per_minute: int = 20
                 retry_after=60,
                 reason="pre_auth_limit",
             )
+        return slot
     except RateLimitError:
         raise
     except Exception as e:
         logger.error("redis_pre_auth_rate_limit_check_failed", error=str(e))
+        return None
+
+
+async def refund_pre_auth_slot(slot: WindowSlot) -> None:
+    """Give a request's pre-key slot back (#3054).
+
+    Called once, only after the request's public-bound key verified and its
+    own per-key bucket counted and admitted it. ``return_window_slot`` gives
+    the slot back only to the window it was counted in, while that window
+    holds it: never below zero, never into a later window. A return that
+    fails leaves the slot spent (logged), the direction that never weakens
+    the limit.
+    """
+    try:
+        returned = await return_window_slot(slot)
+    except Exception as e:
+        logger.error("redis_pre_auth_refund_failed", error_type=type(e).__name__)
+        return
+    logger.debug("public_search_pre_auth_slot_returned", returned=returned)
 
 
 async def _resolve_public_attribution(
@@ -636,8 +677,11 @@ async def public_search(
     # turning the endpoint into a DB-DoS amplifier and a key-verification
     # oracle. The cheap Redis check here runs BEFORE ``verify_key`` so
     # invalid-key floods are bounded.
+    # #3054: the slot this request took, given back once its bound key's own
+    # bucket has admitted it (``refund_pre_auth_slot``).
+    pre_auth_slot: WindowSlot | None = None
     if api_key is not None:
-        await check_pre_auth_rate_limit(context_id)
+        pre_auth_slot = await check_pre_auth_rate_limit(context_id)
 
     # 1b. Resolve optional API-key attribution BEFORE reading context data,
     # so a key bound to a different context cannot leak existence of the
@@ -713,7 +757,13 @@ async def public_search(
         if bound_key is not None:
             # The visitor key is computed first and the raw value dropped.
             record.resolve_visitor()
-            await check_bound_key_rate_limit(bound_key.id, bound_limit)
+            counted = await check_bound_key_rate_limit(bound_key.id, bound_limit)
+            # #3054: the key verified and its own bucket counted and admitted
+            # the request, so it gives back the pre-key slot it took (the
+            # pre-key limit protects the key lookup). A request its bucket
+            # refused, or one no bucket could count, keeps it.
+            if counted is True and pre_auth_slot is not None:
+                await refund_pre_auth_slot(pre_auth_slot)
         else:
             # Anonymous shared bucket. Workspace lookup is deferred to step 4
             # below: under abuse, a 429 returns BEFORE any Workspace SELECT.
