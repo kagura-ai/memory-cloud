@@ -588,9 +588,11 @@ class MemoryResponse(TZAwareBaseModel):
     # memory would otherwise raise a Pydantic ValidationError. The *request*
     # schema (RememberRequest) intentionally omits it — the forge guard.
     source_type: Literal["file", "url", "vault", "api", "manual", "connector"] | None = None
-    # #1208: fact-succession annotations. superseded_by is set only when the
+    # #1208: fact-succession annotations. superseded_by is set when the
     # memory is shadowed AND include_superseded=true opted it back into the
-    # results (default recall filters shadowed memories out entirely).
+    # results (default recall filters shadowed memories out entirely), and,
+    # #3020, on the older memory of a link Sleep applied, which default recall
+    # keeps (``models.memory.supersedes_edge_hides``).
     # contradicts lists memories linked by a contradicts edge (either
     # direction) — contradiction never hides, it annotates both sides.
     superseded_by: UUID | None = None

@@ -394,3 +394,46 @@ def test_mcp_reply_over_budget_drops_lane_content_before_cutting_rows():
     )
     assert reply["user_facts"][0]["summary"] == "The user injured a knee"
     assert "content" not in reply["user_facts"][0]
+
+
+# ----------------------------------------------- #3020: Sleep-applied links
+
+
+def _lane_memory():
+    return SimpleNamespace(
+        id=uuid4(),
+        summary="The office is on floor 3",
+        context_summary=None,
+        type="fact",
+        importance=0.5,
+        scope="persistent",
+        created_at=datetime(2026, 11, 1, tzinfo=UTC),
+        updated_at=None,
+        details=None,
+        client="test",
+        tags=[],
+        context=None,
+        source_uri=None,
+        source_type="manual",
+        version=1,
+        content="body",
+        context_id=uuid4(),
+    )
+
+
+def test_a_lane_row_carries_superseded_by_from_the_shadow_map():
+    memory, newer = _lane_memory(), uuid4()
+    hit = {"id": str(memory.id), "score": 0.5}
+    row = user_facts_lane._row(
+        hit,
+        memory,
+        {},
+        with_content=False,
+        trusted_context_ids=None,
+        shadow_map={memory.id: newer},
+    )
+    assert row.superseded_by == newer
+    plain = user_facts_lane._row(
+        hit, memory, {}, with_content=False, trusted_context_ids=None, shadow_map={}
+    )
+    assert plain.superseded_by is None

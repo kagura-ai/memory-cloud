@@ -270,6 +270,7 @@ async def _search(
                 contradiction_map,
                 with_content=with_content,
                 trusted_context_ids=trusted,
+                shadow_map=shadow_map,
             )
             for hit, memory in picked
         ]
@@ -315,9 +316,13 @@ def _row(
     *,
     with_content: bool,
     trusted_context_ids: set[UUID] | None,
+    shadow_map: Mapping[UUID, UUID] | None = None,
 ) -> MemoryResponse:
     """One lane row: the recall row shape, with its dates and, where the
     recall carries content, its content.
+
+    #3020: the older memory of a link Sleep applied stays in the lane, marked
+    with ``superseded_by`` from ``shadow_map`` as a recall row is.
 
     Content follows recall's rule (#2124): none when the call ships none
     (``with_content`` False); with ``trusted_context_ids`` set (a defaulted
@@ -351,6 +356,7 @@ def _row(
         score=hit.get("hybrid_score", hit["score"]),
         source_uri=memory.source_uri,
         source_type=memory.source_type,
+        superseded_by=(shadow_map or {}).get(memory.id),
         contradicts=contradiction_map.get(memory.id, []),
         version=memory.version,
         content=content,

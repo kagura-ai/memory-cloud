@@ -152,7 +152,8 @@ def _add_observed_at(item: dict[str, Any], r: Any) -> None:
 
 def _add_recall_annotations(item: dict[str, Any], r: Any) -> None:
     """Copy the fact-succession annotations onto ``item`` when present."""
-    # #1208: superseded_by is only set under include_superseded=true;
+    # #1208: superseded_by is set under include_superseded=true and, #3020, on
+    # the older memory of a link Sleep applied, which default recall keeps;
     # contradicts lists opposing memories (never hidden, both sides annotated).
     if r.superseded_by:
         item["superseded_by"] = str(r.superseded_by)

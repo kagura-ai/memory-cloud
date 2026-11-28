@@ -34,10 +34,12 @@ def _mem(mid) -> MagicMock:
 
 
 def _service_with_edges(supersede_rows, contradict_rows) -> MemoryService:
+    """Supersedes rows are ``(dst, src)`` or, #3020, ``(dst, src, hides)``; a
+    2-tuple is a hiding link (accepted, declared or a dedup shadow edge)."""
     svc = MemoryService(MagicMock())
     db = AsyncMock()
     s_result = MagicMock()
-    s_result.all.return_value = supersede_rows
+    s_result.all.return_value = [row if len(row) == 3 else (*row, True) for row in supersede_rows]
     c_result = MagicMock()
     c_result.all.return_value = contradict_rows
     db.execute.side_effect = [s_result, c_result]
@@ -162,6 +164,57 @@ async def test_empty_candidates_short_circuits() -> None:
     shadow_map, _ = await svc._apply_supersede_shadowing([], {}, include_superseded=False)
     assert shadow_map == {}
     svc.db.execute.assert_not_awaited()
+
+
+# ------------------------------------------------- #3020: Sleep-applied links
+
+
+@pytest.mark.asyncio
+async def test_an_applied_link_keeps_its_older_memory_in_the_pool_annotated() -> None:
+    """Only hiding links remove a candidate; every live link maps dst -> src,
+    so the page builder marks the older memory of an applied link."""
+    hidden_old, hidden_new, applied_old, applied_new = uuid4(), uuid4(), uuid4(), uuid4()
+    memories = {str(i): _mem(i) for i in (hidden_old, applied_old)}
+    search_results = [{"id": str(hidden_old), "score": 0.9}, {"id": str(applied_old), "score": 0.8}]
+    svc = _service_with_edges(
+        [(hidden_old, hidden_new, True), (applied_old, applied_new, False)], []
+    )
+
+    shadow_map, _ = await svc._apply_supersede_shadowing(
+        search_results, memories, include_superseded=False
+    )
+
+    assert shadow_map == {hidden_old: hidden_new, applied_old: applied_new}
+    assert [r["id"] for r in search_results] == [str(applied_old)]
+    stmt = svc.db.execute.await_args_list[0].args[0]
+    assert [c.name for c in stmt.selected_columns] == ["dst_id", "src_id", "hides"]
+
+
+@pytest.mark.asyncio
+async def test_a_hiding_link_wins_over_an_applied_one_on_the_same_memory() -> None:
+    old, applied_new, declared_new = uuid4(), uuid4(), uuid4()
+    memories = {str(old): _mem(old)}
+    search_results = [{"id": str(old), "score": 0.9}]
+    svc = _service_with_edges([(old, applied_new, False), (old, declared_new, True)], [])
+
+    shadow_map, _ = await svc._apply_supersede_shadowing(
+        search_results, memories, include_superseded=False
+    )
+
+    assert shadow_map == {old: declared_new}
+    assert search_results == []
+
+
+def test_the_hiding_rule_is_the_marker_alone() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from models.memory import supersedes_edge_hides
+
+    compiled = supersedes_edge_hides().compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert sql.startswith("NOT (neural_memory_edges.origin = ")
+    assert "coalesce((CAST(neural_memory_edges.metadata AS JSONB) ->> " in sql
+    assert set(compiled.params.values()) >= {"semantic", "sleep_supersede_apply", ""}
 
 
 # ---------------------------------------------------------------- dedup mode

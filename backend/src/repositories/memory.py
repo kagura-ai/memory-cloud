@@ -782,7 +782,8 @@ class MemoryRepository(BaseRepository[Memory]):
         """A small context's whole live trusted set (``load_guardrails``' index lane, #2334).
 
         Live means not soft-deleted and not shadowed by a ``supersedes`` edge
-        whose superseding memory is still alive (recall's default view). The
+        whose superseding memory is still alive (recall's default view; #3020:
+        a link Sleep applied does not shadow, ``supersedes_edge_hides``). The
         trust gate is ``list_tool_triggered``'s, hard-wired. When at most
         ``limit`` rows match they come back newest first
         (``coalesce(updated_at, created_at) DESC, id DESC``) with their count;
@@ -797,7 +798,7 @@ class MemoryRepository(BaseRepository[Memory]):
         from sqlalchemy import exists
         from sqlalchemy.orm import aliased
 
-        from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
+        from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge, supersedes_edge_hides
 
         superseder = aliased(Memory)
         shadowed = exists(
@@ -807,6 +808,7 @@ class MemoryRepository(BaseRepository[Memory]):
                 NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
                 NeuralMemoryEdge.dst_id == Memory.id,
                 superseder.deleted_at.is_(None),
+                supersedes_edge_hides(),
             )
         )
         conditions = [

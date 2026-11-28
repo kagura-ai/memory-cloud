@@ -1366,3 +1366,23 @@ class NeuralMemoryEdge(Base):
 
     def __repr__(self) -> str:
         return f"<NeuralMemoryEdge(user='{self.user_id}', {self.src_id} -> {self.dst_id}, weight={self.weight:.3f})>"
+
+
+def supersedes_edge_hides(edge: Any = NeuralMemoryEdge) -> ColumnElement[bool]:
+    """Whether a live ``supersedes`` edge hides its older memory (#3020).
+
+    Every such edge hides (recall's shadowing, the user facts lane, the
+    ``load_guardrails`` index, the related index) except one Sleep's
+    supersede-apply phase wrote: origin ``semantic`` with ``metadata.source``
+    naming the phase. Its older memory stays visible, marked with
+    ``superseded_by``. An accepted or declared link, ``remember(supersedes=)``
+    and dedup's shadow edge (NULL metadata) hide; a row a person re-declared
+    (origin ``declared``) or any writer rewrote without the marker hides again.
+    Works on an ``aliased`` edge.
+    """
+    from sqlalchemy import cast as sa_cast
+
+    source = func.coalesce(sa_cast(edge.edge_metadata, JSONB)["source"].astext, "")
+    return not_(
+        and_(edge.origin == EDGE_ORIGIN_SEMANTIC, source == EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY)
+    )

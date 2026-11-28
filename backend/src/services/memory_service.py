@@ -4736,6 +4736,12 @@ class MemoryService:
         - ``include_superseded=True``: kept, and the returned shadow map lets
           the caller annotate it with ``superseded_by``.
 
+        #3020: a link Sleep's supersede-apply phase wrote does not hide
+        (``models.memory.supersedes_edge_hides``): its older memory stays in
+        the pool by default and is annotated from the shadow map like an
+        ``include_superseded`` row. The shadow map holds every live edge;
+        only the dsts of hiding edges are removed.
+
         The liveness JOIN is the self-healing property: edge memory refs are
         bare UUIDs (no FK), so a deleted superseder must stop shadowing —
         deleting the edge OR the superseder restores full visibility.
@@ -4758,6 +4764,7 @@ class MemoryService:
                 EDGE_TYPE_CONTRADICTS,
                 EDGE_TYPE_SUPERSEDES,
                 NeuralMemoryEdge,
+                supersedes_edge_hides,
             )
 
             candidate_ids = {memories[r["id"]].id for r in search_results if r["id"] in memories}
@@ -4778,7 +4785,11 @@ class MemoryService:
             # (id as tiebreak) makes the annotation deterministic instead
             # of flapping with row order between runs.
             rows = await self.db.execute(
-                select(NeuralMemoryEdge.dst_id, NeuralMemoryEdge.src_id)
+                select(
+                    NeuralMemoryEdge.dst_id,
+                    NeuralMemoryEdge.src_id,
+                    supersedes_edge_hides().label("hides"),
+                )
                 .join(superseder, superseder.id == NeuralMemoryEdge.src_id)
                 .where(
                     NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
@@ -4787,13 +4798,15 @@ class MemoryService:
                 )
                 .order_by(superseder.created_at.asc(), superseder.id.asc())
             )
-            # dict() over a Row sequence infers dict[bytes, bytes]; the rows
-            # are (dst_id, src_id) UUID pairs. Cast rather than switching to
-            # .tuples() so the executed call is unchanged (#1442).
-            shadow_map: dict[UUID, UUID] = cast(
-                dict[UUID, UUID],
-                dict(rows.all()),  # type: ignore[arg-type]
-            )
+            # (dst_id, src_id, hides) rows; the newest superseder wins the
+            # annotation (the last row per dst), any hiding edge hides (#3020).
+            edge_rows = list(rows.all())
+            shadow_map: dict[UUID, UUID] = {}
+            hidden: dict[UUID, UUID] = {}
+            for dst, src, hides in edge_rows:
+                shadow_map[dst] = src
+                if hides:
+                    hidden[dst] = src
 
             c_rows = await self.db.execute(
                 select(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id).where(
@@ -4809,12 +4822,12 @@ class MemoryService:
                 contradiction_map.setdefault(src, []).append(dst)
                 contradiction_map.setdefault(dst, []).append(src)
 
-            if shadow_map and not include_superseded:
+            if hidden and not include_superseded:
                 before = len(search_results)
                 search_results[:] = [
                     r
                     for r in search_results
-                    if r["id"] not in memories or memories[r["id"]].id not in shadow_map
+                    if r["id"] not in memories or memories[r["id"]].id not in hidden
                 ]
                 logger.info(
                     "supersede_shadowing_applied",
@@ -6304,9 +6317,10 @@ class MemoryService:
                     score=search_result.get("hybrid_score", search_result["score"]),
                     source_uri=memory.source_uri,
                     source_type=memory.source_type,
-                    # #1208: succession annotations. superseded_by is only
-                    # non-None under include_superseded=true (default recall
-                    # filtered shadowed memories out of search_results above).
+                    # #1208: succession annotations. superseded_by is set under
+                    # include_superseded=true (default recall filtered shadowed
+                    # memories out of search_results above) and, #3020, on the
+                    # older memory of a link Sleep applied, which stays.
                     superseded_by=shadow_map.get(memory.id),
                     contradicts=contradiction_map.get(memory.id, []),
                     # #1403: near-duplicate this memory may supersede (or None).

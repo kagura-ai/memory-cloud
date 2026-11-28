@@ -16,7 +16,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from models.memory import Memory, NeuralMemoryEdge
+from models.memory import Memory, NeuralMemoryEdge, supersedes_edge_hides
 from models.sleep import SleepRelatedIndex
 from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter, phase_outcome
 from utils.datetime import utcnow
@@ -210,6 +210,8 @@ async def candidate_links(
             supersedes.edge_type == "supersedes",
             supersedes.dst_id.in_([SleepRelatedIndex.source_id, SleepRelatedIndex.target_id]),
             superseder.deleted_at.is_(None),
+            # #3020: a link Sleep applied keeps its older memory reachable.
+            supersedes_edge_hides(supersedes),
         )
         .correlate(SleepRelatedIndex)
         .exists()
