@@ -367,10 +367,11 @@ class TestCarrierStatement:
         edge_sql = str(db.statements[2].compile(dialect=postgresql.dialect()))
         assert "neural_memory_edges.src_id IN" in edge_sql
         assert "neural_memory_edges.dst_id IN" in edge_sql
-        assert "neural_memory_edges.workspace_id = " in edge_sql
-        assert "neural_memory_edges.context_id = " in edge_sql
-        # Any author: no user filter on the pair's edges.
+        # Any author and any scope: recall's shadowing reads by the memories
+        # alone, and an edge can stay behind when a memory moves.
         assert "neural_memory_edges.user_id =" not in edge_sql
+        assert "neural_memory_edges.workspace_id" not in edge_sql
+        assert "neural_memory_edges.context_id" not in edge_sql
 
 
 class TestBound:
@@ -846,6 +847,7 @@ class TestWrite:
             "context_id": CTX,
             "edge_metadata": {"source": "sleep_supersede_apply", "report_id": str(REPORT_ID)},
             "protect_declared_link": True,
+            "prior_in_any_scope": True,
         }
         # The suggestion is cleared to SQL NULL; neither updated_at nor version.
         assert len(db.updates) == 1

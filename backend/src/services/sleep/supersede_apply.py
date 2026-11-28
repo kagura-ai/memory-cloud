@@ -274,9 +274,7 @@ class SupersedeApplyPhase:
         targets = await self._read_targets(
             {tid for tid in targets_of.values() if tid is not None}, eligible, exempt
         )
-        edges = await self._read_pair_edges(
-            workspace_id, context_id, {row.id for row in carriers} | set(targets)
-        )
+        edges = await self._read_pair_edges({row.id for row in carriers} | set(targets))
         await self._load_text_edit_times([*carriers, *targets.values()])
 
         reasons: dict[str, int] = {}
@@ -401,10 +399,13 @@ class SupersedeApplyPhase:
         )
         return {row.id: row for row in rows.all()}
 
-    async def _read_pair_edges(
-        self, workspace_id: str, context_id: str, ids: set[UUID]
-    ) -> list[Any]:
-        """Every edge between two of ``ids`` in the run's scope, any author."""
+    async def _read_pair_edges(self, ids: set[UUID]) -> list[Any]:
+        """Every edge between two of ``ids``, any author, any scope.
+
+        By the memories alone, as recall's shadowing reads ``supersedes``
+        edges: an edge a moved memory left in another workspace or context
+        still links the pair.
+        """
         if len(ids) < 2:
             return []
         rows = await self.db.execute(
@@ -417,8 +418,6 @@ class SupersedeApplyPhase:
             ).where(
                 NeuralMemoryEdge.src_id.in_(ids),
                 NeuralMemoryEdge.dst_id.in_(ids),
-                NeuralMemoryEdge.workspace_id == UUID(workspace_id),
-                NeuralMemoryEdge.context_id == UUID(context_id),
             )
         )
         return list(rows.all())
@@ -581,7 +580,7 @@ class SupersedeApplyPhase:
             ):
                 raise _PairRefused(REASON_CHANGED_SINCE_READ)
             edge_reason = _edge_refusal(
-                await self._read_pair_edges(workspace_id, context_id, {carrier.id, target.id}),
+                await self._read_pair_edges({carrier.id, target.id}),
                 user_id=user_id,
                 newer_id=carrier.id,
                 older_id=target.id,
@@ -601,6 +600,7 @@ class SupersedeApplyPhase:
                     "report_id": str(report_id),
                 },
                 protect_declared_link=True,
+                prior_in_any_scope=True,
             )
             if edge.edge_type != EDGE_TYPE_SUPERSEDES or edge.origin != EDGE_ORIGIN_SEMANTIC:
                 # A declared row appeared since the re-check and the upsert's

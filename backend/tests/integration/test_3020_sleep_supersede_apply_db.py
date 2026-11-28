@@ -343,6 +343,93 @@ async def test_an_older_memory_whose_recency_cannot_be_known_is_refused(db_sessi
         assert await edge_row(db, s.owner, newer.id, older.id) is None
 
 
+# ------------------------------------------------- edges in another scope
+
+
+async def _other_context(db, s):
+    from models.auth import Context
+
+    ctx = Context(
+        id=uuid4(),
+        workspace_id=s.ws.id,
+        name=f"sa-ctx-{uuid4().hex[:8]}",
+        created_by=s.owner,
+        is_private=False,
+        trust_tier="trusted",
+    )
+    db.add(ctx)
+    await db.flush()
+    return ctx
+
+
+async def _edge_elsewhere(db, s, ctx, src, dst, edge_type, *, origin, weight=1.0) -> None:
+    """An edge on the pair left in another context (a memory moved since)."""
+    from models.memory import NeuralMemoryEdge
+
+    db.add(
+        NeuralMemoryEdge(
+            user_id=s.owner,
+            src_id=src.id,
+            dst_id=dst.id,
+            edge_type=edge_type,
+            origin=origin,
+            weight=weight,
+            confidence=1.0,
+            workspace_id=s.ws.id,
+            context_id=ctx.id,
+        )
+    )
+    await db.flush()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edge_type", ["supersedes", "contradicts"])
+async def test_a_reverse_edge_left_in_another_context_refuses(db_session, edge_type):
+    """Recall's shadowing reads a pair's edges by the memories alone; so does Sleep."""
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    await _edge_elsewhere(
+        db, s, await _other_context(db, s), older, newer, edge_type, origin="declared"
+    )
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+
+    _, result = await run_phase(db, s, report)
+
+    reason = "already_linked" if edge_type == "supersedes" else "contradicts"
+    assert result.details["no_action_reasons"] == {reason: 1}
+    assert await edge_row(db, s.owner, newer.id, older.id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_row_left_in_another_context_is_snapshotted_and_put_back(db_session):
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    newer_id, older_id = newer.id, older.id
+    elsewhere = await _other_context(db, s)
+    await _edge_elsewhere(
+        db, s, elsewhere, newer, older, "neural_association", origin="hebbian", weight=0.3
+    )
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+
+    _, result = await run_phase(db, s, report)
+
+    assert result.details["applied"] == 1
+    (action,) = await apply_actions(db, report.id)
+    assert action.details["prior_edge"] == {
+        "edge_type": "neural_association",
+        "origin": "hebbian",
+        "weight": 0.3,
+        "confidence": 1.0,
+        "edge_metadata": None,
+    }
+    summary = await _undo(db, s, action)
+    assert summary["supersede_links_reversed"] == 1
+    edge = await edge_row(db, s.owner, newer_id, older_id)
+    assert (edge.edge_type, edge.origin, edge.weight) == ("neural_association", "hebbian", 0.3)
+
+
 # ---------------------------------------------------------- judged heads
 
 

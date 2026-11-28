@@ -230,6 +230,35 @@ class TestWriteSleepSupersedesEdge:
         }
 
     @pytest.mark.asyncio
+    async def test_the_prior_row_can_be_looked_up_in_any_scope(self) -> None:
+        """#3020: ``unique_edge`` is (user, src, dst), so the upsert retypes a
+        row left in another workspace or context too; the apply phase looks it
+        up by the pair alone so that row is snapshotted as well."""
+        existing = SimpleNamespace(
+            edge_type="neural_association",
+            origin="hebbian",
+            weight=0.2,
+            confidence=1.0,
+            edge_metadata=None,
+        )
+        repo = self._repo(existing)
+        newer, older = uuid4(), uuid4()
+        prior, _ = await write_sleep_supersedes_edge(
+            repo,
+            user_id="u",
+            newer_id=newer,
+            older_id=older,
+            workspace_id="w",
+            context_id="c",
+            prior_in_any_scope=True,
+        )
+        repo.get_edge.assert_awaited_once_with("u", newer, older)
+        assert prior is not None and prior["edge_type"] == "neural_association"
+        # The written row is still the run's scope.
+        kwargs = repo.create_or_update_edge.await_args.kwargs
+        assert (kwargs["workspace_id"], kwargs["context_id"]) == ("w", "c")
+
+    @pytest.mark.asyncio
     async def test_an_existing_supersedes_row_is_not_snapshotted(self) -> None:
         existing = SimpleNamespace(
             edge_type="supersedes",

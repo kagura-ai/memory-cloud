@@ -233,6 +233,7 @@ async def write_sleep_supersedes_edge(
     context_id: str | None,
     edge_metadata: dict[str, Any] | None = None,
     protect_declared_link: bool = False,
+    prior_in_any_scope: bool = False,
 ) -> tuple[dict[str, Any] | None, NeuralMemoryEdge]:
     """Upsert the ``supersedes`` edge ``newer -> older`` a Sleep phase decided on.
 
@@ -257,12 +258,21 @@ async def write_sleep_supersedes_edge(
             (``create_or_update_edge``). A caller that protects one reads the
             written row back (the lookup before the write put the row in the
             identity map), so it can tell whether the guard kept a declared row.
+        prior_in_any_scope: Look the prior row up by ``(user, newer, older)``
+            alone. ``unique_edge`` has no scope in it, so the upsert also
+            retypes a row a moved memory left in another workspace or
+            context; this snapshots that row too (the supersede-apply phase).
+            Dedup looks it up in the run's scope, as before.
 
     Returns:
         ``(prior_edge, edge)``: the snapshot of a retyped edge or None, and
         the written row (fresh only with ``protect_declared_link``).
     """
-    prior = await edge_repo.get_edge(user_id, newer_id, older_id, workspace_id, context_id)
+    prior = (
+        await edge_repo.get_edge(user_id, newer_id, older_id)
+        if prior_in_any_scope
+        else await edge_repo.get_edge(user_id, newer_id, older_id, workspace_id, context_id)
+    )
     prior_edge: dict[str, Any] | None = None
     if prior is not None and prior.edge_type != EDGE_TYPE_SUPERSEDES:
         prior_edge = {
