@@ -15,7 +15,7 @@ from models.management_schemas import digest
 from models.memory import REVISION_KIND_FORGOTTEN, Memory
 from models.resource import IndexerState, ResourceEvent
 from models.sync_feed import SyncFeed, SyncIndexOutbox, SyncRecord, SyncRun
-from models.sync_feed_schemas import MAX_RECORDS, MAX_RUN_BYTES, SCHEMA_HASH, FeedRecord
+from models.sync_feed_schemas import MAX_RECORDS, MAX_RUN_BYTES, FeedRecord, SyncSchema
 from models.sync_installation import SyncInstallation
 from models.sync_management import (
     SyncManagedTarget,
@@ -25,7 +25,7 @@ from models.sync_management import (
 )
 from services.integration_entitlements import paid_integration_write
 from services.sync_credentials import CredentialAuthority
-from services.sync_feed_authority import FeedFence, current_schema, exact_target, locked
+from services.sync_feed_authority import FeedFence, approved_schema, exact_target, locked
 from services.sync_feed_commit import document_id
 from services.sync_feed_runs import (
     clear_diff,
@@ -245,8 +245,11 @@ async def manual_snapshot(
 
 async def candidates(
     db: AsyncSession, installation: SyncInstallation, target: SyncManagedTarget, fence: FeedFence
-) -> list[tuple[SyncFeed, SyncResumeCandidate]]:
-    """Every configured feed must have a fresh strict snapshot at current authority."""
+) -> tuple[SyncSchema, list[tuple[SyncFeed, SyncResumeCandidate]]]:
+    """Every configured feed must have a fresh strict snapshot at current authority.
+
+    Returns the stored schema (read once) with the feeds and their candidates.
+    """
     from models.sync_credential import SyncCredentialClient
     from models.sync_installation import SyncService
 
@@ -256,9 +259,7 @@ async def candidates(
     )
     if service is None or client is None or not service.enabled or not client.enabled:
         raise ConflictError("Synchronization service is unavailable")
-    schema = await current_schema(db, installation)
-    if schema is None or digest(schema.field_definitions) != SCHEMA_HASH:
-        raise ConflictError("Approved synchronization schema changed")
+    schema = await approved_schema(db, installation)
     feeds = (
         await db.scalars(
             select(SyncFeed)
@@ -283,7 +284,7 @@ async def candidates(
             or row.generations != [service.generation, client.generation, installation.generation]
             or row.manifest["config_hash"] != feed.config_hash
             or row.manifest["config_version"] != feed.config_version
-            or row.manifest["schema_version"] != schema.schema_version
+            or row.manifest["schema_version"] != schema.version
         ):
             raise ConflictError("Collect fresh resume candidates for every feed")
         reference = row.manifest.get("manual_request_id")
@@ -295,7 +296,7 @@ async def candidates(
             )
         fence.deadlines.append(row.expires_at)
         result.append((feed, row))
-    return result
+    return schema, result
 
 
 def source_hash(rows: list[tuple[SyncFeed, SyncResumeCandidate]]) -> str:
@@ -322,7 +323,7 @@ async def resume_preview(db: AsyncSession, wid: UUID, iid: UUID, principal: Sync
         if target is None or target.mode != "manual" or installation.state != "active":
             raise ConflictError("An active manual installation is required")
         await exact_target(db, installation)
-        rows = await candidates(db, installation, target, fence)
+        schema, rows = await candidates(db, installation, target, fence)
         memories, _watermark, manual_hash = await manual_snapshot(
             db, installation, principal.user_id
         )
@@ -342,7 +343,7 @@ async def resume_preview(db: AsyncSession, wid: UUID, iid: UUID, principal: Sync
                 "op": "publish",
                 "feed_id": str(feed.id),
                 "external_id": record["external_id"],
-                "fields": FeedRecord.model_validate(record).public_payload(feed.kind),
+                "fields": FeedRecord.model_validate(record).public_payload(feed.kind, schema),
             }
             for feed, candidate in rows
             for record in candidate.records or []
@@ -421,7 +422,7 @@ async def resume_diff(
             raise ConflictError("Obtain a fresh resume preview")
         assert target is not None
         fence.deadlines.append(preview.expires_at)
-        rows = await candidates(db, installation, target, fence)
+        _schema, rows = await candidates(db, installation, target, fence)
         _memories, _watermark, manual_hash = await manual_snapshot(
             db, installation, principal.user_id
         )
@@ -515,11 +516,15 @@ async def retire_manual(
 
 
 async def publish_resumed_feed(
-    db: AsyncSession, installation: SyncInstallation, feed: SyncFeed, candidate: SyncResumeCandidate
+    db: AsyncSession,
+    installation: SyncInstallation,
+    feed: SyncFeed,
+    candidate: SyncResumeCandidate,
+    schema: SyncSchema,
 ) -> None:
     """Publish human-approved strict snapshots; no service or owner impersonation."""
     incoming = {
-        item["external_id"]: FeedRecord.model_validate(item).public_payload(feed.kind)
+        item["external_id"]: FeedRecord.model_validate(item).public_payload(feed.kind, schema)
         for item in candidate.records or []
     }
     previous = {
@@ -667,7 +672,7 @@ async def confirm_resume(
             ):
                 raise ConflictError("An active manual installation is required")
             await exact_target(db, installation)
-            rows = await candidates(db, installation, target, fence)
+            schema, rows = await candidates(db, installation, target, fence)
             memories, watermark, manual_hash = await manual_snapshot(
                 db, installation, principal.user_id
             )
@@ -692,7 +697,7 @@ async def confirm_resume(
             await discard_pending_runs(db, installation.id)
             await retire_manual(db, installation, memories, principal.user_id)
             for feed, candidate in rows:
-                await publish_resumed_feed(db, installation, feed, candidate)
+                await publish_resumed_feed(db, installation, feed, candidate, schema)
                 from services.sync_audit import add_audit, human_actor
 
                 add_audit(

@@ -252,13 +252,18 @@ def test_source_is_the_indexer_source() -> None:
     assert FEED_RECORD_SOURCE == INDEXER_SOURCE
 
 
-def test_kinds_are_the_feed_kinds_and_the_contract_sets() -> None:
+def test_kinds_are_the_feed_kinds_and_the_registered_sets() -> None:
+    """Every registered version's kinds; a kind's fields are the union over the versions."""
     kinds = set(typing.get_args(contract.FeedConfig.model_fields["kind"].annotation))
     assert set(feed_record._KINDS) == kinds
-    assert feed_record._KINDS["product"][0] is contract.PRODUCT
-    assert feed_record._KINDS["product"][1] is contract.PRODUCT_REQUIRED
-    assert feed_record._KINDS["faq"][0] is contract.FAQ
-    assert feed_record._KINDS["faq"][1] is contract.FAQ_REQUIRED
+    for kind in kinds:
+        sets = [entry.kinds[kind] for entry in contract.REGISTRY.values() if kind in entry.kinds]
+        assert feed_record._KINDS[kind][:2] == (
+            frozenset().union(*(allowed for allowed, _ in sets)),
+            frozenset.intersection(*(required for _, required in sets)),
+        )
+    assert contract.SCHEMA_V1.kinds["product"] == (contract.PRODUCT, contract.PRODUCT_REQUIRED)
+    assert contract.SCHEMA_V1.kinds["faq"] == (contract.FAQ, contract.FAQ_REQUIRED)
     assert FEED_RECORD_MAX_BYTES == contract.MAX_RECORD_BYTES
 
 
@@ -280,7 +285,9 @@ def test_kinds_are_the_feed_kinds_and_the_contract_sets() -> None:
     ],
 )
 def test_a_contract_record_parses(kind, fields, label) -> None:
-    payload = contract.FeedRecord(external_id="id-1", fields=fields).public_payload(kind)
+    payload = contract.FeedRecord(external_id="id-1", fields=fields).public_payload(
+        kind, contract.SCHEMA_V1
+    )
     parsed = parse_feed_record(json.dumps(payload, ensure_ascii=False))
     assert parsed is not None
     assert (parsed.kind, parsed.label, parsed.url) == (kind, label, fields.get("url"))

@@ -13,16 +13,19 @@ from models.resource import ResourceSchema
 from models.sync_credential import SyncCredentialClient
 from models.sync_feed import SyncFeed, SyncRecord, SyncRun
 from models.sync_feed_schemas import (
-    DEFINITIONS,
-    FAQ,
-    PRODUCT,
-    SCHEMA_HASH,
+    SCHEMA_V1,
     ConfirmDiff,
     FeedConfig,
     FeedRecord,
+    stored_schema,
 )
 from models.sync_installation import SyncService
-from services.sync_feed_authority import current_schema, human_feed_boundary, locked
+from services.sync_feed_authority import (
+    approved_schema,
+    current_schema,
+    human_feed_boundary,
+    locked,
+)
 from services.sync_feed_runs import run_view
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
@@ -43,6 +46,9 @@ async def configure_feed(
         _fence,
     ):
         schema = await current_schema(db, installation)
+        entry = stored_schema(schema)
+        # The schema a first configuration stores.
+        target = SCHEMA_V1
         row = await locked(db, SyncFeed, SyncFeed.id == fid, write=True)
         if row is not None and row.installation_id != iid:
             raise NotFoundException("Synchronization feed")
@@ -61,11 +67,12 @@ async def configure_feed(
                 ResourceSchema(
                     resource_pk=installation.resource_pk,
                     resource_id=installation.resource_id,
-                    schema_version=1,
-                    field_definitions=DEFINITIONS,
+                    schema_version=target.version,
+                    field_definitions=target.stored_definitions(),
                 )
             )
-        elif digest(schema.field_definitions) != SCHEMA_HASH:
+            entry = target
+        elif entry is None:
             raise ConflictError("Dedicated synchronization schema has changed")
         if row is None:
             count = (
@@ -106,8 +113,8 @@ async def configure_feed(
             "config_hash": row.config_hash,
             "config_version": row.config_version,
             "revision": row.revision,
-            "schema_hash": SCHEMA_HASH,
-            "schema_version": schema.schema_version if schema else 1,
+            "schema_hash": entry.schema_hash,
+            "schema_version": entry.version,
         }
 
 
@@ -145,9 +152,8 @@ async def approve_diff(
             or feed.config_hash != row.manifest["config_hash"]
             or feed.config_version != row.manifest["config_version"]
             or feed.revision != row.base_revision
-            or schema is None
-            or digest(schema.field_definitions) != SCHEMA_HASH
-            or schema.schema_version != row.manifest["schema_version"]
+            or (entry := stored_schema(schema)) is None
+            or entry.version != row.manifest["schema_version"]
             or service is None
             or client is None
             or not client.enabled
@@ -220,9 +226,7 @@ async def project_records(
 ) -> dict:
     """Explicitly scoped, current-member data reads; never spends public MCP budget."""
     async with human_feed_boundary(db, wid, iid, principal) as (installation, _workspace, _fence):
-        schema = await current_schema(db, installation)
-        if schema is None or digest(schema.field_definitions) != SCHEMA_HASH:
-            raise ConflictError("Approved synchronization schema changed")
+        schema = await approved_schema(db, installation)
         feeds = (
             await db.scalars(
                 select(SyncFeed).where(SyncFeed.installation_id == iid).order_by(SyncFeed.id)
@@ -235,7 +239,7 @@ async def project_records(
                 "workspace": str(wid),
                 "installation": str(iid),
                 "filter": str(feed_id),
-                "schema": SCHEMA_HASH,
+                "schema": schema.schema_hash,
                 "feeds": [
                     (str(feed.id), feed.revision, feed.config_hash, feed.config_version)
                     for feed in feeds
@@ -260,7 +264,9 @@ async def project_records(
         records = []
         for row, kind in rows[:limit]:
             payload = row.payload or {}
-            allowed = PRODUCT if kind == "product" else FAQ
+            if kind not in schema.kinds:
+                raise ConflictError("Approved synchronization record changed")
+            allowed = schema.kinds[kind][0]
             if (
                 payload.get("record_type") != kind
                 or payload.get("external_id") != row.external_id
@@ -268,7 +274,7 @@ async def project_records(
             ):
                 raise ConflictError("Approved synchronization record changed")
             fields = {key: value for key, value in payload.items() if key in allowed}
-            FeedRecord(external_id=row.external_id, fields=fields).public_payload(kind)
+            FeedRecord(external_id=row.external_id, fields=fields).public_payload(kind, schema)
             records.append(
                 {
                     "feed_id": str(row.feed_id),
@@ -301,9 +307,7 @@ async def human_diff(
 ) -> dict:
     """A bounded metadata-only deletion preview under the human data-read scope."""
     async with human_feed_boundary(db, wid, iid, principal) as (installation, _workspace, _fence):
-        schema = await current_schema(db, installation)
-        if schema is None or digest(schema.field_definitions) != SCHEMA_HASH:
-            raise ConflictError("Approved synchronization schema changed")
+        await approved_schema(db, installation)
         row = await db.scalar(
             select(SyncRun).join(SyncFeed).where(SyncRun.id == rid, SyncFeed.installation_id == iid)
         )

@@ -12,14 +12,17 @@ from models.sync_activity import SyncManualRequest, SyncManualRun
 from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
 from models.sync_feed_schemas import (
     MAX_RUN_BYTES,
-    SCHEMA_HASH,
+    REGISTERED_HASHES,
+    SCHEMA_V1,
     ChunkBody,
     RunManifest,
+    SyncSchema,
     destructive,
     snapshot_digest,
+    stored_schema,
 )
 from services.sync_credentials import CredentialAuthority
-from services.sync_feed_authority import FeedFence, current_schema, locked
+from services.sync_feed_authority import FeedFence, approved_schema, current_schema, locked
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException, SyncProtocolError
 
@@ -33,11 +36,9 @@ def generations(authority: CredentialAuthority) -> list[int]:
     ]
 
 
-async def schema_matches(db: AsyncSession, authority: CredentialAuthority) -> None:
+async def schema_matches(db: AsyncSession, authority: CredentialAuthority) -> SyncSchema:
     """The dedicated schema is approved during human feed configuration only."""
-    schema = await current_schema(db, authority.installation)
-    if schema is None or digest(schema.field_definitions) != SCHEMA_HASH:
-        raise ConflictError("Approved synchronization schema changed")
+    return await approved_schema(db, authority.installation)
 
 
 async def feed_for(db: AsyncSession, iid: UUID, fid: UUID) -> SyncFeed:
@@ -70,8 +71,11 @@ async def run_for(
 
 async def editable(
     db: AsyncSession, authority: CredentialAuthority, row: SyncRun, feed: SyncFeed, fence: FeedFence
-) -> None:
-    """Bind every mutation to current schema, generation, config and baseline."""
+) -> SyncSchema:
+    """Bind every mutation to current schema, generation, config and baseline.
+
+    Returns the stored schema the run's records are validated under (read once).
+    """
     from services.sync_managed_guard import service_mode
 
     await service_mode(db, authority.installation)
@@ -84,14 +88,14 @@ async def editable(
         or feed.revision != row.base_revision
     ):
         raise ConflictError("Synchronization source or authority changed")
-    await schema_matches(db, authority)
-    schema = await current_schema(db, authority.installation)
-    if schema is None or schema.schema_version != row.manifest["schema_version"]:
+    schema = await schema_matches(db, authority)
+    if schema.version != row.manifest["schema_version"]:
         raise ConflictError("Approved synchronization schema version changed")
     fence.deadlines.append(row.expires_at)
     from services.sync_requests import validate_run_request
 
     await validate_run_request(db, authority, row, fence)
+    return schema
 
 
 def manual_request_is_current(now: datetime) -> Select[UUID]:
@@ -168,6 +172,29 @@ async def expire_ended_manual_runs(
     )
 
 
+async def active_run_count(db: AsyncSession, installation_id: UUID) -> int:
+    """Runs of the installation that can still stage, prepare or commit.
+
+    ``uploading`` or ``prepared``, unexpired, and either not a manual run or a
+    manual run whose request is still current: an ended run the sweep skipped
+    (row locked) still gives back its slot.
+    """
+    now = utcnow()
+    pending = await db.scalar(
+        select(func.count())
+        .select_from(SyncRun)
+        .join(SyncFeed)
+        .outerjoin(SyncManualRun, SyncManualRun.run_id == SyncRun.id)
+        .where(
+            SyncFeed.installation_id == installation_id,
+            SyncRun.state.in_(["uploading", "prepared"]),
+            SyncRun.expires_at > now,
+            or_(SyncManualRun.run_id.is_(None), manual_request_is_current(now).exists()),
+        )
+    )
+    return pending or 0
+
+
 async def create_run(
     db: AsyncSession,
     authority: CredentialAuthority,
@@ -193,35 +220,26 @@ async def create_run(
     if (
         feed.config_hash != body.config_hash
         or feed.config_version != body.config_version
-        or body.schema_hash != SCHEMA_HASH
+        or body.schema_hash not in REGISTERED_HASHES
         or (body.records == 0) != (body.chunks == 0)
         or body.records < body.chunks
         or body.records > body.chunks * 100
     ):
         raise SyncProtocolError("invalid_manifest")
-    await schema_matches(db, authority)
+    # The stored schema, read once: the manifest names its hash. Without a
+    # registered schema the answer is version 1's comparison, then the 409.
+    entry = stored_schema(await current_schema(db, authority.installation))
+    if body.schema_hash != (entry or SCHEMA_V1).schema_hash:
+        raise SyncProtocolError("invalid_manifest")
+    if entry is None:
+        raise ConflictError("Approved synchronization schema changed")
     # Ended manual runs of this installation are expired and their staging
     # cleared first, so the count below and the staged bytes stay bounded.
     await expire_ended_manual_runs(db, authority.installation.id)
-    now = utcnow()
-    current_request = manual_request_is_current(now)
-    pending = await db.scalar(
-        select(func.count())
-        .select_from(SyncRun)
-        .join(SyncFeed)
-        .outerjoin(SyncManualRun, SyncManualRun.run_id == SyncRun.id)
-        .where(
-            SyncFeed.installation_id == authority.installation.id,
-            SyncRun.state.in_(["uploading", "prepared"]),
-            SyncRun.expires_at > now,
-            # An ended run the sweep skipped (row locked) still gives back its slot.
-            or_(SyncManualRun.run_id.is_(None), current_request.exists()),
-        )
-    )
-    schema = await current_schema(db, authority.installation)
-    if schema is None or schema.schema_version != body.schema_version:
+    pending = await active_run_count(db, authority.installation.id)
+    if entry.version != body.schema_version:
         raise ConflictError("Approved synchronization schema version changed")
-    if pending is not None and pending >= 4:
+    if pending >= 4:
         raise ConflictError("Too many active synchronization runs")
     if body.manual_request_id is not None:
         from services.sync_requests import validate_request
@@ -284,12 +302,12 @@ async def stage_chunk(
         if old.digest != chunk_hash:
             raise ConflictError("Chunk identity was used with different content")
         return row
-    await editable(db, authority, row, feed, fence)
+    schema = await editable(db, authority, row, feed, fence)
     if row.state != "uploading" or not 0 <= index < row.manifest["chunks"]:
         raise ConflictError("Chunk is outside the declared upload")
     try:
         for record in body.records:
-            record.public_payload(feed.kind)
+            record.public_payload(feed.kind, schema)
     except ValueError:
         raise SyncProtocolError("invalid_record") from None
     total = (
@@ -343,12 +361,14 @@ async def staged_records(db: AsyncSession, row: SyncRun) -> list[dict]:
     return records
 
 
-async def build_diff(db: AsyncSession, row: SyncRun, feed: SyncFeed) -> tuple[list[dict], int]:
+async def build_diff(
+    db: AsyncSession, row: SyncRun, feed: SyncFeed, schema: SyncSchema
+) -> tuple[list[dict], int]:
     """Diff only the exact feed's canonical managed records, including tombstones."""
     from models.sync_feed_schemas import FeedRecord
 
     incoming = {
-        item["external_id"]: FeedRecord.model_validate(item).public_payload(feed.kind)
+        item["external_id"]: FeedRecord.model_validate(item).public_payload(feed.kind, schema)
         for item in await staged_records(db, row)
     }
     previous = {
@@ -382,10 +402,10 @@ async def prepare_run(
 ) -> SyncRun:
     """Refresh after expiry issues a new diff hash, invalidating prior human consent."""
     row, feed = await run_for(db, authority, rid)
-    await editable(db, authority, row, feed, fence)
+    schema = await editable(db, authority, row, feed, fence)
     if row.state == "prepared" and row.prepared_until is not None and utcnow() < row.prepared_until:
         return row
-    diff, previous_count = await build_diff(db, row, feed)
+    diff, previous_count = await build_diff(db, row, feed, schema)
     row.diff = diff
     row.prepared_until = min(row.expires_at, utcnow() + timedelta(minutes=15))
     row.diff_hash = digest(

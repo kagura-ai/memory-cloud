@@ -19,6 +19,7 @@ from db.base import Base
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.public_mcp import PublicMcpEndpoint
 from models.resource import Resource, ResourceSchema
+from models.sync_feed_schemas import SyncSchema, stored_schema
 from models.sync_installation import SyncInstallation, SyncService
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.permission_service import PermissionService
@@ -240,6 +241,18 @@ async def current_schema(db: AsyncSession, row: SyncInstallation) -> ResourceSch
         if is_lock_not_available(exc):
             raise ConflictError("Synchronization state is changing; retry") from exc
         raise
+
+
+async def approved_schema(
+    db: AsyncSession,
+    row: SyncInstallation,
+    message: str = "Approved synchronization schema changed",
+) -> SyncSchema:
+    """The registered schema the installation stores, read once; 409 for none or an unknown pair."""
+    entry = stored_schema(await current_schema(db, row))
+    if entry is None:
+        raise ConflictError(message)
+    return entry
 
 
 async def worker_target(

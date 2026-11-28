@@ -1,17 +1,19 @@
 """What a public result shows for an unedited feed record (#3032).
 
-A product or FAQ feed (``models.sync_feed_schemas``) is indexed as one row per
-record whose ``content`` is the record's JSON and whose ``summary`` is a
-mechanical label. For such a row the public projection shows the record's
-title (product) or question (FAQ), its URL and its kind instead.
+A feed (``models.sync_feed_schemas``) is indexed as one row per record whose
+``content`` is the record's JSON and whose ``summary`` is a mechanical label.
+For such a row the public projection shows the record's label (``_LABELS``:
+the title of a product, the question of an FAQ), its URL and its kind instead.
 
 One definition, used by every public surface that shows a row: the row is the
 indexer's (``source``), never edited (``version == 1``; the indexer writes a
 new row for every new version of a document) and its content is a record of
 the feed contract in shape — a JSON object of at most the contract's record
 size, a known ``record_type``, only the kind's fields plus ``record_type`` and
-``external_id``, the required fields present, every value a string. Any other
-row keeps its stored values. Every value shown comes from the row's own
+``external_id``, the required fields present, every value a string. A row
+reads no installation's stored schema: a kind's fields are the union over
+every registered schema version (``registered_kinds``). Any other row, and a
+row whose label is empty, keeps its stored values. Every value shown comes from the row's own
 ``content``, which ``reference`` already returns for that row.
 
 ``feed_content_column`` is the SQL twin of the row gate for statements that do
@@ -21,6 +23,7 @@ not load the row; its value goes through ``parse_feed_record`` as well.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,13 +32,7 @@ from sqlalchemy import and_, case, func
 from sqlalchemy.sql.elements import Label
 
 from models.memory import Memory
-from models.sync_feed_schemas import (
-    FAQ,
-    FAQ_REQUIRED,
-    MAX_RECORD_BYTES,
-    PRODUCT,
-    PRODUCT_REQUIRED,
-)
+from models.sync_feed_schemas import MAX_RECORD_BYTES, registered_kinds
 from services.guardrail_digest import flatten_summary
 
 # The indexer's ``Memory.source`` (``services.resource_indexer.INDEXER_SOURCE``;
@@ -47,10 +44,16 @@ _URL_MAX_CHARS = 2_048
 # Keys every record carries besides its kind's fields.
 _RECORD_KEYS = frozenset({"record_type", "external_id"})
 
-# kind -> (allowed fields, required fields, the field shown as the label).
-_KINDS: dict[str, tuple[set[str], set[str], str]] = {
-    "product": (PRODUCT, PRODUCT_REQUIRED, "title"),
-    "faq": (FAQ, FAQ_REQUIRED, "question"),
+# kind -> the label of a record of that kind (its fields are strings), or None.
+_LABELS: dict[str, Callable[[dict[str, str]], str | None]] = {
+    "product": lambda data: data["title"],
+    "faq": lambda data: data["question"],
+}
+# kind -> (allowed fields, required fields, label). A registered kind without a
+# label function fails at import.
+_KINDS: dict[str, tuple[frozenset[str], frozenset[str], Callable[[dict[str, str]], str | None]]] = {
+    kind: (allowed, required, _LABELS[kind])
+    for kind, (allowed, required) in registered_kinds().items()
 }
 
 
@@ -110,13 +113,13 @@ def parse_feed_record(content: str | None) -> FeedRecord | None:
     kind = data.get("record_type")
     if not isinstance(kind, str) or kind not in _KINDS:
         return None
-    allowed, required, label_field = _KINDS[kind]
+    allowed, required, label_of = _KINDS[kind]
     keys = set(data)
     if not keys <= allowed | _RECORD_KEYS or not (required | _RECORD_KEYS) <= keys:
         return None
     if not all(isinstance(value, str) for value in data.values()):
         return None
-    label = flatten_summary(data[label_field])
+    label = flatten_summary(label_of(data) or "")
     if not label:
         return None
     return FeedRecord(kind=kind, label=label, url=_record_url(data.get("url")))

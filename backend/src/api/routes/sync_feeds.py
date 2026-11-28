@@ -14,11 +14,8 @@ from api.routes.sync_worker import SyncWorkerError, SyncWorkerRoute
 from auth.sync_bearer import sync_service_token
 from db.base import get_db
 from models.sync_feed_schemas import (
-    DEFINITIONS,
     MAX_CHUNK_BYTES,
     MAX_RECORDS,
-    MAX_RUN_BYTES,
-    SCHEMA_HASH,
     ChunkBody,
     ConfirmDiff,
     RunManifest,
@@ -118,29 +115,10 @@ async def worker(
 
 @router.get("/schema")
 async def feed_schema(installation_id: UUID, request: Request, token: Token, db: Database) -> dict:
-    """Read the fixed public wire contract for this exact installation."""
+    """Read the public wire contract of the schema this exact installation stores."""
     exact_query(request)
     async with worker(db, token, installation_id, "schema:read") as (authority, _fence):
-        await runs.schema_matches(db, authority)
-        from services.sync_feed_authority import current_schema
-
-        schema = await current_schema(db, authority.installation)
-        result = {
-            "schema_hash": SCHEMA_HASH,
-            "schema_version": schema.schema_version if schema else 1,
-            "fields": DEFINITIONS,
-            "kinds": ["product", "faq"],
-            "limits": {
-                "feeds": 20,
-                "records": 10000,
-                "chunks": 1000,
-                "chunk_records": 100,
-                "chunk_bytes": MAX_CHUNK_BYTES,
-                "run_bytes": MAX_RUN_BYTES,
-                "run_ttl_seconds": 86400,
-                "approval_ttl_seconds": 900,
-            },
-        }
+        result = (await runs.schema_matches(db, authority)).answer()
     return result
 
 

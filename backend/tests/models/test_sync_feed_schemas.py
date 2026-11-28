@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from models.sync_feed_schemas import FeedRecord, destructive, snapshot_digest
+from models.sync_feed_schemas import SCHEMA_V1, FeedRecord, destructive, snapshot_digest
 
 
 @pytest.mark.parametrize("value", ["", " spaced", "trailing ", "a\x00b", "e\u0301", "a" * 201])
@@ -22,7 +22,7 @@ def test_ambiguous_external_identity_is_rejected(value):
 )
 def test_unapproved_or_unbounded_faq_fields_are_rejected(fields):
     with pytest.raises(ValueError):
-        FeedRecord(external_id="faq", fields=fields).public_payload("faq")
+        FeedRecord(external_id="faq", fields=fields).public_payload("faq", SCHEMA_V1)
 
 
 def test_snapshot_digest_ignores_chunk_order_but_not_content():

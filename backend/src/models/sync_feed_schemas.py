@@ -1,9 +1,19 @@
-"""Strict, bounded wire contracts for full product/FAQ feed snapshots."""
+"""Strict, bounded wire contracts for full feed snapshots and their record schemas.
 
+An installation's record schema is the latest ``resource_schemas`` row of its
+resource: the pair (``schema_version``, ``digest(field_definitions)``). Every
+validation, comparison and answer follows that stored pair through
+``stored_schema`` and the registry below; a pair the registry does not hold is
+refused (409) wherever it is read, and nothing repairs it.
+"""
+
+import copy
 import json
 import re
 import unicodedata
-from typing import Annotated, Any, Literal, Self
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Literal, Protocol, Self
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -50,6 +60,94 @@ DEFINITIONS = [
     for name in sorted(FIELDS)
 ]
 SCHEMA_HASH = digest(DEFINITIONS)
+# The ``limits`` of every ``/schema`` answer, in wire order.
+BASE_LIMITS: dict[str, int] = {
+    "feeds": 20,
+    "records": MAX_RECORDS,
+    "chunks": 1000,
+    "chunk_records": 100,
+    "chunk_bytes": MAX_CHUNK_BYTES,
+    "run_bytes": MAX_RUN_BYTES,
+    "run_ttl_seconds": 86400,
+    "approval_ttl_seconds": 900,
+}
+
+
+@dataclass(frozen=True, eq=False)
+class SyncSchema:
+    """One registered record schema version: its definitions, kinds and published limits.
+
+    ``kinds`` maps each kind, in wire order, to the keys a record's ``fields``
+    may hold and the keys it must hold. ``extra_limits`` follow the base
+    limits in the ``/schema`` answer.
+    """
+
+    version: int
+    definitions: list[dict[str, Any]]
+    kinds: Mapping[str, tuple[frozenset[str], frozenset[str]]]
+    extra_limits: Mapping[str, Any] = field(default_factory=dict)
+    schema_hash: str = field(init=False)
+    names: frozenset[str] = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "schema_hash", digest(self.definitions))
+        object.__setattr__(self, "names", frozenset(d["name"] for d in self.definitions))
+
+    def stored_definitions(self) -> list[dict[str, Any]]:
+        """A copy of the definitions for a new ``resource_schemas`` row."""
+        return copy.deepcopy(self.definitions)
+
+    def answer(self) -> dict[str, Any]:
+        """The worker ``/schema`` answer of an installation that stores this version."""
+        return {
+            "schema_hash": self.schema_hash,
+            "schema_version": self.version,
+            "fields": self.stored_definitions(),
+            "kinds": list(self.kinds),
+            "limits": {**BASE_LIMITS, **copy.deepcopy(dict(self.extra_limits))},
+        }
+
+
+SCHEMA_V1 = SyncSchema(
+    version=1,
+    definitions=DEFINITIONS,
+    kinds={
+        "product": (frozenset(PRODUCT), frozenset(PRODUCT_REQUIRED)),
+        "faq": (frozenset(FAQ), frozenset(FAQ_REQUIRED)),
+    },
+)
+# (schema_version, schema_hash) -> the registered schema.
+REGISTRY: dict[tuple[int, str], SyncSchema] = {
+    (entry.version, entry.schema_hash): entry for entry in (SCHEMA_V1,)
+}
+
+
+# Every registered hash: a manifest naming any other hash is malformed.
+REGISTERED_HASHES = frozenset(schema_hash for _version, schema_hash in REGISTRY)
+
+
+class StoredSchemaRow(Protocol):
+    """The two columns of a ``resource_schemas`` row the registry reads."""
+
+    schema_version: int
+    field_definitions: list[dict[str, Any]]
+
+
+def stored_schema(row: StoredSchemaRow | None) -> SyncSchema | None:
+    """The registered schema of a stored row, or ``None`` (no row, unregistered pair)."""
+    if row is None:
+        return None
+    return REGISTRY.get((row.schema_version, digest(row.field_definitions)))
+
+
+def registered_kinds() -> dict[str, tuple[frozenset[str], frozenset[str]]]:
+    """Per kind, the union over every registered version of its allowed and required keys."""
+    result: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+    for entry in REGISTRY.values():
+        for kind, (allowed, required) in entry.kinds.items():
+            known_allowed, known_required = result.get(kind, (frozenset(), required))
+            result[kind] = (known_allowed | allowed, known_required & required)
+    return result
 
 
 class StrictBody(BaseModel):
@@ -127,10 +225,11 @@ class FeedRecord(StrictBody):
             raise ValueError("invalid_external_id")
         return value
 
-    def public_payload(self, kind: str) -> dict[str, str]:
-        """Validate kind-specific fields and values before they enter staging."""
-        allowed = PRODUCT if kind == "product" else FAQ
-        required = PRODUCT_REQUIRED if kind == "product" else FAQ_REQUIRED
+    def public_payload(self, kind: str, schema: SyncSchema) -> dict[str, str]:
+        """Validate kind-specific fields and values under the installation's stored schema."""
+        if kind not in schema.kinds:
+            raise ValueError("invalid_fields")
+        allowed, required = schema.kinds[kind]
         if not required.issubset(self.fields) or not set(self.fields).issubset(allowed):
             raise ValueError("invalid_fields")
         for name, value in self.fields.items():

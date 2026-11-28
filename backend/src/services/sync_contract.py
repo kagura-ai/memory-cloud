@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from config.settings import Settings
 from models.sync_contract import SyncConfigurationV1
-from models.sync_feed_schemas import SCHEMA_HASH
+from models.sync_feed_schemas import SCHEMA_V1
 
 HUMAN_SCOPES = ("openid", "workspaces:read", "integrations:manage", "sync.records:read")
 # #2921: the owner's claim, verify and remove for an installation (experimental, optional).
@@ -66,7 +66,7 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
     return SyncConfigurationV1(
         protocol="kmc.sync.v1",
         schema_version=1,
-        schema_hash=SCHEMA_HASH,
+        schema_hash=SCHEMA_V1.schema_hash,
         capabilities=[name for name, active in enabled.items() if active],
         human_scopes=list(HUMAN_SCOPES),
         service_scope="resource.sync",
@@ -88,7 +88,7 @@ def require_sync_contract(payload: object, *, custom_domain: bool = False) -> Sy
         raise SyncContractUnsupported("unsupported_sync_contract") from None
     required = REQUIRED_SYNC_CAPABILITIES | ({"public.domains.v1"} if custom_domain else set())
     if (
-        contract.schema_hash != SCHEMA_HASH
+        contract.schema_hash != SCHEMA_V1.schema_hash
         or not required.issubset(contract.capabilities)
         or not set(HUMAN_SCOPES).issubset(contract.human_scopes)
     ):

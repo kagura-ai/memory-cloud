@@ -85,7 +85,7 @@ async def commit_run(
     from services.sync_managed_guard import service_mode
 
     await service_mode(db, authority.installation, publish=True)
-    await editable(db, authority, row, feed, fence)
+    schema = await editable(db, authority, row, feed, fence)
     if (
         row.state != "prepared"
         or body.diff_hash != row.diff_hash
@@ -94,7 +94,7 @@ async def commit_run(
     ):
         raise ConflictError("Prepare the current synchronization diff first")
     fence.deadlines.append(row.prepared_until)
-    diff, previous_count = await build_diff(db, row, feed)
+    diff, previous_count = await build_diff(db, row, feed, schema)
     if diff != row.diff:
         raise ConflictError("Prepared synchronization diff changed")
     if destructive(diff, previous_count):
@@ -119,7 +119,7 @@ async def commit_run(
         raise ConflictError("Unknown synchronization approval")
     previous = await owned_documents(db, authority, feed, diff)
     incoming = {
-        item["external_id"]: FeedRecord.model_validate(item).public_payload(feed.kind)
+        item["external_id"]: FeedRecord.model_validate(item).public_payload(feed.kind, schema)
         for item in await staged_records(db, row)
     }
     deleted_docs = [

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from api.routes import well_known
 from config.settings import Settings
-from models.sync_feed_schemas import FeedRecord
+from models.sync_feed_schemas import SCHEMA_V1, FeedRecord
 from services.sync_contract import (
     DOMAIN_OPERATIONS_CAPABILITY,
     REQUIRED_SYNC_CAPABILITIES,
@@ -129,7 +129,7 @@ def test_version_strings_and_partial_metadata_never_authorize_start(payload):
 
 def test_schema_fixture_uses_actual_approved_product_and_faq_shapes():
     for kind, record in FIXTURE["records"].items():
-        assert FeedRecord.model_validate_json(json.dumps(record)).public_payload(kind)
+        assert FeedRecord.model_validate_json(json.dumps(record)).public_payload(kind, SCHEMA_V1)
 
 
 @pytest.mark.parametrize(
