@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from models.public_mcp_usage import PMU_TXID_DEFAULT
 from services import public_mcp_usage_rollup as rollup
 from services.public_mcp_usage_events import UsageEventInput, build_usage_event_row
-from services.public_mcp_usage_stats import LiveEndpoint, read_usage_stats
+from services.public_mcp_usage_stats import LiveEndpoint, events_start, read_usage_stats
 from services.public_mcp_usage_writer import PublicMcpUsageWriter
 from tasks.public_mcp_usage_tasks import purge_public_mcp_usage_events
 from utils.datetime import utcnow
@@ -389,13 +389,13 @@ async def test_the_read_is_the_same_before_and_after_closing(env: Env) -> None:
         id=endpoint, public_id="pmcp_" + "R" * 22, resource_pk=uuid4(), context_id=uuid4()
     )
 
-    async def read() -> dict:
+    async def read(days: int) -> dict:
         async with env.factory() as s:
             stats = await read_usage_stats(
                 s,
                 endpoint=live,
                 workspace_id=env.workspace,
-                days=60,
+                days=days,
                 retention_days=RETENTION_DAYS,
                 recording_enabled=True,
                 rest_recording_enabled=True,
@@ -403,11 +403,20 @@ async def test_the_read_is_the_same_before_and_after_closing(env: Env) -> None:
             )
         return {"totals": asdict(stats.totals), "days": [(d, asdict(c)) for d, c in stats.days]}
 
-    open_read = await read()
-    assert open_read["totals"]["calls"] == len(calls) + 5
-    for n in (0, 2, 3):  # one past day stays open
-        assert await env.close(first + timedelta(days=n)) is True
-    assert await read() == open_read
+    # 60 days: the window starts before every closed day. 57 days: it starts
+    # on ``first``, which gets closed, so after the closes that day is read
+    # from its counts only and the events are counted from the day after it.
+    open_reads = {days: await read(days) for days in (60, 57)}
+    for open_read in open_reads.values():
+        assert open_read["totals"]["calls"] == len(calls) + 5
+    assert open_reads[57]["days"][0] == (first, open_reads[60]["days"][3][1])
+    assert open_reads[57]["days"][0][1]["calls"] == 2
+    closing = [first + timedelta(days=n) for n in (0, 2, 3)]  # one past day stays open
+    for day in closing:
+        assert await env.close(day) is True
+    assert events_start(first, env.today, closing) == _midnight(first + timedelta(days=1))
+    for days, open_read in open_reads.items():
+        assert await read(days) == open_read, f"{days} days"
 
 
 async def test_the_purge_takes_the_days_it_reaches_and_leaves_the_rest_equal(env: Env) -> None:
