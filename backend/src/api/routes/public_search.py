@@ -353,7 +353,7 @@ async def _resolve_public_attribution(
     Status codes (matches the route docstring's ``Errors:`` section):
 
     - ``401`` for authentication failure (invalid / expired / revoked key,
-      or a public-bound key whose owner no longer belongs to the live
+      or a public-bound key whose owner does not belong to the live
       workspace of its context: the same answer).
     - ``403`` for authorization failure (key authenticates but is owner /
       workspace-scoped, or is bound to a different context).
@@ -565,7 +565,9 @@ async def public_search(
                 detail="Context workspace not found",
             )
     # The context of a soft-deleted workspace reads as missing too (a bound
-    # key of one was refused above: its owner holds no live workspace).
+    # key of one was refused above: its owner holds no live workspace). For
+    # an anonymous caller this is decided after the anonymous bucket, where
+    # the Workspace row is first read, so past the bucket it answers 429.
     if workspace.deleted_at is not None:
         raise NotFoundException("Context", str(context_id))
 

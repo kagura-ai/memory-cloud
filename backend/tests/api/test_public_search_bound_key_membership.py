@@ -1,4 +1,4 @@
-"""The REST public search refuses a bound key whose owner left the workspace.
+"""The REST public search refuses a bound key whose owner does not hold its workspace.
 
 Unit level, on stubs (the database cases are in
 ``tests/integration/test_bound_key_membership_db.py``):
@@ -114,12 +114,35 @@ async def test_the_membership_statement_is_one_exists_over_the_live_workspace():
     (stmt,), _ = db.scalar.await_args
     sql = " ".join(_compiled(stmt).split())
     assert sql.startswith("SELECT EXISTS (SELECT")
-    assert "contexts.id = " in sql
-    assert "workspaces.id = contexts.workspace_id" in sql
-    assert "workspaces.deleted_at IS NULL" in sql
-    assert "workspaces.owner_user_id = " in sql
-    assert "workspace_members.workspace_id = contexts.workspace_id" in sql
+    assert "contexts_1.id = " in sql
+    assert "workspaces_1.id = contexts_1.workspace_id" in sql
+    assert "workspaces_1.deleted_at IS NULL" in sql
+    assert "workspaces_1.owner_user_id = " in sql
+    assert "workspace_members.workspace_id = contexts_1.workspace_id" in sql
     assert "workspace_members.user_id = " in sql
+
+
+def test_the_condition_correlates_to_an_outer_query_over_api_keys():
+    """MCP binding introspection filters ``api_keys`` rows by the same rule:
+    both levels of the EXISTS read the outer row's owner and binding."""
+    from sqlalchemy import select
+
+    from auth.api_keys import bound_key_owner_holds
+    from models.auth import APIKey
+
+    stmt = (
+        select(APIKey.id, Context.name)
+        .outerjoin(Context, Context.id == APIKey.bound_context_id)
+        .where(bound_key_owner_holds(APIKey.user_id, APIKey.bound_context_id))
+    )
+    sql = " ".join(_compiled(stmt).split())
+
+    assert sql.count("api_keys AS") == 0
+    assert sql.count("FROM api_keys") == 1
+    assert "contexts_1.id = api_keys.bound_context_id" in sql
+    assert "workspaces_1.owner_user_id = api_keys.user_id" in sql
+    assert "FROM workspace_members WHERE" in sql
+    assert "workspace_members.user_id = api_keys.user_id" in sql
 
 
 # ---------------------------------------------------------------------------

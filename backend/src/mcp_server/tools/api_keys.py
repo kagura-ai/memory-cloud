@@ -20,7 +20,8 @@ gate is the source of truth for the restriction; a regression test
 introspection to bound principals.
 
 Owner isolation: every query ANDs ``APIKey.user_id == user_id``. A caller can only
-ever see their own bindings. Under a workspace-scoped API key (#963) only the
+ever see their own bindings, and only those of contexts whose live workspace the
+caller owns or is a member of. Under a workspace-scoped API key (#963) only the
 bindings to contexts of that key's workspace are shown. ``describe_binding`` returns a uniform
 ``binding_not_found`` for both "does not exist" and "exists but not yours", so
 ``key_id`` cannot be used as an existence oracle.
@@ -56,11 +57,17 @@ _KEY_ID_RE = re.compile(public_id_pattern(PublicIdPrefix.API_KEY))
 
 
 def _key_scope_conditions() -> list[Any]:
-    """#963: under a workspace-scoped key, bindings in that workspace only."""
-    from models.auth import Context
+    """The bindings shown: the caller holds the live workspace of the bound
+    context (the condition the REST public search serves a bound key by),
+    and under a workspace-scoped key (#963) that workspace only."""
+    from auth.api_keys import bound_key_owner_holds
+    from models.auth import APIKey, Context
 
+    held = bound_key_owner_holds(APIKey.user_id, APIKey.bound_context_id)
     key_workspace_id = get_mcp_key_workspace_scope()
-    return [] if key_workspace_id is None else [Context.workspace_id == key_workspace_id]
+    if key_workspace_id is None:
+        return [held]
+    return [held, Context.workspace_id == key_workspace_id]
 
 
 def _binding_dict(api_key: Any, display_name: str | None, name: str | None) -> dict[str, Any]:
@@ -80,8 +87,9 @@ async def handle_list_my_bindings(
     """List the calling user's active public-bound API keys (read-only).
 
     Returns ``bindings: [{key_id, name, context_id, context_name, created_at}]``
-    for every non-revoked key the caller owns that is bound to a public context
-    (of the key's own workspace, under a workspace-scoped key).
+    for every non-revoked key the caller owns that is bound to a context of a
+    live workspace the caller holds (of the key's own workspace, under a
+    workspace-scoped key).
     ``key_prefix`` is intentionally omitted here (it is a ``describe_binding``
     detail). Secrets are never returned.
     """

@@ -6,16 +6,16 @@ On real PostgreSQL rows:
   workspace, with the workspace-scoped ones (the predicate the credentials
   listing shows them by); the member's bound keys of other workspaces, other
   members' keys and the member's global key stay;
-* a bound key whose owner no longer belongs to the workspace (left behind by
-  a removal before this rule, or by a membership row deleted any other way),
+* a bound key whose owner has no membership row in the context's workspace,
   or whose workspace is soft-deleted, is refused by the REST public search
   and ``/info`` with an unknown key's 401, and the refusal writes nothing; a
-  current member's key still serves;
+  current member's key serves; MCP binding introspection lists neither;
 * a soft-deleted context, and a context of a soft-deleted workspace, answer
   404 on both routes like a missing context, with a key and without;
 * deleting a workspace's rows for good (admin user deletion, account
-  erasure) deletes every key bound to its contexts: none is left behind
-  without its binding.
+  erasure) deletes every key bound to its contexts: none stays without its
+  binding;
+* a soft-deleted context cannot be bound at mint.
 
 Every row a test commits is deleted afterwards (``world`` fixture).
 """
@@ -172,8 +172,8 @@ async def test_removal_deletes_a_revoked_bound_key_too(world):
 
 @pytest_asyncio.fixture
 async def served(world):
-    """Workspace X: a member with a bound key, a member whose membership row
-    is gone but whose bound key was left behind, and Y, a soft-deleted
+    """Workspace X: a member with a bound key, a user with a bound key of X
+    and no membership row in it, and Y, a soft-deleted
     workspace whose owner holds a bound key."""
     w = world
     owner, member, departed = (
@@ -190,7 +190,7 @@ async def served(world):
     member_key, _ = await _bound_key(w, member, member_ctx)
     departed_key, departed_id = await _bound_key(w, departed, departed_ctx)
     gone_key, _ = await _bound_key(w, gone_owner, gone_ctx)
-    # A removal before this rule deleted the membership row and left the key.
+    # A bound key whose owner has no membership row.
     await w.db.execute(
         delete(WorkspaceMember).where(
             WorkspaceMember.workspace_id == x.id, WorkspaceMember.user_id == departed
@@ -205,7 +205,11 @@ async def served(world):
         member=(member_ctx, member_key),
         departed=(departed_ctx, departed_key),
         departed_id=departed_id,
+        departed_public_id=(await w.db.get(APIKey, departed_id)).public_id,
         gone=(gone_ctx, gone_key),
+        member_user=member,
+        departed_user=departed,
+        gone_user=gone_owner,
         x=x.id,
     )
 
@@ -345,3 +349,86 @@ async def test_account_erasure_deletes_the_keys_bound_to_its_workspaces(world):
         await w.erase(owner)
 
     assert await _surviving(w, {doomed_key, kept_key}) == {kept_key}
+
+
+# ---------------------------------------------------------------------------
+# MCP binding introspection
+# ---------------------------------------------------------------------------
+
+
+def _tool_data(result) -> dict:
+    import json
+
+    return json.loads(result[0].text)
+
+
+async def test_binding_introspection_lists_only_bindings_whose_workspace_is_held(served):
+    from mcp_server.tools.api_keys import handle_describe_binding, handle_list_my_bindings
+
+    member_ctx, _ = served.member
+    listed = _tool_data(await handle_list_my_bindings({}, served.member_user, None))
+    assert [b["context_id"] for b in listed["bindings"]] == [str(member_ctx)]
+
+    for case in ("departed", "gone"):
+        user_id = getattr(served, f"{case}_user")
+        context_id, _ = getattr(served, case)
+        listed = _tool_data(await handle_list_my_bindings({}, user_id, None))
+        assert listed["bindings"] == [], case
+        by_context = _tool_data(
+            await handle_describe_binding({"context_id": str(context_id)}, user_id, None)
+        )
+        assert by_context["error"] == "binding_not_found", case
+
+    by_key = _tool_data(
+        await handle_describe_binding(
+            {"key_id": served.departed_public_id}, served.departed_user, None
+        )
+    )
+    assert by_key["error"] == "binding_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Minting against a soft-deleted context
+# ---------------------------------------------------------------------------
+
+
+async def test_a_soft_deleted_context_cannot_be_bound(world):
+    from fastapi import BackgroundTasks, HTTPException
+
+    from api.routes.member_credentials import create_api_key
+    from models.schemas import CreateAPIKeyRequest
+
+    w = world
+    owner, member = await w.user("bk-owner"), await w.user("bk-member")
+    x = await w.workspace(owner, **{member: "member"})
+    x_id = x.id
+    context_id = await _public_context(w, x, member)
+    await w.db.execute(
+        update(Context).where(Context.id == context_id).values(deleted_at=func.now())
+    )
+    await w.db.commit()
+
+    with pytest.raises(ValueError, match="not found"):
+        await APIKeyManager(w.db).create_key(
+            name="bk-soft", user_id=member, bound_context_id=context_id
+        )
+    await w.db.rollback()
+
+    with pytest.raises(HTTPException) as refused:
+        await create_api_key(
+            workspace_id=x_id,
+            user_id=member,
+            data=CreateAPIKeyRequest(name="bk-soft", bound_context_id=str(context_id)),
+            request=SimpleNamespace(client=None, headers={}),  # type: ignore[arg-type]
+            background_tasks=BackgroundTasks(),
+            user={"user_id": member, "sub": member, "email": f"{member}@example.test"},
+            db=w.db,
+        )
+    assert refused.value.status_code == 404
+    await w.db.rollback()
+    assert (
+        await w.db.scalar(
+            select(func.count()).select_from(APIKey).where(APIKey.bound_context_id == context_id)
+        )
+        == 0
+    )

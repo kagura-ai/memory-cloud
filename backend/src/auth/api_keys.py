@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy import ColumnElement, and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from auth.connector_keys import CONNECTOR_KEY_PREFIX
 from config.settings import get_settings
@@ -122,15 +123,46 @@ async def key_owner_holds_workspace(db: AsyncSession, *, user_id: str, workspace
     return bool(await db.scalar(select(holds)))
 
 
+def bound_key_owner_holds(user_id: Any, context_id: Any) -> ColumnElement[bool]:
+    """The rule of :func:`key_owner_holds_workspace` for a public-bound key.
+
+    True when the workspace of the key's bound context is live and
+    ``user_id`` is its owner or has a ``workspace_members`` row in it. A
+    missing context does not hold. Both arguments are values or columns, so
+    the condition also filters a query over ``api_keys`` (correlated on
+    ``APIKey.user_id`` / ``APIKey.bound_context_id``).
+
+    Args:
+        user_id: The key's owner (a value or a column).
+        context_id: The key's ``bound_context_id`` (a value or a column).
+    """
+    # Aliased, so an outer query over ``contexts`` or ``workspaces`` does not
+    # correlate them away.
+    bound, workspace = aliased(Context), aliased(Workspace)
+    return exists().where(
+        bound.id == context_id,
+        workspace.id == bound.workspace_id,
+        workspace.deleted_at.is_(None),
+        or_(
+            workspace.owner_user_id == user_id,
+            # Correlated on every table but its own: a column ``user_id``
+            # belongs to the outermost query, two levels up.
+            exists()
+            .where(
+                WorkspaceMember.workspace_id == bound.workspace_id,
+                WorkspaceMember.user_id == user_id,
+            )
+            .correlate_except(WorkspaceMember),
+        ),
+    )
+
+
 async def bound_key_owner_holds_context_workspace(
     db: AsyncSession, *, user_id: str, context_id: UUID
 ) -> bool:
     """Whether the owner of a public-bound key holds its context's workspace.
 
-    The rule of :func:`key_owner_holds_workspace`, for the workspace of the
-    key's bound context: the workspace is live and ``user_id`` is its owner or
-    has a ``workspace_members`` row in it. A missing context does not hold.
-    One statement.
+    :func:`bound_key_owner_holds` for one key, in one statement.
 
     Args:
         db: Async database session.
@@ -140,19 +172,7 @@ async def bound_key_owner_holds_context_workspace(
     Returns:
         True when the key's owner holds the workspace of the bound context.
     """
-    holds = exists().where(
-        Context.id == context_id,
-        Workspace.id == Context.workspace_id,
-        Workspace.deleted_at.is_(None),
-        or_(
-            Workspace.owner_user_id == user_id,
-            exists().where(
-                WorkspaceMember.workspace_id == Context.workspace_id,
-                WorkspaceMember.user_id == user_id,
-            ),
-        ),
-    )
-    return bool(await db.scalar(select(holds)))
+    return bool(await db.scalar(select(bound_key_owner_holds(user_id, context_id))))
 
 
 def bound_to_contexts_of(workspace_ids: Any) -> ColumnElement[bool]:
@@ -375,8 +395,9 @@ class APIKeyManager:
         # by the public endpoint (the binding row stays; access is denied
         # while is_public is false).
         if bound_context_id is not None:
+            # A soft-deleted context reads as a missing one.
             ctx_result = await self.db.execute(
-                select(Context).where(Context.id == bound_context_id)
+                select(Context).where(Context.id == bound_context_id, Context.deleted_at.is_(None))
             )
             ctx = ctx_result.scalar_one_or_none()
             if ctx is None:
