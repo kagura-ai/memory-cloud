@@ -10024,7 +10024,7 @@ async def _detect_supersede_candidate(
     meanwhile wins. The write itself only applies while the row still holds
     what that re-read saw.
     """
-    from models.memory import EDGE_TYPE_SUPERSEDES
+    from models.memory import EDGE_TYPE_SUPERSEDES, SLEEP_APPLY_REVERTED_KEY
     from services.supersede_dismissal import is_dismissed
     from services.supersede_verify import (
         VERDICT_PARALLEL,
@@ -10151,6 +10151,13 @@ async def _detect_supersede_candidate(
                     similarity=raw_top_score,
                     fingerprint=pair_fingerprint(old, memory),
                 )
+                stored_candidate = memory.supersede_candidate
+                if verification is not None and isinstance(stored_candidate, dict):
+                    # #3020: the same verdict, so a Sleep rollback's mark on it
+                    # stays (Sleep does not apply it again until a new verdict).
+                    reverted = stored_candidate.get(SLEEP_APPLY_REVERTED_KEY)
+                    if reverted is not None:
+                        candidate[SLEEP_APPLY_REVERTED_KEY] = reverted
                 if verification is None:
                     verification = await judge_pair(
                         db,

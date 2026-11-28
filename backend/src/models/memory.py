@@ -1238,6 +1238,13 @@ EDGE_ORIGIN_DECLARED = "declared"
 # rollback of that run removes only an edge that still carries both.
 EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY = "sleep_supersede_apply"
 
+# #3020: the key a rollback of that phase adds to the suggestion it restores
+# (``memories.supersede_candidate``; value: the rolled back run's report id).
+# The phase skips a suggestion carrying it, so a rollback lasts until the pair
+# gets a new verdict: a detection that reuses the stored verdict keeps it, a
+# fresh detection's dict has none. Every other reader reads named keys.
+SLEEP_APPLY_REVERTED_KEY = "sleep_apply_reverted"
+
 _ALL_EDGE_ORIGINS: tuple[str, ...] = (
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,

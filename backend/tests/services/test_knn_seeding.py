@@ -1662,6 +1662,60 @@ class TestSupersedeVerification:
         assert memory.supersede_candidate["verification"] == fresh
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("moved", [False, True], ids=["verdict-reused", "judged-again"])
+    async def test_a_rollbacks_mark_stays_while_the_verdict_is_reused(self, moved):
+        """#3020: a Sleep rollback marks the suggestion it restored
+        (``sleep_apply_reverted``) so Sleep does not apply it again. A detection
+        that reuses the stored verdict (an edit past the judged heads) keeps
+        the mark; a new verdict drops it."""
+        from services.supersede_verify import pair_fingerprint
+
+        memory = _make_memory()
+        memory.summary, memory.content = "new summary", "new content"
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="llm")
+        fresh = {"verdict": "supersedes", "confidence": 0.95, "verified": True}
+        judge = AsyncMock(return_value=fresh)
+        dup_id, candidates, _ = self._run(memory, db, config, judge)
+        old = db.execute.return_value.scalar_one_or_none.return_value
+        previous = {
+            "verdict": "supersedes",
+            "confidence": 0.9,
+            "verified": True,
+            "fingerprint": "stale-texts" if moved else pair_fingerprint(old, memory),
+        }
+        memory.supersede_candidate = {
+            "memory_id": dup_id,
+            "similarity": 0.925,
+            "detected_at": "2026-10-01T00:00:00Z",
+            "verification": previous,
+            "sleep_apply_reverted": "report-1",
+        }
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=judge),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        if moved:
+            judge.assert_awaited_once()
+            assert memory.supersede_candidate["verification"] == fresh
+            assert "sleep_apply_reverted" not in memory.supersede_candidate
+        else:
+            judge.assert_not_called()
+            assert memory.supersede_candidate["verification"] == previous
+            assert memory.supersede_candidate["sleep_apply_reverted"] == "report-1"
+
+    @pytest.mark.asyncio
     async def test_dismissal_during_the_judge_call_wins(self):
         """A tombstone committed while the judge was out (re-read after the
         call) suppresses the write; the verdict is not stored."""
