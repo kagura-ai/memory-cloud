@@ -183,7 +183,9 @@ version (the truth is gone) or keep returning it (the truth is buried). Since
   a `supersede_candidate` with `update_memory(accept_supersede_candidate=true)`,
   or explicitly with `create_edge(edge_type="supersedes")` — each takes only
   your own memories at both ends (in a private context, a linked account's
-  too; #1803, #2313). Without an edge, a
+  too; #1803, #2313) — or a deployment lets Sleep apply a judge-verified
+  suggestion (`sleep_supersede_apply_enabled`, off by default; #3020), and
+  such a link shadows like an accepted one. Without an edge, a
   judge-verified `supersede_candidate` folds the older version under the newer
   one in recall (`folded`, #2123) — the same effect, reversible, and off
   under `include_superseded=true`.
