@@ -223,7 +223,7 @@ export function PublicEndpointUsage({
       (o) => (data.totals.search_outcomes[o] ?? 0) > 0,
     );
     const showVisitors =
-      data.visitors.status === "ok" && data.visitors.counting_enabled;
+      data.visitors?.status === "ok" && data.visitors.counting_enabled;
     const chartTitle = showVisitors
       ? t("publicEndpoint.chartTitleVisitors")
       : t("publicEndpoint.chartTitle");
@@ -259,9 +259,9 @@ export function PublicEndpointUsage({
                     </span>
                     <span className="font-semibold">
                       {t("publicEndpoint.routeCounts", {
-                        calls: data.totals.calls_by_route[route] ?? 0,
+                        calls: data.totals.calls_by_route?.[route] ?? 0,
                         answered:
-                          data.totals.searches_answered_by_route[route] ?? 0,
+                          data.totals.searches_answered_by_route?.[route] ?? 0,
                       })}
                     </span>
                   </li>
@@ -279,7 +279,7 @@ export function PublicEndpointUsage({
                       {t(`publicEndpoint.${label}`)}
                     </span>
                     <span className="font-semibold">
-                      {(data.totals.calls_by_caller[caller] ?? 0).toLocaleString()}
+                      {(data.totals.calls_by_caller?.[caller] ?? 0).toLocaleString()}
                     </span>
                   </li>
                 ))}
@@ -443,7 +443,7 @@ export function PublicEndpointUsage({
     state.data.recording_enabled &&
     !state.data.rest_recording_enabled;
   const visitorsUnavailable =
-    state.kind === "ok" && state.data.visitors.status === "unavailable";
+    state.kind === "ok" && state.data.visitors?.status === "unavailable";
   const retentionDays = state.kind === "ok" ? state.data.retention_days : null;
 
   return (

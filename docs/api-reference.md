@@ -44,7 +44,7 @@ API keys come in three scoping shapes:
 
 Public-bound keys are immutable: to change which context a key attributes to, revoke the key and create a new one. They cannot also be workspace-scoped (DB CHECK constraint).
 
-A workspace-scoped key (agent and connector keys included) authenticates only while its owner holds the workspace: the workspace is not deleted, and the owner is the workspace's owner or has a membership row in it (any role, with or without a plan seat). Otherwise it answers like an unknown key: `401` on REST, and MCP refuses the request at authentication ([#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)). Minting one requires a membership row in the workspace of the path.
+A workspace-scoped key (agent and connector keys included) authenticates only while its owner holds the workspace: the workspace is not deleted, and the owner is the workspace's owner or has a membership row in it (any role, with or without a plan seat). Otherwise it answers like an unknown key: `401` on REST, and MCP refuses the request at authentication ([#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)). Minting one requires a membership row in the workspace of the path. A public-bound key follows the same rule for the workspace of its bound context: it is accepted only while that workspace is not deleted and the key's owner is its owner or has a membership row in it; otherwise the public routes answer like an unknown key (`401`). Removing a member deletes the member's public-bound keys of that workspace's contexts ([#3047](https://github.com/kagura-ai/memory-cloud/pull/3047)).
 
 A connector key (a connector's write key: linked to its connector, or named `connector:…`) is accepted by no REST route: a route that authenticates an API key answers `403` `AUTH-204` "This credential is not accepted on this route", and a refused key is never tried as a browser session the request may also carry; the public context routes (`/api/v1/public/{context_id}/search`, `/info`) accept only public-bound keys and answer their own `403` `AUTH-101`. On MCP it calls the connector worker's tools only ([MCP tools › Connector keys](mcp-tools.md#connector-keys), [#2929](https://github.com/kagura-ai/memory-cloud/issues/2929)).
 
@@ -1465,9 +1465,9 @@ curl -X POST https://memory.example.com/api/v1/public/CTX_UUID/search \
 
 | Condition | Status |
 |---|---|
-| Context not found | `404` |
+| Context not found, deleted, or of a deleted workspace | `404` |
 | Context is not public | `403` |
-| API key supplied but invalid / expired | `401` |
+| API key supplied but invalid / expired, or public-bound while the workspace of its bound context is deleted or its owner no longer owns or belongs to it (checked before the context) | `401` |
 | API key is not public-bound | `403` |
 | API key is bound to a different context (CWE-639) | `403` |
 | Per-key / shared rate limit exhausted | `429` `RATE-001`; `details.reason` (#3035): `anonymous_limit` (the context's shared bucket), `pre_auth_limit` (requests with `Authorization` per context, also on `/info`), `key_limit` (the bound key's own bucket), `key_not_provisioned` (the plan gives bound keys no allowance) |
@@ -1973,7 +1973,7 @@ Permanently delete an API key (Admin only).
 
 `key_id` is the key's public id from the list or create response: `akey_` followed by 22 letters and digits. The integer database id is not accepted (an integer path id returns `422`), and a key that is not yours returns the same `404` as one that does not exist. The same applies to `/revoke`, `/regenerate` and `/stats`, to the share-key, resource-token and invitation routes (`skey_…`, `rtok_…`, `winv_…`), and to `DELETE /api/v1/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys/{key_id}`.
 
-`/regenerate` of a workspace-scoped key also returns that `404` while the key's owner does not hold the workspace (the condition under which the key authenticates, [#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)). Deleting or revoking your own key always works; the workspace's operation history records it only while you hold that workspace.
+`/regenerate` of a workspace-scoped key also returns that `404` while the key's owner does not hold the workspace (the condition under which the key authenticates, [#2928](https://github.com/kagura-ai/memory-cloud/issues/2928)), and so does `/regenerate` of a public-bound key while its owner does not hold the workspace of its bound context or that context is deleted ([#3047](https://github.com/kagura-ai/memory-cloud/pull/3047)). Deleting or revoking your own key always works; the workspace's operation history records it only while you hold that workspace.
 
 **Response:**
 
@@ -2883,7 +2883,7 @@ Discover related memories via graph traversal.
 
 ### 6. list_my_bindings
 
-List your public-bound API keys (read-only introspection, Issue #629). Returns the bindings you own — keys attributed to a single public context for per-key rate-limit, audit, and revoke. Revoked keys are excluded; `key_prefix` is omitted (use `describe_binding`). Takes no arguments.
+List your public-bound API keys (read-only introspection, Issue #629). Returns the bindings you own — keys attributed to a single public context for per-key rate-limit, audit, and revoke. Revoked keys are excluded, and so are keys bound to a deleted context or to a context of a workspace that is deleted or that you no longer own or belong to; `key_prefix` is omitted (use `describe_binding`). Takes no arguments.
 
 ```python
 {
@@ -2897,7 +2897,7 @@ List your public-bound API keys (read-only introspection, Issue #629). Returns t
 
 ### 7. describe_binding
 
-Describe one of your bindings by **exactly one** of `key_id` (the key's public id, `akey_…`, from `list_my_bindings`) or `context_id` (UUID). An integer `key_id` returns `invalid_arguments`. The result is scoped to keys you own; an unknown or not-yours selector returns a uniform `binding_not_found`. Adds `key_prefix` to the `list_my_bindings` shape. No secret is ever returned.
+Describe one of your bindings by **exactly one** of `key_id` (the key's public id, `akey_…`, from `list_my_bindings`) or `context_id` (UUID). An integer `key_id` returns `invalid_arguments`. The result is scoped to keys you own and lists them as `list_my_bindings` does; an unknown or not-yours selector, or a binding that tool leaves out, returns a uniform `binding_not_found`. Adds `key_prefix` to the `list_my_bindings` shape. No secret is ever returned.
 
 ```python
 {

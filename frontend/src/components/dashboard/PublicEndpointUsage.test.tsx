@@ -137,7 +137,12 @@ function stats(
     totals: {
       calls: 42,
       searches: 30,
-      search_outcomes: { ...OUTCOMES, success: 25, degraded: 3, rate_limited: 2 },
+      search_outcomes: {
+        ...OUTCOMES,
+        success: 25,
+        degraded: 3,
+        rate_limited: 2,
+      },
       ...BY_ROUTE,
     },
     days: [
@@ -145,7 +150,12 @@ function stats(
         date: "2026-11-21",
         calls: 42,
         searches: 30,
-        search_outcomes: { ...OUTCOMES, success: 25, degraded: 3, rate_limited: 2 },
+        search_outcomes: {
+          ...OUTCOMES,
+          success: 25,
+          degraded: 3,
+          rate_limited: 2,
+        },
         ...BY_ROUTE,
         visitors: 7,
       },
@@ -300,7 +310,9 @@ describe("PublicEndpointUsage", () => {
     mockGetStats.mockResolvedValue(stats());
     await show();
     await screen.findAllByTestId("public-endpoint-tile");
-    expect(screen.queryByText(/most recent answered searches/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/most recent answered searches/),
+    ).not.toBeInTheDocument();
   });
 
   it.each(["en", "ja"] as const)(
@@ -426,7 +438,29 @@ describe("PublicEndpointUsage", () => {
     expect(
       screen.getAllByTestId("chart-line").map((l) => l.dataset.key),
     ).toEqual(["calls", "searches"]);
-    expect(screen.queryByText(/Visitors could not be read/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Visitors could not be read/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders a body from an API that does not send the newer fields", async () => {
+    const old = JSON.parse(JSON.stringify(stats())) as Record<string, unknown>;
+    delete old.visitors;
+    const totals = old.totals as Record<string, unknown>;
+    for (const key of [
+      "calls_by_route",
+      "searches_by_route",
+      "searches_answered_by_route",
+      "calls_by_caller",
+    ]) {
+      delete totals[key];
+    }
+    mockGetStats.mockResolvedValue(
+      old as unknown as PublicMcpUsageStatsResponse,
+    );
+    await show();
+    const tiles = await screen.findAllByTestId("public-endpoint-tile");
+    expect(tiles).toHaveLength(3);
   });
 
   it("shows the rate-limited line on 429", async () => {
@@ -483,7 +517,9 @@ describe("PublicEndpointUsage", () => {
     expect(
       await screen.findByText("No calls in this period"),
     ).toBeInTheDocument();
-    expect(screen.queryByTestId("public-endpoint-tile")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("public-endpoint-tile"),
+    ).not.toBeInTheDocument();
   });
 
   it("requests 30 days when the period changes", async () => {
