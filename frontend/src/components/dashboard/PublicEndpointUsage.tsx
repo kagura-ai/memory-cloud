@@ -3,12 +3,15 @@
 /**
  * Public endpoint usage card (#3035).
  *
- * The owner's statistics of the resource's live public MCP endpoint: calls,
- * searches and answered searches over 7 or 30 UTC days, a chart per UTC day,
- * searches by outcome and the documents searches returned most often. The
- * notes under the numbers say which traffic is covered and what is not
- * counted. Mounted only for a workspace owner of a context with a live
- * endpoint (`shouldShowPublicEndpointUsage`); a 404 renders nothing.
+ * The owner's statistics of the resource's live public MCP endpoint and,
+ * while the server records them, the REST public searches of its context made
+ * with a key bound to it: calls, searches and answered searches over 7 or 30
+ * UTC days, by route and by caller, a chart per UTC day (with the daily
+ * visitors a bound-key server reported), searches by outcome and the
+ * documents searches returned most often. The notes under the numbers say
+ * which traffic is covered and what is not counted. Mounted only for a
+ * workspace owner of a context with a live endpoint
+ * (`shouldShowPublicEndpointUsage`); a 404 renders nothing.
  */
 
 import { useEffect, useState } from "react";
@@ -58,6 +61,16 @@ const OUTCOME_ORDER = [
   "invalid_request",
   "error",
   "cancelled",
+] as const;
+
+/** The routes and callers, in the order they are listed. */
+const ROUTES = [
+  ["mcp", "routeMcp"],
+  ["rest", "routeRest"],
+] as const;
+const CALLERS = [
+  ["anonymous", "callerAnonymous"],
+  ["bound_key", "callerBoundKey"],
 ] as const;
 
 /** Whether the owner card is mounted: an owner, a live public endpoint, a resource. */
@@ -145,6 +158,22 @@ export function PublicEndpointUsage({
       day: "numeric",
       timeZone: "UTC",
     }).format(new Date(`${day}T00:00:00Z`));
+  // A UTC time with hour and minute (the start of the documents' window).
+  const timeLabel = (at: string) =>
+    new Intl.DateTimeFormat(locale, {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZone: "UTC",
+    }).format(new Date(at));
+  const seriesLabel = (name: string) =>
+    name === "calls"
+      ? t("publicEndpoint.calls")
+      : name === "visitors"
+        ? t("publicEndpoint.visitors")
+        : t("publicEndpoint.searches");
 
   const header = (
     <CardHeader>
@@ -193,6 +222,11 @@ export function PublicEndpointUsage({
     const outcomes = OUTCOME_ORDER.filter(
       (o) => (data.totals.search_outcomes[o] ?? 0) > 0,
     );
+    const showVisitors =
+      data.visitors.status === "ok" && data.visitors.counting_enabled;
+    const chartTitle = showVisitors
+      ? t("publicEndpoint.chartTitleVisitors")
+      : t("publicEndpoint.chartTitle");
     body =
       data.totals.calls === 0 ? (
         <EmptyState
@@ -212,15 +246,51 @@ export function PublicEndpointUsage({
             <Tile label={t("publicEndpoint.searchesAnswered")} value={answered} />
           </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+            <div className="space-y-1">
+              <h4 className="font-semibold text-sm">
+                {t("publicEndpoint.routesTitle")}
+              </h4>
+              <ul className="space-y-1" data-testid="public-endpoint-routes">
+                {ROUTES.map(([route, label]) => (
+                  <li key={route} className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      {t(`publicEndpoint.${label}`)}
+                    </span>
+                    <span className="font-semibold">
+                      {t("publicEndpoint.routeCounts", {
+                        calls: data.totals.calls_by_route[route] ?? 0,
+                        answered:
+                          data.totals.searches_answered_by_route[route] ?? 0,
+                      })}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="space-y-1">
+              <h4 className="font-semibold text-sm">
+                {t("publicEndpoint.callersTitle")}
+              </h4>
+              <ul className="space-y-1" data-testid="public-endpoint-callers">
+                {CALLERS.map(([caller, label]) => (
+                  <li key={caller} className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      {t(`publicEndpoint.${label}`)}
+                    </span>
+                    <span className="font-semibold">
+                      {(data.totals.calls_by_caller[caller] ?? 0).toLocaleString()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
           <div className="space-y-2">
-            <h4 className="font-semibold text-sm">
-              {t("publicEndpoint.chartTitle")}
-            </h4>
+            <h4 className="font-semibold text-sm">{chartTitle}</h4>
             <ResponsiveContainer width="100%" height={250}>
-              <LineChart
-                data={data.days}
-                aria-label={t("publicEndpoint.chartTitle")}
-              >
+              <LineChart data={data.days} aria-label={chartTitle}>
                 <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                 <XAxis
                   dataKey="date"
@@ -232,9 +302,7 @@ export function PublicEndpointUsage({
                   labelFormatter={dayLabel}
                   formatter={(value: number, name: string) => [
                     value,
-                    name === "calls"
-                      ? t("publicEndpoint.calls")
-                      : t("publicEndpoint.searches"),
+                    seriesLabel(name),
                   ]}
                 />
                 <Line
@@ -251,6 +319,15 @@ export function PublicEndpointUsage({
                   stroke="#3b82f6"
                   strokeWidth={2}
                 />
+                {showVisitors && (
+                  <Line
+                    type="monotone"
+                    dataKey="visitors"
+                    name="visitors"
+                    stroke="#f59e0b"
+                    strokeWidth={2}
+                  />
+                )}
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -348,6 +425,9 @@ export function PublicEndpointUsage({
                 <p className="text-xs text-muted-foreground">
                   {t("publicEndpoint.scanLimitReached", {
                     count: docs.scan_limit,
+                    since: docs.scanned_since
+                      ? timeLabel(docs.scanned_since)
+                      : "—",
                   })}
                 </p>
               )}
@@ -357,6 +437,13 @@ export function PublicEndpointUsage({
   }
 
   const recordingOff = state.kind === "ok" && !state.data.recording_enabled;
+  // With recording on but REST searches not recorded, only MCP is counted.
+  const restRecordingOff =
+    state.kind === "ok" &&
+    state.data.recording_enabled &&
+    !state.data.rest_recording_enabled;
+  const visitorsUnavailable =
+    state.kind === "ok" && state.data.visitors.status === "unavailable";
   const retentionDays = state.kind === "ok" ? state.data.retention_days : null;
 
   return (
@@ -369,6 +456,16 @@ export function PublicEndpointUsage({
             {t("publicEndpoint.recordingOff")}
           </p>
         )}
+        {restRecordingOff && (
+          <p className="text-sm text-muted-foreground">
+            {t("publicEndpoint.restRecordingOff")}
+          </p>
+        )}
+        {visitorsUnavailable && (
+          <p className="text-sm text-muted-foreground">
+            {t("publicEndpoint.visitorsUnavailable")}
+          </p>
+        )}
         {retentionDays !== null && (
           <ul
             className="list-disc pl-5 space-y-1 text-xs text-muted-foreground"
@@ -379,6 +476,7 @@ export function PublicEndpointUsage({
             </li>
             <li>{t("publicEndpoint.cacheNote")}</li>
             <li>{t("publicEndpoint.callsNote")}</li>
+            <li>{t("publicEndpoint.callersNote")}</li>
             <li>
               {t("publicEndpoint.retentionNote", { days: retentionDays })}
             </li>

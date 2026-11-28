@@ -230,16 +230,27 @@ export async function listResourceEvents(
 // Hand-mirrored against `PublicMcpUsageStatsResponse` in
 // `backend/src/api/routes/public_mcp_usage.py` (OpenAPI snapshot pinned).
 
-/** Calls, searches and searches by outcome (every outcome is a key). */
+/**
+ * Calls, searches and searches by outcome (every outcome is a key), by route
+ * (`mcp`, `rest`) and caller (`anonymous`, `bound_key`), every key present.
+ */
 export interface PublicMcpUsageCounts {
   calls: number;
   searches: number;
   search_outcomes: Record<string, number>;
+  calls_by_route: Record<string, number>;
+  /** Every recorded search, whatever its outcome. */
+  searches_by_route: Record<string, number>;
+  /** Answered searches (success or degraded). */
+  searches_answered_by_route: Record<string, number>;
+  calls_by_caller: Record<string, number>;
 }
 
 /** One UTC calendar day (`YYYY-MM-DD`). */
 export interface PublicMcpUsageDay extends PublicMcpUsageCounts {
   date: string;
+  /** Distinct visitors reported with a bound key; null when not readable. */
+  visitors: number | null;
 }
 
 /** A document the endpoint's searches returned. */
@@ -257,7 +268,14 @@ export interface PublicMcpUsageDocuments {
   publication_serving: boolean;
   searches_scanned: number;
   scan_limit: number;
+  /** The oldest search the list is based on (UTC); null when none was scanned. */
+  scanned_since: string | null;
   items: PublicMcpUsageDocument[];
+}
+
+export interface PublicMcpUsageVisitors {
+  status: "ok" | "unavailable";
+  counting_enabled: boolean;
 }
 
 /** Response from `GET /api/v1/resources/{id}/public-mcp/usage-stats`. */
@@ -269,6 +287,8 @@ export interface PublicMcpUsageStatsResponse {
   last_day: string;
   retention_days: number;
   recording_enabled: boolean;
+  rest_recording_enabled: boolean;
+  visitors: PublicMcpUsageVisitors;
   totals: PublicMcpUsageCounts;
   days: PublicMcpUsageDay[];
   documents: PublicMcpUsageDocuments;
