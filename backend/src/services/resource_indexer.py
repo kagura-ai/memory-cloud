@@ -59,6 +59,7 @@ from services.keyword_stats import (
 from services.memory_counts import count_live_memories
 from services.plan_suspension import ingest_suspended
 from services.quota_service import QuotaService
+from utils.content_chunks import resource_context_summary
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
 from utils.logger import get_logger
@@ -1864,7 +1865,7 @@ class ResourceIndexer:
 
         # The row's values as this upsert leaves them, computed once for both
         # the row and the point. P2-10: safe truncation with ellipsis.
-        context_summary = content[:1997] + "..." if len(content) > 2000 else content
+        context_summary = resource_context_summary(content)
         # #896: worker lineage keys first, indexer lifecycle keys layered on
         # top. The two sets are orthogonal (worker: connector_id / platform /
         # team_id / channel_id / thread_ts / source_message_ids; indexer:

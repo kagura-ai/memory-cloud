@@ -54,6 +54,20 @@ logger = get_logger(__name__)
 # Provider constants (must match external_keys.py for API-key providers)
 RERANKER_PROVIDERS = {"cohere", "voyage"}
 
+# Time limit of one Voyage or Cohere rerank call, in seconds: given to the
+# provider's async client as its request timeout and enforced around the call,
+# so a call that does not answer fails like any other provider error and the
+# recall falls back to the un-reranked results (well before the MCP recall
+# tool's own 60-second timeout).
+RERANK_PROVIDER_TIMEOUT_SECONDS = 15.0
+
+
+def _provider_status(exc: BaseException, attribute: str) -> int | None:
+    """The HTTP status a provider error carries in ``attribute``, if any."""
+    status = getattr(exc, attribute, None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
 # Hard-floor default self-hosted (Ollama-engine) reranker model. This is an
 # Ollama-registry model id, so a pure-vLLM self-hosted stack MUST override it
 # via settings.self_hosted_rerank_model (env SELF_HOSTED_RERANK_MODEL) — the
@@ -377,7 +391,10 @@ class VoyageReranker(RerankerProvider):
     ) -> list[dict[str, Any]]:
         """Rerank using Voyage AI API.
 
-        Note: Voyage client is synchronous, so we run in executor.
+        Uses the async client, so no thread waits on the request, with
+        ``RERANK_PROVIDER_TIMEOUT_SECONDS`` as its limit. A failure logs
+        ``voyage_rerank_failed`` with the error class and HTTP status only
+        (the provider's message can carry the response body).
 
         Args:
             query: Search query
@@ -400,17 +417,16 @@ class VoyageReranker(RerankerProvider):
         try:
             import voyageai  # type: ignore[reportMissingImports]
 
-            def _sync_rerank():
-                client = voyageai.Client(api_key=self.api_key)  # pyright: ignore[reportPrivateImportUsage]
-                return client.rerank(
+            client = voyageai.AsyncClient(  # pyright: ignore[reportPrivateImportUsage]
+                api_key=self.api_key, timeout=RERANK_PROVIDER_TIMEOUT_SECONDS
+            )
+            async with asyncio.timeout(RERANK_PROVIDER_TIMEOUT_SECONDS):
+                response = await client.rerank(
                     query=query,
                     documents=documents,
                     model=self.model,
                     top_k=top_n,
                 )
-
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, _sync_rerank)
 
             return [
                 {"index": r.index, "relevance_score": r.relevance_score} for r in response.results
@@ -418,14 +434,17 @@ class VoyageReranker(RerankerProvider):
         except ValueError:
             raise
         except Exception as e:
+            # No str(e): voyageai puts the API's error detail (and for some
+            # statuses the raw response body and headers) into its message.
             logger.error(
                 "voyage_rerank_failed",
-                error=str(e),
+                error_class=type(e).__name__,
+                status_code=_provider_status(e, "http_status"),
                 model=self.model,
                 query_length=len(query),
                 doc_count=len(documents),
             )
-            raise VoyageError(f"Reranking failed for model {self.model}: {e}") from e
+            raise VoyageError(f"Reranking failed for model {self.model}") from e
 
 
 class CohereReranker(RerankerProvider):
@@ -455,6 +474,10 @@ class CohereReranker(RerankerProvider):
     ) -> list[dict[str, Any]]:
         """Rerank using Cohere API.
 
+        ``RERANK_PROVIDER_TIMEOUT_SECONDS`` is the call's limit. A failure
+        logs ``cohere_rerank_failed`` with the error class and HTTP status
+        only (the client's error message prints the response body).
+
         Args:
             query: Search query
             documents: Documents to rerank
@@ -476,14 +499,15 @@ class CohereReranker(RerankerProvider):
         try:
             import cohere
 
-            client = cohere.AsyncClient(self.api_key)
+            client = cohere.AsyncClient(self.api_key, timeout=RERANK_PROVIDER_TIMEOUT_SECONDS)
 
-            response = await client.rerank(
-                model=self.model,
-                query=query,
-                documents=documents,
-                top_n=top_n,
-            )
+            async with asyncio.timeout(RERANK_PROVIDER_TIMEOUT_SECONDS):
+                response = await client.rerank(
+                    model=self.model,
+                    query=query,
+                    documents=documents,
+                    top_n=top_n,
+                )
 
             return [
                 {"index": r.index, "relevance_score": r.relevance_score} for r in response.results
@@ -493,12 +517,13 @@ class CohereReranker(RerankerProvider):
         except Exception as e:
             logger.error(
                 "cohere_rerank_failed",
-                error=str(e),
+                error_class=type(e).__name__,
+                status_code=_provider_status(e, "status_code"),
                 model=self.model,
                 query_length=len(query),
                 doc_count=len(documents),
             )
-            raise CohereError(f"Reranking failed for model {self.model}: {e}") from e
+            raise CohereError(f"Reranking failed for model {self.model}") from e
 
 
 class SelfHostedReranker(RerankerProvider):

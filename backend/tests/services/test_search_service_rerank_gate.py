@@ -278,6 +278,43 @@ class TestFailOpen:
         assert event["error_class"] == "RuntimeError"
         assert "error" not in event
 
+    async def test_a_voyage_call_past_its_time_limit_fails_open(
+        self, service, settings, monkeypatch
+    ):
+        """A Voyage rerank that does not answer within
+        ``RERANK_PROVIDER_TIMEOUT_SECONDS`` gives the un-reranked hybrid order,
+        like any other provider error."""
+        import asyncio
+        import sys
+        import types
+
+        import services.reranker_service as reranker_module
+        from services.reranker_service import VoyageReranker
+
+        class _StuckClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def rerank(self, **kwargs):
+                await asyncio.sleep(30)
+
+        module = types.ModuleType("voyageai")
+        module.AsyncClient = _StuckClient  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "voyageai", module)
+        monkeypatch.setattr(reranker_module, "RERANK_PROVIDER_TIMEOUT_SECONDS", 0.05)
+        service.reranker_service = RerankerService(MagicMock())
+        service.reranker_service.get_active_provider = AsyncMock(return_value=VoyageReranker("k"))
+        with structlog.testing.capture_logs() as logs:
+            results = await asyncio.wait_for(
+                _search(service, use_rerank=None, config=_config(True, "voyage")), timeout=5
+            )
+        assert [r["id"] for r in results] == ["m1", "m2"]
+        (failed,) = [e for e in logs if e["event"] == "voyage_rerank_failed"]
+        assert failed["error_class"] == "TimeoutError"
+        (event,) = [e for e in logs if e["event"] == "rerank_failed_open"]
+        assert event["error_class"] == "VoyageError"
+        assert event["provider"] == "voyage"
+
 
 class TestResourceIndexedCandidates:
     async def test_pool_with_a_resource_row_is_reranked_without_failing_open(
