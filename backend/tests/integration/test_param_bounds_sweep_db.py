@@ -5,6 +5,9 @@ Real rows over HTTP: a value one past a bound is refused by the parameter
 without a NUL, the last integer of the column, the first and last day there
 is) reaches the statement and is answered. The refusals themselves, with the
 statements and log lines, are pinned in ``tests/api/test_param_bounds_sweep.py``.
+
+The tests commit, so each deletes what it wrote, by its own ids: later files in
+the same CI shard read whole tables and expect them empty.
 """
 
 from __future__ import annotations
@@ -18,13 +21,24 @@ from uuid import uuid4
 import httpx
 import pytest
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.main import app
 from db.base import get_db
-from models.auth import Workspace, WorkspaceMember
+from models.auth import (
+    APIKey,
+    AuditLog,
+    Context,
+    ContextMember,
+    PlanChange,
+    User,
+    Workspace,
+    WorkspaceMember,
+)
+from models.operation_history import OperationHistory
 from models.referral import ReferralGrant
+from models.resource import WorkspaceAddon
 from models.worker_app import WorkerAppIdentity
 
 from ._admin_helpers import make_context, make_user, make_workspace
@@ -39,6 +53,68 @@ MIN_BIGINT = -(2**63)
 # sign (no wildcard), a space and a non-ASCII letter.
 OTHER_TEXT = "a\nb% cé"
 OTHER_PATH = "a%0Ab%25%20c%C3%A9"
+
+# What the running test committed, by its own ids. A workspace a test creates
+# over HTTP is found by its owner.
+_committed: dict[str, list] = {"users": [], "workspaces": [], "grants": [], "app_keys": []}
+
+
+def _user(**kwargs) -> User:
+    """``make_user`` whose user the cleanup below deletes."""
+    user = make_user(**kwargs)
+    _committed["users"].append(user.user_id)
+    return user
+
+
+@pytest.fixture(autouse=True)
+async def _delete_committed_rows(db_session: AsyncSession):
+    """Delete every row the test committed, by its own ids."""
+    for ids in _committed.values():
+        ids.clear()
+    yield
+    await db_session.rollback()
+    users = _committed["users"]
+    workspaces = (
+        await db_session.scalars(
+            select(Workspace.id).where(
+                or_(Workspace.id.in_(_committed["workspaces"]), Workspace.owner_user_id.in_(users))
+            )
+        )
+    ).all()
+    contexts = select(Context.id).where(Context.workspace_id.in_(workspaces))
+    grants = _committed["grants"]
+    await db_session.execute(
+        delete(AuditLog).where(
+            AuditLog.resource.in_([f"referral_grant:{grant_id}" for grant_id in grants])
+        )
+    )
+    await db_session.execute(delete(ReferralGrant).where(ReferralGrant.id.in_(grants)))
+    await db_session.execute(
+        delete(WorkerAppIdentity).where(WorkerAppIdentity.app_key.in_(_committed["app_keys"]))
+    )
+    await db_session.execute(
+        delete(APIKey).where(or_(APIKey.workspace_id.in_(workspaces), APIKey.user_id.in_(users)))
+    )
+    await db_session.execute(
+        delete(OperationHistory).where(OperationHistory.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(PlanChange).where(PlanChange.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(WorkspaceAddon).where(WorkspaceAddon.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(delete(ContextMember).where(ContextMember.context_id.in_(contexts)))
+    await db_session.execute(delete(Context).where(Context.workspace_id.in_(workspaces)))
+    await db_session.execute(
+        delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(workspaces))
+    )
+    await db_session.execute(
+        update(User).where(User.user_id.in_(users)).values(current_workspace_id=None)
+    )
+    await db_session.execute(delete(Workspace).where(Workspace.id.in_(workspaces)))
+    await db_session.execute(delete(User).where(User.user_id.in_(users)))
+    await db_session.commit()
+    for ids in _committed.values():
+        ids.clear()
 
 
 @asynccontextmanager
@@ -73,10 +149,11 @@ async def owner_http(
 
 
 async def _owned_workspace(db_session: AsyncSession, plan_name: str = "pro"):
-    owner, member = make_user(name="Owner"), make_user(name="Member")
+    owner, member = _user(name="Owner"), _user(name="Member")
     db_session.add_all([owner, member])
     await db_session.flush()
     workspace = make_workspace(owner_user_id=owner.user_id, plan_name=plan_name)
+    _committed["workspaces"].append(workspace.id)
     db_session.add(workspace)
     await db_session.flush()
     db_session.add_all(
@@ -100,7 +177,7 @@ def _refused(response: httpx.Response) -> None:
 
 
 async def test_admin_user_reads_take_every_id_without_a_nul(db_session: AsyncSession) -> None:
-    user = make_user(name="Read")
+    user = _user(name="Read")
     db_session.add(user)
     await db_session.commit()
     user_id = user.user_id
@@ -230,7 +307,7 @@ async def test_bm25_drift_takes_the_last_64_bit_offset_and_id(db_session: AsyncS
 
 
 async def test_undo_merge_takes_the_last_64_bit_action_id(db_session: AsyncSession) -> None:
-    admin = make_user(name="Admin", role="admin")
+    admin = _user(name="Admin", role="admin")
     db_session.add(admin)
     await db_session.commit()
     principal = {"user_id": admin.user_id, "email": admin.email, "role": "admin"}
@@ -257,7 +334,7 @@ async def test_promotion_takes_every_id_without_a_nul(db_session: AsyncSession) 
 async def test_referral_revoke_refuses_a_nul_reason_and_keeps_the_grant(
     db_session: AsyncSession,
 ) -> None:
-    referrer, referred = make_user(name="Referrer"), make_user(name="Referred")
+    referrer, referred = _user(name="Referrer"), _user(name="Referred")
     db_session.add_all([referrer, referred])
     await db_session.flush()
     grant = ReferralGrant(
@@ -268,6 +345,7 @@ async def test_referral_revoke_refuses_a_nul_reason_and_keeps_the_grant(
         referred_bonus_memories=50,
         granted_at=datetime(2033, 1, 1),
     )
+    _committed["grants"].append(grant.id)
     db_session.add(grant)
     await db_session.commit()
     grant_id = grant.id
@@ -291,6 +369,7 @@ async def test_referral_revoke_refuses_a_nul_reason_and_keeps_the_grant(
 
 async def test_worker_app_names_take_every_text_without_a_nul(db_session: AsyncSession) -> None:
     app_key = f"app-{uuid4().hex[:8]}"
+    _committed["app_keys"].append(app_key)
     body = {"platform": "slack", "app_key": app_key, "signing_secret": "0" * 32}
     async with admin_http(db_session) as client:
         _refused(
@@ -340,7 +419,7 @@ async def test_workspace_texts_and_member_ids_take_everything_but_a_nul(
 
 
 async def test_a_new_workspace_takes_every_text_without_a_nul(db_session: AsyncSession) -> None:
-    creator = make_user(name="Creator")
+    creator = _user(name="Creator")
     db_session.add(creator)
     await db_session.commit()
     creator_id = creator.user_id
