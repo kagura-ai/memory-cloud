@@ -639,7 +639,7 @@ async def test_the_pending_set_is_bounded(writer_today, monkeypatch):
     assert dropped and dropped[0].kwargs["reason"] == "pending_full"
 
 
-def test_doc_key_rows_are_sorted():
+async def test_doc_key_rows_are_sorted():
     from services.public_mcp_usage_events import BuiltUsageEvent
     from services.public_mcp_usage_writer import _doc_key_rows
 
