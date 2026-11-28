@@ -36,6 +36,11 @@ existed (all of those were public MCP calls).
 server reported with a bound key, one row per endpoint, UTC day and key. A
 key is an HMAC of the day, the endpoint and the reported value; no column
 refers to an event, a call, a time of day or an API key.
+
+``public_mcp_usage_day_counts`` (#3053) holds the ``tool_call`` events per
+endpoint, UTC day, workspace, tool, outcome, route and caller; the days in
+``public_mcp_usage_closed_days`` are complete there and the owner statistics
+read them from it (``services/public_mcp_usage_rollup.py``).
 """
 
 from __future__ import annotations
@@ -272,3 +277,44 @@ class PublicMcpUsageRetention(Base):
     purged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (CheckConstraint("id = 1", name="pmur_singleton"),)
+
+
+class PublicMcpUsageDayCount(Base):
+    """The ``tool_call`` events of one endpoint and UTC day, by kind of call (#3053).
+
+    ``route`` and ``caller`` carry the defaults the statistics apply to an
+    event that has none (a public MCP call by an anonymous caller). The
+    usage writer adds a batch's calls in the batch's transaction; closing a
+    day counts the day again from the events. A day's rows equal its events
+    once the day is in ``public_mcp_usage_closed_days``. No foreign key (the
+    events' audit posture); aged out with the events.
+    """
+
+    __tablename__ = "public_mcp_usage_day_counts"
+
+    endpoint_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tool: Mapped[str] = mapped_column(String(32), primary_key=True)
+    outcome: Mapped[str] = mapped_column(String(16), primary_key=True)
+    route: Mapped[str] = mapped_column(String(8), primary_key=True)
+    caller: Mapped[str] = mapped_column(String(16), primary_key=True)
+    calls: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("calls > 0", name="pmudc_calls_positive"),
+        Index("ix_pmudc_day", "day"),
+    )
+
+
+class PublicMcpUsageClosedDay(Base):
+    """A UTC day whose rows in ``public_mcp_usage_day_counts`` equal its events (#3053).
+
+    Written by the hourly close (``services/public_mcp_usage_rollup.py``);
+    deleted by the retention purge with the day's counts.
+    """
+
+    __tablename__ = "public_mcp_usage_closed_days"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True, autoincrement=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

@@ -152,6 +152,12 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # UTC day and the endpoint. No person, call, time or key column; no
         # foreign key; aged out with the usage events.
         "public_mcp_daily_visitors",
+        # Per-day counts of those usage events (#3053): endpoint, workspace,
+        # UTC day, tool, outcome, route, caller and a number; the closed-day
+        # marks say which days are complete. No person, content or key; no
+        # foreign key; aged out with the usage events.
+        "public_mcp_usage_day_counts",
+        "public_mcp_usage_closed_days",
         # Workspace-wide seven-day budget of anonymous public calls (#2805):
         # the workspace id, the running period's start, count and number. No
         # person, no address, no content; cascades with the workspace.
