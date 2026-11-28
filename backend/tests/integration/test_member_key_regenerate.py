@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes.member_credentials import regenerate_api_key
@@ -273,3 +273,69 @@ async def test_inactive_agent_refuses_rotation_without_committing_revocation(
     await world.db.rollback()
     await world.db.refresh(old)
     assert old.revoked_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(90)
+async def test_rotation_waits_on_the_key_owners_user_row_before_the_key(
+    connector_world, fernet_api_key_secret
+):
+    """User deletion, account erasure and member removal lock the user's row
+    ``FOR UPDATE`` before they sweep the user's keys (users before api_keys).
+    A rotation waits on that row first, holding no key: the sweep deletes the
+    key, and the rotation then reads it gone and answers 404 instead of
+    minting a replacement the sweep has passed."""
+    from models.auth import User
+
+    world = connector_world
+    owner = await world.user("rotate-owner")
+    ws = await world.workspace(owner)
+    old = await world.db.get(APIKey, await world.personal_key(owner, ws))
+    public_id = old.public_id
+    workspace_id = ws.id
+    await world.db.commit()
+    maker = async_sessionmaker(world.db.bind, expire_on_commit=False)
+    async with maker() as holder, maker() as rotating:
+        await holder.execute(select(User.user_id).where(User.user_id == owner).with_for_update())
+        holder_pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+        rotating_pid = await rotating.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(_rotate(SimpleNamespace(db=rotating), ws, owner, public_id))
+        try:
+            waiting = False
+            async with asyncio.timeout(15):
+                while not waiting and not task.done():
+                    waiting = await world.db.scalar(
+                        text("SELECT :holder = ANY(pg_blocking_pids(:pid))"),
+                        {"holder": holder_pid, "pid": rotating_pid},
+                    )
+                    await asyncio.sleep(0.02)
+            assert waiting, "the rotation never waited on the user row"
+            # The row it waits on is the users row (a row lock waiter holds
+            # the tuple lock of the row it waits for) ...
+            tuple_locks = (
+                await world.db.scalars(
+                    text(
+                        "SELECT relation::regclass::text FROM pg_locks "
+                        "WHERE pid = :pid AND locktype = 'tuple'"
+                    ),
+                    {"pid": rotating_pid},
+                )
+            ).all()
+            assert tuple_locks == ["users"], tuple_locks
+            # ... and it holds no key: the sweep takes the key at once.
+            await holder.execute(
+                select(APIKey.id).where(APIKey.user_id == owner).with_for_update(nowait=True)
+            )
+            await holder.execute(delete(APIKey).where(APIKey.public_id == public_id))
+            await holder.commit()
+        finally:
+            await holder.rollback()
+            outcome = await asyncio.gather(asyncio.wait_for(task, 30), return_exceptions=True)
+    error = outcome[0]
+    assert isinstance(error, HTTPException), error
+    assert error.status_code == 404
+    world.db.expire_all()
+    rows = list(
+        (await world.db.scalars(select(APIKey).where(APIKey.workspace_id == workspace_id))).all()
+    )
+    assert rows == []

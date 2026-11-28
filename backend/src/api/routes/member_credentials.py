@@ -580,7 +580,18 @@ async def regenerate_api_key(
 
     from sqlalchemy import and_, or_, select
 
-    from models.auth import APIKey
+    from models.auth import APIKey, User
+
+    # #2370: users before api_keys. User deletion, account erasure and member
+    # removal lock the key owner's users row FOR UPDATE before they sweep the
+    # owner's keys, so the key is read after any such sweep has committed (a
+    # swept key is the 404 below) and no replacement is minted past it. FOR
+    # KEY SHARE does not wait on an ordinary edit of the user row.
+    await db.execute(
+        select(User.user_id)
+        .where(User.user_id == user_id)
+        .with_for_update(read=True, key_share=True)
+    )
 
     # Scope the id lookup as tightly as the legacy lookup: an id from another
     # owner/workspace, a public-bound key or an inactive key is the same 404.
