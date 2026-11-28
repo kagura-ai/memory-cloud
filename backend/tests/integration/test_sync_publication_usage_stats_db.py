@@ -14,7 +14,8 @@ through the installation's registered browser client with ``workspaces:read``:
 * an installation whose public endpoint is not live is the 404;
 * a slot-suspended workspace is ``403 SLOT-001``; the owner through a browser
   client without a service registration ``409 RES-002``, as on the domain
-  observation.
+  observation; a held installation row ``409 RES-002`` (send the request
+  again), as the other rows of the admission.
 
 Every row a test adds (usage events, visitor rows) is deleted afterwards.
 """
@@ -28,7 +29,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from httpx import Response
-from sqlalchemy import delete, insert, update
+from sqlalchemy import delete, insert, text, update
 
 from api.routes.public_mcp_usage import get_public_mcp_usage_stats
 from config.settings import get_settings
@@ -282,3 +283,25 @@ async def test_the_owner_through_an_unregistered_client_is_refused_as_on_the_obs
     response = await read(store, target, token=foreign)
     assert (response.status_code, response.json()) == (409, {"error": "RES-002"})
     assert store.buckets == []
+
+
+async def test_a_held_installation_row_is_res_002(env):
+    """The installation row is read ``FOR SHARE NOWAIT``: a transaction that
+    updates it (an unlink, a resume, a management transition) makes the read
+    answer ``409 RES-002``, as a held row of the rest of the admission does."""
+    store = env
+    target = await installed(store)
+    holder = store.factory()
+    try:
+        await holder.execute(
+            text("SELECT id FROM sync_installations WHERE id = :id FOR UPDATE"),
+            {"id": UUID(target["installation_id"])},
+        )
+        response = await read(store, target)
+        assert (response.status_code, response.json()) == (409, {"error": "RES-002"})
+    finally:
+        await holder.rollback()
+        await holder.close()
+    assert store.buckets == []
+    response = await read(store, target)
+    assert response.status_code == 200, response.text

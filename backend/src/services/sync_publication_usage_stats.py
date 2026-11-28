@@ -28,6 +28,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.sync_identity import SyncPrincipal
@@ -38,10 +39,12 @@ from services.permission_service import CapacityPolicy, PermissionService
 from services.public_mcp_usage_stats import LiveEndpoint
 from services.sync_authority import registered_service, sync_authority
 from services.sync_publication_domain_commands import bound_installation
+from utils.db_helpers import is_lock_not_available
 from utils.exceptions import (
     AuthorizationError,
     NotFoundException,
     PublicationUsageStatsOwnerRequiredError,
+    SyncLockBusyError,
 )
 
 __all__ = ["installation_stats_endpoint"]
@@ -106,8 +109,9 @@ async def installation_stats_endpoint(
         NotFoundException: Every other caller, workspace or installation, and
             an installation whose public endpoint is not live (404).
         WorkspaceSlotSuspendedError: The workspace is slot-suspended (403).
-        ConflictError: A row of the admission is held (409), or the client's
-            service registration is unavailable, as on the observation.
+        ConflictError: A row of the admission is held (409, the installation
+            row included: ``SyncLockBusyError``), or the client's service
+            registration is unavailable, as on the observation.
     """
     try:
         owner_id = await db.scalar(
@@ -122,9 +126,16 @@ async def installation_stats_endpoint(
         raise
     async with sync_authority(db, workspace_id, principal):
         service = await registered_service(db, browser_client_id=principal.client_id)
-        _installation, target = await bound_installation(
-            db, workspace_id, installation_id, principal, service
-        )
+        try:
+            _installation, target = await bound_installation(
+                db, workspace_id, installation_id, principal, service
+            )
+        except DBAPIError as exc:
+            # The installation row and its authorization are read NOWAIT; a
+            # held one is the retry answer of every other admission row.
+            if is_lock_not_available(exc):
+                raise SyncLockBusyError() from exc
+            raise
         assert target.public_id is not None
         endpoint = LiveEndpoint(
             id=target.endpoint_id,

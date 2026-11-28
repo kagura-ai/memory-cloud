@@ -388,9 +388,10 @@ Authorization: Bearer kmc_oidc_at_...
   installation, another client of a member, and an installation whose public
   endpoint is not live (unpublished or republished) get `404` `not_found`. A
   slot-suspended workspace is `403` `SLOT-001`; the owner through a client
-  without a service registration, or while a row of the admission is held,
-  `409` `RES-002`, as on the domain observation. The installation is answered
-  in every state, as the observation is.
+  without a service registration (as on the domain observation), or while a
+  row of the admission, the installation row included, is held by another
+  transaction (send the same request again), `409` `RES-002`. The
+  installation is answered in every state, as the observation is.
 - **Bounds**: the owner route's: one time budget of about six seconds per read,
   and the workspace's 30 reads per minute counted together with that route
   (`429` `RATE-001`, `Retry-After: 60`); `503` `usage_stats_unavailable`
