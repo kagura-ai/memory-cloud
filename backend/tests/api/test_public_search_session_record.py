@@ -18,7 +18,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI, Request
@@ -97,6 +97,8 @@ class _Rig:
         self.search = MagicMock()
         self.search.return_value.hybrid_search = AsyncMock(return_value=[])
         self.log_usage = AsyncMock()
+        # What the route's one read of the returned rows answers (#3035, K4a).
+        self.filter_rows: list[Any] = []
 
     async def _incr(self, key: str, amount: int = 1, ttl: int = 60) -> int:
         self.bucket_keys.append(key)
@@ -109,6 +111,7 @@ class _Rig:
         db = MagicMock()
         db.get = AsyncMock(side_effect=_get)
         db.commit = AsyncMock()
+        db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=self.filter_rows)))
 
         async def _db():
             yield db
@@ -196,7 +199,11 @@ def test_a_session_does_not_skip_the_per_minute_bucket(user_id: str) -> None:
 
 
 def test_a_resource_point_hit_answers_the_row_memory_id() -> None:
-    """#2953: the point id of a resource document is not the row's id."""
+    """#2953: the point id of a resource document is not the row's id.
+
+    #3035 (K4a): the row is answered once, at its first position, when the
+    read of the returned rows finds it live in the context.
+    """
     rig = _Rig(None)
     point_id, row_id = str(uuid4()), str(uuid4())
     rig.search.return_value.hybrid_search = AsyncMock(
@@ -205,7 +212,8 @@ def test_a_resource_point_hit_answers_the_row_memory_id() -> None:
             {"id": row_id, "score": 0.5, "payload": {"summary": "written memory"}},
         ]
     )
+    rig.filter_rows.append(SimpleNamespace(id=UUID(row_id), resource_doc_id="doc-1"))
     response = rig.post(cookie=False)
     assert response.status_code == 200, response.text
     ids = [r["memory_id"] for r in response.json()["results"]]
-    assert ids == [row_id, row_id]
+    assert ids == [row_id]

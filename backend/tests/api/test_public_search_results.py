@@ -7,7 +7,12 @@ session that records the order of its calls:
   and deprecated in the schema);
 - a bound key's use is committed right after the context check, before the
   workspace is loaded; a key refused at attribution or by the context check
-  commits nothing, and the anonymous path gains no commit.
+  commits nothing, and the anonymous path gains no commit;
+- each row is answered once, and only the context's live rows (K4a): the
+  search fetches twice ``limit``, repeats are dropped, one read in a
+  savepoint keeps the rows of the context that are not deleted, the list is
+  cut to ``limit``; when that read fails the de-duplicated results are
+  served unfiltered.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 from fastapi import HTTPException
 
 from api.routes import public_search as route
@@ -244,3 +250,167 @@ async def test_a_missing_workspace_after_the_commit_is_still_the_500() -> None:
         await rig.run()
     assert exc.value.status_code == 500
     assert rig.db.calls.count("commit") == 1
+
+
+# ---------------------------------------------------------------------------
+# K4a: each row once, only the context's live rows
+# ---------------------------------------------------------------------------
+
+
+def _hit(memory_id: str, *, point_id: str | None = None, score: float = 0.5) -> dict[str, Any]:
+    """A search hit: a resource point carries the row id in its payload."""
+    payload: dict[str, Any] = {"summary": f"s-{memory_id[:6]}"}
+    if point_id is not None:
+        payload["memory_id"] = memory_id
+    return {"id": point_id or memory_id, "score": score, "payload": payload}
+
+
+def _row(memory_id: str, doc_id: str | None = None) -> SimpleNamespace:
+    from uuid import UUID
+
+    return SimpleNamespace(id=UUID(memory_id), resource_doc_id=doc_id)
+
+
+def _ids(response: Any) -> list[str]:
+    return [r.memory_id for r in response.results]
+
+
+def _event(logs: list[dict[str, Any]], name: str) -> dict[str, Any]:
+    matches = [entry for entry in logs if entry["event"] == name]
+    assert len(matches) == 1, f"expected one {name!r}, got {logs!r}"
+    return matches[0]
+
+
+def _caller(rig: _Rig, bound: bool) -> None:
+    if bound:
+        rig.bound()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+async def test_the_search_fetches_twice_the_limit(bound: bool) -> None:
+    rig = _Rig()
+    _caller(rig, bound)
+    await rig.run(limit=7)
+    assert rig.search_kwargs["k"] == 14
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+async def test_a_repeated_row_is_answered_once_at_its_first_position(bound: bool) -> None:
+    rig = _Rig()
+    _caller(rig, bound)
+    a, b = str(uuid4()), str(uuid4())
+    rig.hits = [_hit(a, point_id=str(uuid4())), _hit(b), _hit(a), _hit(b, point_id=str(uuid4()))]
+    rig.db.rows = [_row(a), _row(b)]
+    response = await rig.run(limit=5)
+    assert _ids(response) == [a, b]
+    assert response.count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+async def test_rows_the_read_does_not_return_are_dropped(bound: bool) -> None:
+    """Another context's row, a tombstoned row: the read does not return them."""
+    rig = _Rig()
+    _caller(rig, bound)
+    live, gone, foreign = str(uuid4()), str(uuid4()), str(uuid4())
+    rig.hits = [_hit(gone), _hit(live), _hit(foreign)]
+    rig.db.rows = [_row(live)]
+    with structlog.testing.capture_logs() as logs:
+        response = await rig.run(limit=5)
+    assert _ids(response) == [live]
+    assert response.count == 1
+    assert _event(logs, "public_search_completed")["results_dropped"] == 2
+    assert _event(logs, "public_search_completed")["result_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_read_is_one_statement_in_a_savepoint_scoped_to_the_context() -> None:
+    rig = _Rig()
+    a = str(uuid4())
+    rig.hits = [_hit(a)]
+    rig.db.rows = [_row(a)]
+    await rig.run()
+    i = rig.db.calls.index("savepoint")
+    assert rig.db.calls[i : i + 3] == ["savepoint", "execute", "savepoint_release"]
+    assert rig.db.calls.count("execute") == 1
+    compiled = rig.db.statements[0].compile()
+    sql = str(compiled)
+    for column in (
+        "memories.id IN",
+        "memories.workspace_id =",
+        "memories.context_id =",
+        "memories.deleted_at IS NULL",
+    ):
+        assert column in sql
+    params = compiled.params
+    assert rig.context.workspace_id in params.values()
+    assert rig.context.id in params.values()
+
+
+@pytest.mark.asyncio
+async def test_a_memory_id_that_is_not_a_uuid_is_dropped() -> None:
+    rig = _Rig()
+    a = str(uuid4())
+    rig.hits = [{"id": "not-a-row", "score": 0.9, "payload": {}}, _hit(a)]
+    rig.db.rows = [_row(a)]
+    response = await rig.run()
+    assert _ids(response) == [a]
+
+
+@pytest.mark.asyncio
+async def test_no_uuid_result_means_no_read_and_no_result() -> None:
+    rig = _Rig()
+    rig.hits = [{"id": "not-a-row", "score": 0.9, "payload": {}}]
+    response = await rig.run()
+    assert response.results == []
+    assert "execute" not in rig.db.calls
+
+
+@pytest.mark.asyncio
+async def test_the_list_is_cut_to_the_limit_after_the_filter() -> None:
+    rig = _Rig()
+    ids = [str(uuid4()) for _ in range(6)]
+    rig.hits = [_hit(i) for i in ids]
+    rig.db.rows = [_row(i) for i in ids if i != ids[0]]
+    with structlog.testing.capture_logs() as logs:
+        response = await rig.run(limit=3)
+    assert _ids(response) == ids[1:4]
+    assert response.count == 3
+    # The cut to ``limit`` is not a drop: only the filter removed one.
+    assert _event(logs, "public_search_completed")["results_dropped"] == 1
+
+
+@pytest.mark.asyncio
+async def test_no_read_when_the_search_returned_nothing() -> None:
+    rig = _Rig()
+    with structlog.testing.capture_logs() as logs:
+        response = await rig.run()
+    assert response.results == []
+    assert response.count == 0
+    assert "execute" not in rig.db.calls
+    assert "savepoint" not in rig.db.calls
+    assert _event(logs, "public_search_completed")["results_dropped"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+async def test_a_failed_read_serves_the_de_duplicated_results_unfiltered(bound: bool) -> None:
+    rig = _Rig()
+    _caller(rig, bound)
+    ids = [str(uuid4()) for _ in range(4)]
+    rig.hits = [_hit(ids[0]), _hit(ids[0]), *(_hit(i) for i in ids[1:])]
+    rig.db.execute_error = RuntimeError("connection reset: secret-dsn-text")
+    with structlog.testing.capture_logs() as logs:
+        response = await rig.run(limit=3)
+    assert _ids(response) == ids[:3]
+    assert response.status == "success"
+    warning = _event(logs, "public_search_filter_unread")
+    assert warning["log_level"] == "warning"
+    assert set(warning) == {"event", "log_level", "error_type"}
+    assert warning["error_type"] == "RuntimeError"
+    assert "secret-dsn-text" not in repr(logs)
+    assert "savepoint_rollback" in rig.db.calls
+    # The repeat was still dropped.
+    assert _event(logs, "public_search_completed")["results_dropped"] == 1

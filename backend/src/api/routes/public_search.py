@@ -25,6 +25,7 @@ from config.plan_tiers import get_plan_tier
 from db.base import get_db
 from db.redis import incrby_counter
 from models.auth import Context, Workspace
+from models.memory import Memory
 from models.public_mcp import PublicMcpEndpoint
 from services.capacity_lock import ensure_not_capacity_locked
 from services.plan_suspension import ensure_public_serving_allowed
@@ -416,6 +417,70 @@ async def _resolve_public_attribution(
 
 
 # ============================================================================
+# Results: each row once, only the context's live rows (#3035, K4a)
+# ============================================================================
+
+
+def _row_uuid(memory_id: str) -> UUID | None:
+    try:
+        return UUID(memory_id)
+    except ValueError:
+        return None
+
+
+async def _filter_results(
+    db: AsyncSession,
+    *,
+    context: Context,
+    results: list[PublicSearchResult],
+    limit: int,
+) -> tuple[list[PublicSearchResult], tuple[str, ...] | None, int]:
+    """Answer each row once, and only the context's live rows (#3035, K4a).
+
+    De-duplicates by ``memory_id`` (the first position wins; always, also when
+    the read below fails), then reads the remaining rows once by primary key,
+    in a savepoint on the request session, and keeps those that live in the
+    context's workspace and context and are not deleted, in search order, cut
+    to ``limit``. A ``memory_id`` that is not a UUID names no row and is
+    dropped. When the read fails the de-duplicated results are served
+    unfiltered (one warning with the error class only): a transient database
+    error does not fail the search.
+
+    Returns:
+        The kept results; the document ids of the kept results (``None``
+        here: no publication was given); and how many results
+        de-duplication and the read removed (the cut to ``limit`` is not
+        counted).
+    """
+    seen: set[str] = set()
+    unique: list[PublicSearchResult] = []
+    for result in results:
+        if result.memory_id not in seen:
+            seen.add(result.memory_id)
+            unique.append(result)
+    ids = {result.memory_id: _row_uuid(result.memory_id) for result in unique}
+    wanted = [row_id for row_id in ids.values() if row_id is not None]
+    if not wanted:
+        kept: list[PublicSearchResult] = []
+        return kept, None, len(results)
+    statement = select(Memory.id, Memory.resource_doc_id).where(
+        Memory.id.in_(wanted),
+        Memory.workspace_id == context.workspace_id,
+        Memory.context_id == context.id,
+        Memory.deleted_at.is_(None),
+    )
+    try:
+        async with db.begin_nested():
+            rows = (await db.execute(statement)).all()
+    except Exception as exc:
+        logger.warning("public_search_filter_unread", error_type=type(exc).__name__)
+        return unique[:limit], None, len(results) - len(unique)
+    live = {row.id for row in rows}
+    filtered = [result for result in unique if ids[result.memory_id] in live]
+    return filtered[:limit], None, len(results) - len(filtered)
+
+
+# ============================================================================
 # Public Search Endpoint
 # ============================================================================
 
@@ -445,6 +510,9 @@ async def public_search(
           req/min per context, shared)
 
     No caller is reranked (#3035): ``use_rerank`` is accepted and ignored.
+
+    Results list each row once and only the context's live rows (#3035), so a
+    search can return fewer than ``limit`` results.
 
     A bound key's last-used time is committed once the key passes the context
     check (404 / 403 above), before the search runs, also when its own
@@ -640,7 +708,9 @@ async def public_search(
             user_id=search_user_id,
             workspace_id=str(context.workspace_id),
             context_id=str(context_id),
-            k=request.limit,
+            # #3035 (K4a): twice the limit, as public MCP fetches, so serving
+            # each row once still fills ``limit`` in the common case.
+            k=2 * request.limit,
             use_rerank=False,
             search_mode=request.search_mode,
             degradation=degradation,
@@ -666,6 +736,11 @@ async def public_search(
             )
             for result in results
         ]
+        # #3035 (K4a): each row once, only the context's live rows, at most
+        # ``limit``; ``count`` follows, so it can be below ``limit``.
+        formatted_results, _doc_ids, results_dropped = await _filter_results(
+            db, context=context, results=formatted_results, limit=request.limit
+        )
 
         response_time_ms = int((utcnow() - start_time).total_seconds() * 1000)
         await log_usage(
@@ -682,6 +757,7 @@ async def public_search(
             "public_search_completed",
             context_id=context_id,
             result_count=len(formatted_results),
+            results_dropped=results_dropped,
             has_schema=schema is not None,
             response_time_ms=response_time_ms,
         )
