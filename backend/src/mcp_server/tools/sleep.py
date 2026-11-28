@@ -28,6 +28,7 @@ from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE
 from models.sleep import budget_limited_phases
 from services.sleep.merge_retention import restore_sleep_tombstone_stmt
 from services.sleep.related_index import undo_related_index
+from services.sleep.supersede_apply import undo_apply_supersede
 from utils.logger import get_logger
 from utils.response_budget import (
     BudgetArgumentError,
@@ -809,6 +810,8 @@ _UNDO_HANDLERS = {
     "update_importance": _undo_update_importance,
     "promote": _undo_promote,
     "archive": _undo_archive,
+    # #3020: the links the supersede-apply phase wrote.
+    "apply_supersede": undo_apply_supersede,
 }
 
 

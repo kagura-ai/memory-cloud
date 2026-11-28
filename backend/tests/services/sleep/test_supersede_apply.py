@@ -721,3 +721,126 @@ class TestWrite:
         assert run.phase.coverage_outcome.rows(returned=False) == [
             (key, FAILURE) for key in run.phase.coverage_outcome.keys
         ]
+
+
+# ------------------------------------------------------------------ rollback
+
+
+class TestUndoApplySupersede:
+    """``undo_apply_supersede`` touches the edge only while it carries this
+    report's marker, and restores the suggestion only after it reversed the
+    link, only into an empty column, marked so Sleep does not apply it again."""
+
+    _CANDIDATE = {"memory_id": "x", "similarity": 0.91, "verification": {"verdict": "supersedes"}}
+
+    @staticmethod
+    def _action(prior_edge=None):
+        return SimpleNamespace(
+            memory_id=uuid4(),
+            target_id=uuid4(),
+            report_id=REPORT_ID,
+            details={
+                "prior_candidate": dict(TestUndoApplySupersede._CANDIDATE),
+                "prior_edge": prior_edge,
+                "verdict_confidence": 0.9,
+                "similarity": 0.91,
+            },
+        )
+
+    @staticmethod
+    def _db(*rowcounts) -> AsyncMock:
+        results = []
+        for count in rowcounts:
+            result = MagicMock()
+            result.rowcount = count
+            results.append(result)
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=results)
+        return db
+
+    @staticmethod
+    def _sql(db, index):
+        stmt = db.execute.await_args_list[index].args[0]
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        return str(compiled), compiled.params
+
+    async def _undo(self, db, action, summary=None):
+        from services.sleep.supersede_apply import undo_apply_supersede
+
+        summary = {} if summary is None else summary
+        await undo_apply_supersede(db, action, SimpleNamespace(user_id=USER), summary)
+        return summary
+
+    @pytest.mark.asyncio
+    async def test_a_link_without_a_prior_edge_is_deleted_by_its_marker(self) -> None:
+        action = self._action()
+        db = self._db(1, 1)
+        summary = await self._undo(db, action)
+        assert summary == {"supersede_links_reversed": 1, "supersede_candidates_restored": 1}
+        sql, params = self._sql(db, 0)
+        assert sql.startswith("DELETE FROM neural_memory_edges WHERE")
+        for column in ("user_id", "src_id", "dst_id", "edge_type", "origin"):
+            assert f"neural_memory_edges.{column} = " in sql
+        assert "CAST(neural_memory_edges.metadata AS JSONB) ->> " in sql
+        values = list(params.values())
+        assert USER in values and action.memory_id in values and action.target_id in values
+        assert "sleep_supersede_apply" in values and str(REPORT_ID) in values
+        assert "supersedes" in values and "semantic" in values
+
+    @pytest.mark.asyncio
+    async def test_a_retyped_edge_is_put_back(self) -> None:
+        prior = {
+            "edge_type": "neural_association",
+            "origin": "hebbian",
+            "weight": 0.3,
+            "confidence": 0.8,
+            "edge_metadata": {"source": "tag_cooccurrence"},
+        }
+        db = self._db(1, 1)
+        summary = await self._undo(db, self._action(prior_edge=prior))
+        assert summary["supersede_links_reversed"] == 1
+        sql, params = self._sql(db, 0)
+        assert sql.startswith("UPDATE neural_memory_edges SET")
+        values = list(params.values())
+        assert "neural_association" in values and "hebbian" in values
+        assert 0.3 in values and 0.8 in values
+        assert "CAST(neural_memory_edges.metadata AS JSONB) ->> " in sql
+
+    @pytest.mark.asyncio
+    async def test_the_restored_suggestion_carries_the_rolled_back_run(self) -> None:
+        action = self._action()
+        db = self._db(1, 1)
+        await self._undo(db, action)
+        sql, params = self._sql(db, 1)
+        assert sql.startswith("UPDATE memories SET supersede_candidate=")
+        assert "memories.supersede_candidate IS NULL" in sql
+        assert "CAST(memories.supersede_candidate AS TEXT) = " in sql
+        assert "memories.deleted_at IS NULL" in sql
+        assert "memories.user_id = " in sql
+        assert "updated_at" not in sql and "version" not in sql
+        restored = next(v for v in params.values() if isinstance(v, dict))
+        assert restored == {**self._CANDIDATE, "sleep_apply_reverted": str(REPORT_ID)}
+
+    @pytest.mark.asyncio
+    async def test_a_changed_link_is_kept_and_nothing_is_restored(self) -> None:
+        db = self._db(0)
+        summary = await self._undo(db, self._action())
+        assert summary == {"supersede_links_kept": 1}
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_suggestion_landed_since_is_kept(self) -> None:
+        db = self._db(1, 0)
+        summary = await self._undo(db, self._action())
+        assert summary == {"supersede_links_reversed": 1}
+
+    @pytest.mark.asyncio
+    async def test_counters_add_to_a_summary_and_touch_nothing_else(self) -> None:
+        summary = {"edges_deleted": 2, "errors": [], "supersede_links_reversed": 1}
+        await self._undo(self._db(1, 1), self._action(), summary)
+        assert summary == {
+            "edges_deleted": 2,
+            "errors": [],
+            "supersede_links_reversed": 2,
+            "supersede_candidates_restored": 1,
+        }

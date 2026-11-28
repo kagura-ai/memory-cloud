@@ -31,10 +31,13 @@ allowance per run. ``undo_apply_supersede`` reverses one action in
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, func, null, select, update
+from sqlalchemy import Text, and_, delete, func, null, or_, select, update
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import (
@@ -66,6 +69,7 @@ from services.supersede_verify import (
     min_confidence_from_env,
     verdict_current,
 )
+from utils.datetime import utcnow
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -496,4 +500,91 @@ class SupersedeApplyPhase:
             newer_id=str(carrier.id),
             older_id=str(target.id),
             retyped_prior_edge=prior_edge is not None,
+        )
+
+
+def _applied_link(user_id: str, action: Any) -> Any:
+    """The edge an ``apply_supersede`` action wrote, while it still carries the
+    run's marker: the run user's ``newer -> older`` ``supersedes`` row, origin
+    ``semantic``, metadata naming this phase and this report. A row a person
+    re-declared since (origin ``declared``) or any writer rewrote without the
+    marker no longer matches."""
+    metadata = sql_cast(NeuralMemoryEdge.edge_metadata, JSONB)
+    return and_(
+        NeuralMemoryEdge.user_id == user_id,
+        NeuralMemoryEdge.src_id == action.memory_id,
+        NeuralMemoryEdge.dst_id == action.target_id,
+        NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+        NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
+        metadata["source"].astext == EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY,
+        metadata["report_id"].astext == str(action.report_id),
+    )
+
+
+def _rowcount(result: Any) -> int:
+    # DML through AsyncSession.execute() is a CursorResult at runtime (#1442).
+    return cast(CursorResult[Any], result).rowcount or 0
+
+
+async def undo_apply_supersede(
+    db: AsyncSession, action: Any, ctx: Any, summary: dict[str, Any]
+) -> None:
+    """Reverse one ``apply_supersede`` action in ``rollback_sleep_run``.
+
+    The link is removed (or the edge it retyped put back from
+    ``details.prior_edge``) only while it is the one this run wrote. Then the
+    suggestion is restored from ``details.prior_candidate``, with
+    ``SLEEP_APPLY_REVERTED_KEY`` set to this report, only into an empty
+    column: a suggestion detected or dismissed since, or a memory forgotten
+    since, is left as it is. A link changed since is a person's or another
+    writer's decision and stands (``supersede_links_kept``); that is not an
+    error. Counters are added only when used, so a run without such actions
+    returns the summary it returned before #3020.
+    """
+    details = action.details or {}
+    marker = _applied_link(ctx.user_id, action)
+    prior_edge = details.get("prior_edge")
+    if isinstance(prior_edge, dict) and prior_edge:
+        result = await db.execute(
+            update(NeuralMemoryEdge)
+            .where(marker)
+            .values(
+                edge_type=prior_edge.get("edge_type") or "neural_association",
+                origin=prior_edge.get("origin") or "hebbian",
+                weight=prior_edge.get("weight", 0.0),
+                confidence=prior_edge.get("confidence", 1.0),
+                edge_metadata=prior_edge.get("edge_metadata"),
+                last_updated=utcnow(),
+            )
+        )
+    else:
+        result = await db.execute(delete(NeuralMemoryEdge).where(marker))
+    if not _rowcount(result):
+        summary["supersede_links_kept"] = summary.get("supersede_links_kept", 0) + 1
+        return
+    summary["supersede_links_reversed"] = summary.get("supersede_links_reversed", 0) + 1
+
+    prior_candidate = details.get("prior_candidate")
+    if not isinstance(prior_candidate, dict):
+        return
+    column = Memory.supersede_candidate
+    restored = await db.execute(
+        update(Memory)
+        .where(
+            Memory.id == action.memory_id,
+            Memory.user_id == ctx.user_id,
+            Memory.deleted_at.is_(None),
+            # #2022: no suggestion is SQL NULL or the JSON null.
+            or_(column.is_(None), sql_cast(column, Text) == "null"),
+        )
+        .values(
+            supersede_candidate={
+                **prior_candidate,
+                SLEEP_APPLY_REVERTED_KEY: str(action.report_id),
+            }
+        )
+    )
+    if _rowcount(restored):
+        summary["supersede_candidates_restored"] = (
+            summary.get("supersede_candidates_restored", 0) + 1
         )

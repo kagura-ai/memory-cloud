@@ -11,11 +11,14 @@ Not executed in the local unit run — needs the DB container.
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select, text, update
 
 from models.auth import WorkspaceMember
@@ -27,6 +30,7 @@ from tests.integration._supersede_apply_support import (
     add_user,
     apply_actions,
     candidate_column,
+    committed_cleanup,
     edge_row,
     new_report,
     run_phase,
@@ -45,6 +49,13 @@ def _default_settings(monkeypatch):
 
 def _base():
     return utcnow() - timedelta(days=10)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def committed(db_session):
+    """For the one test that commits: its rows are deleted and checked after it."""
+    async with committed_cleanup(db_session) as ids:
+        yield ids
 
 
 # ------------------------------------------------------------------- applied
@@ -441,3 +452,185 @@ async def test_a_shadow_merge_undo_leaves_an_applied_link_standing(db_session, p
         )
     else:
         assert after is None
+
+
+# ------------------------------------------------------------------ rollback
+
+
+async def _undo(db, s, action) -> dict:
+    from services.sleep.supersede_apply import undo_apply_supersede
+
+    summary: dict = {}
+    await undo_apply_supersede(db, action, SimpleNamespace(user_id=s.owner), summary)
+    await db.flush()
+    return summary
+
+
+@pytest.mark.asyncio
+async def test_rollback_removes_the_link_and_restores_the_suggestion_once(db_session):
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    newer_id, older_id = newer.id, older.id
+    stored = dict(newer.supersede_candidate)
+    report = await new_report(db, s, utcnow() - timedelta(hours=3))
+    await run_phase(db, s, report)
+    (action,) = await apply_actions(db, report.id)
+
+    summary = await _undo(db, s, action)
+
+    assert summary == {"supersede_links_reversed": 1, "supersede_candidates_restored": 1}
+    assert await edge_row(db, s.owner, newer_id, older_id) is None
+    _, _, restored = await candidate_column(db, newer_id)
+    assert restored == {**stored, "sleep_apply_reverted": str(report.id)}
+
+    # Sleep leaves the restored suggestion alone ...
+    again = await new_report(db, s, utcnow() - timedelta(hours=2))
+    _, result = await run_phase(db, s, again)
+    assert result.details["candidates_considered"] == 0
+    assert await edge_row(db, s.owner, newer_id, older_id) is None
+
+    # ... until the pair is detected again (a fresh dict without the key).
+    await db.execute(
+        update(Memory).where(Memory.id == newer_id).values(supersede_candidate=dict(stored))
+    )
+    third = await new_report(db, s, utcnow() - timedelta(hours=1))
+    _, result = await run_phase(db, s, third)
+    assert result.details["applied"] == 1
+    assert (await edge_row(db, s.owner, newer_id, older_id)).edge_metadata == {
+        "source": "sleep_supersede_apply",
+        "report_id": str(third.id),
+    }
+
+
+@pytest.mark.asyncio
+async def test_rollback_puts_a_retyped_edge_back(db_session):
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    newer_id, older_id = newer.id, older.id
+    await add_edge(
+        db,
+        s,
+        newer,
+        older,
+        "neural_association",
+        origin="hebbian",
+        weight=0.3,
+        metadata={"source": "tag_cooccurrence"},
+    )
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+    await run_phase(db, s, report)
+    (action,) = await apply_actions(db, report.id)
+
+    summary = await _undo(db, s, action)
+
+    assert summary["supersede_links_reversed"] == 1
+    edge = await edge_row(db, s.owner, newer_id, older_id)
+    assert (edge.edge_type, edge.origin, edge.weight, edge.edge_metadata) == (
+        "neural_association",
+        "hebbian",
+        0.3,
+        {"source": "tag_cooccurrence"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_rollback_keeps_a_link_a_person_declared_since(db_session):
+    from services.edge_service import create_declared_edge
+
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    newer_id, older_id = newer.id, older.id
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+    await run_phase(db, s, report)
+    (action,) = await apply_actions(db, report.id)
+    await create_declared_edge(
+        db,
+        user_id=s.owner,
+        source_id=newer_id,
+        target_id=older_id,
+        edge_type="supersedes",
+        weight=1.0,
+        confidence=1.0,
+        workspace_id=s.ws_id,
+        context_id=s.ctx_id,
+        overwrite=True,
+    )
+    await db.flush()
+
+    summary = await _undo(db, s, action)
+
+    assert summary == {"supersede_links_kept": 1}
+    edge = await edge_row(db, s.owner, newer_id, older_id)
+    assert (edge.edge_type, edge.origin) == ("supersedes", "declared")
+    assert (await candidate_column(db, newer_id))[0] is True
+
+
+@pytest.mark.asyncio
+async def test_rollback_keeps_a_suggestion_that_landed_since(db_session):
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    newer_id, older_id = newer.id, older.id
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+    await run_phase(db, s, report)
+    (action,) = await apply_actions(db, report.id)
+    fresh = {"memory_id": str(uuid4()), "similarity": 0.88, "detected_at": "2026-02-01T00:00:00Z"}
+    await db.execute(update(Memory).where(Memory.id == newer_id).values(supersede_candidate=fresh))
+
+    summary = await _undo(db, s, action)
+
+    assert summary == {"supersede_links_reversed": 1}
+    assert await edge_row(db, s.owner, newer_id, older_id) is None
+    assert (await candidate_column(db, newer_id))[2] == fresh
+
+
+@pytest.mark.asyncio
+async def test_rollback_sleep_run_end_to_end(committed):
+    """The one committed test: an orchestrator run with the switch on, then
+    ``handle_rollback_sleep_run``."""
+    from mcp_server.tools.sleep import handle_rollback_sleep_run
+    from models.sleep import SleepReport
+
+    db = committed.db
+    s = await scope(db, ids=committed)
+    pairs = [await verified_pair(db, s, created_at=_base() + timedelta(hours=i)) for i in range(2)]
+    ids = [(newer.id, older.id, dict(newer.supersede_candidate)) for newer, older in pairs]
+    with patch("services.operation_history_writer.record_operation"):
+        report = await run_sleep(db, s, started_at=utcnow() - timedelta(hours=1))
+    report_id = report.id
+    assert report.dedup_result["supersede_apply"]["details"]["applied"] == 2
+    assert report.coverage_state["supersede_apply"]["sweep"]["passes"] == 1
+
+    async def _get_db():
+        yield db
+
+    with (
+        patch("db.base.get_db", new=_get_db),
+        patch(
+            "mcp_server.tools.sleep._authorize_report_rollback",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("mcp_server.tools.sleep._log_tool_usage", new=AsyncMock()),
+        patch("services.operation_history_writer.record_operation"),
+    ):
+        response = await handle_rollback_sleep_run({"report_id": str(report_id)}, s.owner, None)
+    data = json.loads(response[0].text)
+
+    assert data["status"] == "rolled_back", data
+    summary = data["rollback_summary"]
+    assert summary["errors"] == []
+    assert summary["supersede_links_reversed"] == 2
+    assert summary["supersede_candidates_restored"] == 2
+    assert "supersede_links_kept" not in summary
+    status = (
+        await db.execute(text("SELECT status FROM sleep_reports WHERE id = :id"), {"id": report_id})
+    ).scalar_one()
+    assert status == "rolled_back"
+    assert (await db.get(SleepReport, report_id)) is not None
+    for newer_id, older_id, stored in ids:
+        assert await edge_row(db, s.owner, newer_id, older_id) is None
+        _, _, restored = await candidate_column(db, newer_id)
+        assert restored == {**stored, "sleep_apply_reverted": str(report_id)}

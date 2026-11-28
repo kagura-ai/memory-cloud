@@ -1583,3 +1583,11 @@ class TestGetSleepReportPaging:
             {"report_id": str(uuid4()), **extra}, "u-1743", uuid4()
         )
         assert json.loads(result[0].text)["error"] == "validation_error"
+
+
+def test_apply_supersede_actions_reach_their_undoer():
+    """#3020: rollback_sleep_run reverses the links Sleep applied."""
+    from mcp_server.tools.sleep import _UNDO_HANDLERS
+    from services.sleep.supersede_apply import undo_apply_supersede
+
+    assert _UNDO_HANDLERS["apply_supersede"] is undo_apply_supersede
