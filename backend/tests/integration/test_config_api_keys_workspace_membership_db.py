@@ -13,11 +13,16 @@ On real PostgreSQL rows, over HTTP with the session dependency:
 * a public-bound key is held through the workspace of its bound context: the
   same rules for a bound key whose owner has no membership row there, and for
   a member's bound key; a bound key of a soft-deleted context is not rotated
-  (the same 404).
+  (the same 404);
+* lock order: a bound key's rotation locks its context (``FOR KEY SHARE``)
+  before it revokes the key, the order user deletion takes (the doomed
+  contexts, then the keys bound to them); an edit of the context does not
+  hold the rotation up.
 """
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -26,7 +31,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -293,6 +298,85 @@ async def test_a_bound_key_of_a_soft_deleted_context_is_not_rotated(world, bound
     assert (response.status_code, response.json()) == (404, NOT_FOUND)
     assert await _keys_of(world, world.member) == before
     assert await _history(world) == []
+
+
+async def _blocked_by(world, holder_pid: int, task: asyncio.Task, timeout: float = 15):
+    """The statement the backend ``holder_pid`` blocks, or None once ``task``
+    finished without waiting on it."""
+
+    async def poll() -> str | None:
+        while not task.done():
+            async with world.factory() as observer:
+                query = await observer.scalar(
+                    text(
+                        "SELECT query FROM pg_stat_activity "
+                        "WHERE :pid = ANY(pg_blocking_pids(pid)) LIMIT 1"
+                    ),
+                    {"pid": holder_pid},
+                )
+            if query is not None:
+                return query
+            await asyncio.sleep(0.02)
+        return None
+
+    return await asyncio.wait_for(poll(), timeout)
+
+
+@pytest.mark.timeout(90)
+async def test_a_bound_key_rotation_waits_on_its_context_before_the_key(world, bound):
+    """A deletion holding the context (as user deletion locks the doomed
+    contexts before the keys bound to them) makes the rotation wait before it
+    revokes anything; the deletion then takes the key at once, and the
+    rotation finds the context gone and answers 404."""
+    before = await _keys_of(world, world.member)
+    async with world.factory() as holder:
+        await holder.execute(
+            select(Context.id).where(Context.id == bound.context_id).with_for_update()
+        )
+        pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(
+            _call(world, "POST", f"/{bound.member_key}/regenerate", world.member)
+        )
+        try:
+            waiting = await _blocked_by(world, pid, task)
+            assert waiting is not None, "the rotation never waited on the context"
+            assert waiting.startswith("SELECT contexts.id"), waiting
+            assert "FOR KEY SHARE" in waiting, waiting
+            await holder.execute(
+                select(APIKey.id)
+                .where(APIKey.bound_context_id == bound.context_id)
+                .order_by(APIKey.id)
+                .with_for_update(nowait=True)
+            )
+            await holder.execute(delete(APIKey).where(APIKey.bound_context_id == bound.context_id))
+            await holder.execute(delete(Context).where(Context.id == bound.context_id))
+            await holder.commit()
+        finally:
+            await holder.rollback()
+            response = await asyncio.wait_for(task, 30)
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert await _keys_of(world, world.member) == [k for k in before if k[0] != bound.member_key]
+    assert await _history(world) == []
+
+
+@pytest.mark.timeout(90)
+async def test_a_bound_key_rotation_does_not_wait_on_an_edit_of_its_context(world, bound):
+    """``FOR KEY SHARE``, the lock the new key's foreign key takes anyway: a
+    transaction editing the context (``FOR NO KEY UPDATE``) does not hold the
+    rotation up."""
+    async with world.factory() as holder:
+        await holder.execute(
+            update(Context).where(Context.id == bound.context_id).values(description="edited")
+        )
+        try:
+            response = await asyncio.wait_for(
+                _call(world, "POST", f"/{bound.member_key}/regenerate", world.member), 10
+            )
+        finally:
+            await holder.rollback()
+
+    assert response.status_code == 200, response.text
 
 
 @pytest.mark.parametrize(("method", "suffix"), [("DELETE", ""), ("POST", "/revoke")])

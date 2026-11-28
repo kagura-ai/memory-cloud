@@ -92,6 +92,25 @@ async def _key_workspace_held(db: AsyncSession, key: APIKey, *, live_context: bo
     return True
 
 
+async def _bound_context_locked(db: AsyncSession, key: APIKey) -> bool:
+    """Lock a public-bound key's context ``FOR KEY SHARE``; True for any other key.
+
+    Lock order: the bound context before the key, the order user deletion
+    takes (the doomed contexts, then the keys bound to them). ``FOR KEY
+    SHARE`` is the lock the replacement's foreign key takes anyway: it waits
+    on a deletion of the context, not on an edit of it. False when the
+    context is gone or soft-deleted by the time the lock is granted.
+    """
+    if key.bound_context_id is None:
+        return True
+    locked = await db.execute(
+        select(Context.id)
+        .where(Context.id == key.bound_context_id, Context.deleted_at.is_(None))
+        .with_for_update(read=True, key_share=True)
+    )
+    return locked.scalar_one_or_none() is not None
+
+
 def _record_workspace_key(db: AsyncSession, key: APIKey, actor: str, operation: str) -> None:
     from services.operation_history_writer import record_operation
 
@@ -575,9 +594,14 @@ async def regenerate_api_key(
 
         # #2928: a workspace-scoped key is rotated only while its owner holds
         # the workspace, the condition key verification applies, and a bound
-        # key only while its context is live; otherwise the same 404, before
-        # anything is minted or recorded.
-        if not old_key or not await _key_workspace_held(db, old_key, live_context=True):
+        # key only while its context is live, locked before the key is
+        # revoked; otherwise the same 404, before anything is minted or
+        # recorded.
+        if (
+            not old_key
+            or not await _key_workspace_held(db, old_key, live_context=True)
+            or not await _bound_context_locked(db, old_key)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="API key not found or not owned by you",
