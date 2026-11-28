@@ -9,7 +9,10 @@ On real PostgreSQL rows, over HTTP with the session dependency:
   record goes to the key's workspace only when the owner holds it (a key whose
   owner does not is recorded like a global key: not at all);
 * a member's key: regenerate, revoke and delete record into the workspace as
-  before.
+  before;
+* a public-bound key is held through the workspace of its bound context: the
+  same rules for a bound key whose owner has no membership row there, and for
+  a member's bound key.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from auth.api_keys import APIKeyManager
 from auth.workspace_roles import WorkspaceRole
-from models.auth import APIKey, User, Workspace, WorkspaceMember
+from models.auth import APIKey, Context, User, Workspace, WorkspaceMember
 from models.operation_history import OperationHistory
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -219,3 +222,89 @@ async def test_listing_ones_own_keys_shows_every_key(world):
             )
             == 1
         )
+
+
+# ---------------------------------------------------------------------------
+# Public-bound keys: held through the workspace of the bound context
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def bound(world):
+    """A public context of X with two public-bound keys: the member's, and
+    one of the outsider, who holds no membership row in X."""
+    context_id = uuid4()
+    async with world.factory() as db:
+        db.add(
+            Context(
+                id=context_id,
+                workspace_id=world.x,
+                name=f"ck-pub-{uuid4().hex[:8]}",
+                created_by=world.member,
+                is_public=True,
+            )
+        )
+        await db.flush()
+        manager = APIKeyManager(db)
+        _, member_bound = await manager.create_key(
+            name="member-bound", user_id=world.member, bound_context_id=context_id
+        )
+        _, outsider_bound = await manager.create_key(
+            name="outside-bound", user_id=world.outsider, bound_context_id=context_id
+        )
+        await db.commit()
+        bound = SimpleNamespace(
+            member_key=member_bound.public_id, outsider_key=outsider_bound.public_id
+        )
+    try:
+        yield bound
+    finally:
+        async with world.factory() as db:
+            await db.execute(delete(APIKey).where(APIKey.bound_context_id == context_id))
+            await db.execute(delete(Context).where(Context.id == context_id))
+            await db.commit()
+
+
+async def test_a_bound_key_is_rotated_only_while_its_owner_holds_the_contexts_workspace(
+    world, bound
+):
+    before = await _keys_of(world, world.outsider)
+
+    response = await _call(world, "POST", f"/{bound.outsider_key}/regenerate", world.outsider)
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert await _keys_of(world, world.outsider) == before
+    assert await _history(world) == []
+
+
+@pytest.mark.parametrize(("method", "suffix"), [("DELETE", ""), ("POST", "/revoke")])
+async def test_deleting_or_revoking_a_bound_key_records_only_into_a_held_workspace(
+    world, bound, method, suffix
+):
+    response = await _call(world, method, f"/{bound.outsider_key}{suffix}", world.outsider)
+
+    assert response.status_code == 204, response.text
+    remaining = dict(await _keys_of(world, world.outsider))
+    assert remaining.get(bound.outsider_key, True) is True  # deleted or revoked
+    assert await _history(world) == []
+
+
+async def test_a_members_bound_key_regenerates_and_records_into_the_workspace(world, bound):
+    response = await _call(world, "POST", f"/{bound.member_key}/regenerate", world.member)
+
+    assert response.status_code == 200, response.text
+    new_key = response.json()["id"]
+    assert await _history(world) == [
+        ("credential.issued", new_key),
+        ("credential.revoked", bound.member_key),
+    ]
+
+
+@pytest.mark.parametrize(("method", "suffix"), [("DELETE", ""), ("POST", "/revoke")])
+async def test_a_members_bound_key_delete_or_revoke_records_into_the_workspace(
+    world, bound, method, suffix
+):
+    response = await _call(world, method, f"/{bound.member_key}{suffix}", world.member)
+
+    assert response.status_code == 204, response.text
+    assert await _history(world) == [("credential.revoked", bound.member_key)]

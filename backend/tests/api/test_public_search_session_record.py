@@ -72,7 +72,12 @@ class _Rig:
     def __init__(self, record: dict[str, Any] | None) -> None:
         workspace_id = uuid4()
         self.context = SimpleNamespace(
-            id=uuid4(), workspace_id=workspace_id, is_public=True, resource_id=None, name="pub"
+            id=uuid4(),
+            workspace_id=workspace_id,
+            is_public=True,
+            resource_id=None,
+            name="pub",
+            deleted_at=None,
         )
         self.workspace = Workspace(
             id=workspace_id, name="w", plan_name="pro", owner_user_id=OWNER_ID

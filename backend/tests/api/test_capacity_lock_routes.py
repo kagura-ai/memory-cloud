@@ -436,10 +436,12 @@ class TestPublicSearch:
         from api.routes import public_search as ps
 
         ws_id = uuid4()
-        ctx = SimpleNamespace(id=uuid4(), workspace_id=ws_id, is_public=True)
+        ctx = SimpleNamespace(id=uuid4(), workspace_id=ws_id, is_public=True, deleted_at=None)
         # A public allowance, so the #1939 anonymous plan pause (which runs
         # first) lets the call through to the capacity check under test.
-        workspace = SimpleNamespace(id=ws_id, plan_name="free", effective_public_calls_per_day=1000)
+        workspace = SimpleNamespace(
+            id=ws_id, plan_name="free", effective_public_calls_per_day=1000, deleted_at=None
+        )
         order = order if order is not None else []
 
         async def get(model, _id):

@@ -16,7 +16,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.api_keys import APIKeyManager, key_owner_holds_workspace
+from auth.api_keys import (
+    APIKeyManager,
+    bound_key_owner_holds_context_workspace,
+    key_owner_holds_workspace,
+)
 from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE, reject_reserved_key_name
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
@@ -70,13 +74,20 @@ async def get_api_key_manager(db: AsyncSession = Depends(get_db)) -> APIKeyManag
 async def _key_workspace_held(db: AsyncSession, key: APIKey) -> bool:
     """Whether the key's owner holds the key's workspace (#2928).
 
-    True for a key without a workspace (global or public-bound). A
-    workspace-scoped key needs the condition key verification applies: a live
-    workspace its owner owns or has a membership row in.
+    A workspace-scoped key needs the condition key verification applies: a
+    live workspace its owner owns or has a membership row in. A public-bound
+    key needs the same of the workspace of its bound context, the condition
+    the REST public search applies. True for a global key.
     """
-    if key.workspace_id is None:
-        return True
-    return await key_owner_holds_workspace(db, user_id=key.user_id, workspace_id=key.workspace_id)
+    if key.workspace_id is not None:
+        return await key_owner_holds_workspace(
+            db, user_id=key.user_id, workspace_id=key.workspace_id
+        )
+    if key.bound_context_id is not None:
+        return await bound_key_owner_holds_context_workspace(
+            db, user_id=key.user_id, context_id=key.bound_context_id
+        )
+    return True
 
 
 def _record_workspace_key(db: AsyncSession, key: APIKey, actor: str, operation: str) -> None:
@@ -541,7 +552,8 @@ async def regenerate_api_key(
 
     Issue #169: Secret regeneration feature. Issue #1752: the owner is emailed
     a security notice after the commit. #2928: a workspace-scoped key needs its
-    owner to hold the workspace (404 otherwise, as for a key that is not yours).
+    owner to hold the workspace, a public-bound key the workspace of its bound
+    context (404 otherwise, as for a key that is not yours).
 
     WARNING: This immediately invalidates the old key. Update all applications.
     """

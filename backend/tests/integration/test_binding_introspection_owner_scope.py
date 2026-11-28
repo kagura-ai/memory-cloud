@@ -23,8 +23,9 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.workspace_roles import WorkspaceRole
 from mcp_server.tools.api_keys import handle_describe_binding, handle_list_my_bindings
-from models.auth import APIKey, Context, User, Workspace
+from models.auth import APIKey, Context, User, Workspace, WorkspaceMember
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -32,8 +33,9 @@ async def two_users_with_bindings(db_session: AsyncSession) -> AsyncIterator[Sim
     """User A and User B each own one public-bound API key.
 
     A's key binds ctx_a; B's key binds ctx_b (both contexts live in A's
-    workspace — workspace membership is irrelevant to the owner-scoping under
-    test, which keys on user_id). Yields ids for the assertions.
+    workspace, which A owns and B is a member of: a binding is listed only
+    while its owner holds the context's workspace). Yields ids for the
+    assertions.
     """
     user_a = f"a_{uuid4().hex[:8]}"
     user_b = f"b_{uuid4().hex[:8]}"
@@ -69,6 +71,9 @@ async def two_users_with_bindings(db_session: AsyncSession) -> AsyncIterator[Sim
         )
     )
     await db_session.flush()  # workspace
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace_id, user_id=user_b, role=WorkspaceRole.MEMBER)
+    )
     db_session.add(Context(id=ctx_a, workspace_id=workspace_id, name="ctx-a", created_by=user_a))
     db_session.add(Context(id=ctx_b, workspace_id=workspace_id, name="ctx-b", created_by=user_b))
     await db_session.flush()  # contexts
@@ -102,6 +107,9 @@ async def two_users_with_bindings(db_session: AsyncSession) -> AsyncIterator[Sim
     )
 
     await db_session.execute(APIKey.__table__.delete().where(APIKey.user_id.in_([user_a, user_b])))
+    await db_session.execute(
+        WorkspaceMember.__table__.delete().where(WorkspaceMember.workspace_id == workspace_id)
+    )
     await db_session.execute(Context.__table__.delete().where(Context.workspace_id == workspace_id))
     await db_session.execute(Workspace.__table__.delete().where(Workspace.id == workspace_id))
     await db_session.execute(User.__table__.delete().where(User.user_id.in_([user_a, user_b])))
