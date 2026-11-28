@@ -12,8 +12,13 @@ harmless.
 Doc keys of resources that have had no live public endpoint since before the
 cutoff are deleted too: no retained event can name them any more.
 
-Daily visitor rows (#3035) whose UTC day is before the cutoff's day go last,
-in batches, whatever the switches say.
+Daily visitor rows (#3035) whose UTC day is before the cutoff's day go next,
+in batches, whatever the switches say. Then the per-day counts (#3053) of
+every day that starts before the cutoff (the days the purge may have taken
+events of): their closed marks first, then their counts in batches.
+
+An hourly job (#3053) closes the finished days of the per-day counts
+(``services/public_mcp_usage_rollup.py``).
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
 from db.base import get_db
+from services.public_mcp_usage_rollup import close_usage_days, first_whole_day
 from tasks.job_runs import JobResult, job_failed
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -61,6 +67,17 @@ _DELETE_VISITOR_BATCH = text(
     "DELETE FROM public_mcp_daily_visitors WHERE (endpoint_id, day, visitor_key) IN ("
     "  SELECT endpoint_id, day, visitor_key FROM public_mcp_daily_visitors"
     "  WHERE day < :cutoff_day LIMIT :limit"
+    ") RETURNING day"
+)
+
+# #3053: the closed marks, then the counts, of the days before the first
+# whole retained day.
+_DELETE_CLOSED_DAYS = text("DELETE FROM public_mcp_usage_closed_days WHERE day < :first_kept_day")
+_DELETE_DAY_COUNT_BATCH = text(
+    "DELETE FROM public_mcp_usage_day_counts "
+    "WHERE (endpoint_id, day, workspace_id, tool, outcome, route, caller) IN ("
+    "  SELECT endpoint_id, day, workspace_id, tool, outcome, route, caller"
+    "  FROM public_mcp_usage_day_counts WHERE day < :first_kept_day LIMIT :limit"
     ") RETURNING day"
 )
 
@@ -119,11 +136,29 @@ async def purge_public_mcp_usage_events(
         visitors += len(gone)
         if len(gone) < batch_size:
             break
+    # #3053: a day the purge may have taken events of is no longer closed,
+    # and its counts go. No statistics window reaches such a day.
+    first_kept_day = first_whole_day(cutoff)
+    unclosed = await db.execute(_DELETE_CLOSED_DAYS, {"first_kept_day": first_kept_day})
+    await db.commit()
+    day_counts = 0
+    while True:
+        gone = (
+            await db.execute(
+                _DELETE_DAY_COUNT_BATCH, {"first_kept_day": first_kept_day, "limit": batch_size}
+            )
+        ).all()
+        await db.commit()
+        day_counts += len(gone)
+        if len(gone) < batch_size:
+            break
     logger.info(
         "public_mcp_usage_purged",
         deleted=total,
         doc_keys_deleted=int(getattr(keys, "rowcount", 0) or 0),
         visitors_deleted=visitors,
+        closed_days_deleted=int(getattr(unclosed, "rowcount", 0) or 0),
+        day_counts_deleted=day_counts,
     )
     return total
 
@@ -141,8 +176,21 @@ async def purge_public_mcp_usage_events_task() -> JobResult:
     return None
 
 
+async def close_public_mcp_usage_days_task() -> JobResult:
+    """APScheduler entry point of the hourly close (#3053); owns its session."""
+    async for db in get_db():
+        try:
+            closed = await close_usage_days(db)
+        except Exception as exc:
+            logger.exception("public_mcp_usage_close_failed")
+            await db.rollback()
+            return job_failed(exc)
+        return {"closed": closed}
+    return None
+
+
 def schedule_public_mcp_usage_tasks(scheduler: AsyncIOScheduler) -> None:
-    """Register the daily usage event purge.
+    """Register the daily usage event purge and the hourly close of finished days.
 
     Args:
         scheduler: The shared APScheduler instance.
@@ -155,3 +203,10 @@ def schedule_public_mcp_usage_tasks(scheduler: AsyncIOScheduler) -> None:
         replace_existing=True,
     )
     logger.info("scheduled_public_mcp_usage_purge", cron="04:50 UTC")
+    scheduler.add_job(
+        close_public_mcp_usage_days_task,
+        trigger=CronTrigger(minute=20),  # hourly: a day closes at 00:20 the day after
+        id="close_public_mcp_usage_days",
+        name="Close public MCP usage days (#3053)",
+        replace_existing=True,
+    )

@@ -13,6 +13,7 @@ Implements scheduled tasks for:
 - Capacity-over purge sweep (daily 04:00 UTC) — Issue #1969
 - Pending referral grant sweep (every 5 minutes) — Issue #2563
 - Public MCP usage event retention (daily 04:50 UTC) — Issue #2678
+- Public MCP usage day counts: close the finished days (hourly at :20) — Issue #3053
 - Expired operation history purge (daily 05:10 UTC) — Issue #2739
 - Operations status: LLM lane snapshot (every 5 minutes) and the opt-in
   LLM lane probe — Issue #2768

@@ -107,6 +107,11 @@ class TestCleanupJobs:
             mod, "purge_public_mcp_usage_events", AsyncMock(side_effect=TimeoutError())
         )
         assert await mod.purge_public_mcp_usage_events_task() == _failed(TimeoutError)
+        # #3053: the hourly close of finished days.
+        monkeypatch.setattr(mod, "close_usage_days", AsyncMock(return_value=2))
+        assert await mod.close_public_mcp_usage_days_task() == {"closed": 2}
+        monkeypatch.setattr(mod, "close_usage_days", AsyncMock(side_effect=OSError()))
+        assert await mod.close_public_mcp_usage_days_task() == _failed(OSError)
 
 
 # ---------------------------------------------------------------------------

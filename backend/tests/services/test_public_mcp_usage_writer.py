@@ -50,6 +50,8 @@ class FakeDB:
         self.behaviours = list(behaviours or [])
         self.default = default
         self.committed: list[dict[str, list[dict]]] = []
+        # #3053: the statements of each committed transaction, in order.
+        self.logs: list[list[str]] = []
         self.attempts = 0
 
     def factory(self) -> FakeSession:
@@ -71,6 +73,7 @@ class FakeSession:
         self.db = db
         self.behaviour = behaviour
         self.pending: dict[str, list[dict]] = {}
+        self.log: list[str] = []
 
     async def __aenter__(self) -> FakeSession:
         return self
@@ -78,18 +81,32 @@ class FakeSession:
     async def __aexit__(self, *exc: object) -> bool:
         return False
 
-    async def execute(self, stmt: Any, params: list[dict] | None = None) -> None:
+    async def execute(self, stmt: Any, params: Any = None) -> None:
         if self.behaviour == "slow":
             await asyncio.sleep(30)
         if self.behaviour == "raise":
             raise OSError("database unavailable")
-        self.pending.setdefault(stmt.table.name, []).extend(params or [])
+        name = _table(stmt)
+        if name is None:
+            # A text statement (#3053: the day locks and the day counts).
+            self.log.append(str(stmt))
+            self.pending.setdefault("sql", []).append({"sql": str(stmt), "params": params})
+            return
+        self.log.append(name)
+        self.pending.setdefault(name, []).extend(params or [])
 
     def begin_nested(self) -> _Nested:
         return _Nested()
 
     async def commit(self) -> None:
         self.db.committed.append(self.pending)
+        self.db.logs.append(self.log)
+
+
+def _table(stmt: Any) -> str | None:
+    """The table an INSERT writes, or None for a text statement."""
+    table = getattr(stmt, "table", None)
+    return getattr(table, "name", None)
 
 
 def _writer(db: FakeDB, **overrides: Any) -> PublicMcpUsageWriter:
@@ -546,8 +563,8 @@ async def test_a_failed_visitor_write_is_retried_once_then_dropped(writer_today,
             return _VisitorFailSession(self, "ok")
 
     class _VisitorFailSession(FakeSession):
-        async def execute(self, stmt: Any, params: list[dict] | None = None) -> None:
-            if stmt.table.name == "public_mcp_daily_visitors":
+        async def execute(self, stmt: Any, params: Any = None) -> None:
+            if _table(stmt) == "public_mcp_daily_visitors":
                 raise OSError("database unavailable")
             await super().execute(stmt, params)
 
@@ -596,8 +613,8 @@ async def test_a_visitor_write_cancelled_at_shutdown_is_counted(writer_today, mo
     monkeypatch.setattr(writer_module, "logger", log)
 
     class _HangingVisitorSession(FakeSession):
-        async def execute(self, stmt: Any, params: list[dict] | None = None) -> None:
-            if stmt.table.name == "public_mcp_daily_visitors":
+        async def execute(self, stmt: Any, params: Any = None) -> None:
+            if _table(stmt) == "public_mcp_daily_visitors":
                 await asyncio.sleep(30)
             await super().execute(stmt, params)
 
@@ -654,3 +671,73 @@ async def test_doc_key_rows_are_sorted():
         (r["resource_pk"], r["doc_key"]) for r in rows
     )
     assert rows[0]["resource_pk"] == b
+
+
+# ----------------------------------------------------------------------------
+# #3053: the day counts move with the events, in their transaction
+# ----------------------------------------------------------------------------
+
+
+async def test_day_counts_follow_the_events_in_their_transaction():
+    """After the events and doc keys: one shared lock per UTC day of the
+    batch's calls, oldest first, then the counts of the rows this transaction
+    inserted; one commit for all of it."""
+    from datetime import time as day_time
+
+    from models.public_mcp_usage import PMU_CALLER_ANONYMOUS, PMU_ROUTE_MCP
+    from services import public_mcp_usage_rollup as rollup
+
+    db = FakeDB()
+    writer = _writer(db)
+    today = datetime.now(UTC).date()
+    midnight = datetime.combine(today, day_time.min, tzinfo=UTC)
+    for at in (midnight, midnight - timedelta(microseconds=1), midnight):
+        writer.offer(_event(started_at=at))
+    writer.start()
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 3)
+    await writer.stop(timeout=1)
+
+    [batch] = db.committed
+    [log] = db.logs
+    assert log[:2] == ["public_mcp_usage_events", "public_mcp_doc_keys"]
+    locks, counts = batch["sql"][:-1], batch["sql"][-1]
+    assert [s["sql"] for s in locks] == [str(rollup._LOCK_SHARED)] * 2
+    yesterday = today - timedelta(days=1)
+    assert [s["params"] for s in locks] == [
+        {"key": rollup.day_lock_key(yesterday)},
+        {"key": rollup.day_lock_key(today)},
+    ]
+    assert counts["sql"] == str(rollup._ADD_BATCH)
+    assert counts["params"] == {
+        "default_route": PMU_ROUTE_MCP,
+        "default_caller": PMU_CALLER_ANONYMOUS,
+    }
+    assert log[2:] == [str(rollup._LOCK_SHARED)] * 2 + [str(rollup._ADD_BATCH)]
+
+
+async def test_a_batch_of_gap_rows_takes_no_day_lock():
+    db = FakeDB()
+    writer = _writer(db)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    writer._record_drop("queue_full", 2, now, now)
+    assert await writer._flush([]) is True
+    [batch] = db.committed
+    assert [r["kind"] for r in _events(batch)] == ["gap"]
+    assert "sql" not in batch
+
+
+async def test_the_counts_take_the_rows_of_their_own_transaction():
+    """Counted: what this transaction inserted (a row a retry sent again and
+    the conflict skipped is not), with the read's defaults bound."""
+    from models.public_mcp_usage import PMU_TXID_DEFAULT
+    from services import public_mcp_usage_rollup as rollup
+
+    sql = str(rollup._ADD_BATCH)
+    assert f"txid = (SELECT {PMU_TXID_DEFAULT})" in sql
+    assert "kind = 'tool_call'" in sql
+    assert "COALESCE(route, :default_route)" in sql
+    assert "COALESCE(caller, :default_caller)" in sql
+    assert "ORDER BY 1, 2, 3, 4, 5, 6, 7" in sql
+    assert "DO UPDATE SET calls = c.calls + EXCLUDED.calls" in sql
+    for literal in ("'mcp'", "'anonymous'"):
+        assert literal not in sql

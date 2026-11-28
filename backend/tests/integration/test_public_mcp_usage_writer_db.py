@@ -11,7 +11,7 @@ import pytest_asyncio
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from models.public_mcp_usage import PublicMcpDocKey, PublicMcpUsageEvent
+from models.public_mcp_usage import PublicMcpDocKey, PublicMcpUsageDayCount, PublicMcpUsageEvent
 from services.public_mcp_usage_events import UsageEventInput, doc_key
 from services.public_mcp_usage_writer import PublicMcpUsageWriter
 
@@ -26,11 +26,13 @@ async def maker(async_engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[A
     async with factory() as s:
         await s.execute(delete(PublicMcpUsageEvent))
         await s.execute(delete(PublicMcpDocKey))
+        await s.execute(delete(PublicMcpUsageDayCount))
         await s.commit()
     yield factory
     async with factory() as s:
         await s.execute(delete(PublicMcpUsageEvent))
         await s.execute(delete(PublicMcpDocKey))
+        await s.execute(delete(PublicMcpUsageDayCount))
         await s.commit()
 
 

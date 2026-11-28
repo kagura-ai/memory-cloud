@@ -44,7 +44,12 @@ from models.agent import Agent
 from models.auth import APIKey, Context, UsageStats, WorkspaceMember
 from models.memory import Memory
 from models.public_mcp import PublicMcpEndpoint
-from models.public_mcp_usage import PublicMcpDailyVisitor, PublicMcpDocKey, PublicMcpUsageEvent
+from models.public_mcp_usage import (
+    PublicMcpDailyVisitor,
+    PublicMcpDocKey,
+    PublicMcpUsageDayCount,
+    PublicMcpUsageEvent,
+)
 from models.resource import Resource
 from services.public_mcp_usage_events import doc_key, read_usage_events_page
 from services.public_mcp_usage_writer import PublicMcpUsageWriter
@@ -149,7 +154,7 @@ async def pub(connector_world, fernet_api_key_secret) -> AsyncIterator[SimpleNam
     finally:
         db = w.db
         await db.rollback()
-        for model in (PublicMcpUsageEvent, PublicMcpDailyVisitor):
+        for model in (PublicMcpUsageEvent, PublicMcpDailyVisitor, PublicMcpUsageDayCount):
             await db.execute(delete(model).where(model.endpoint_id.in_(p.endpoints)))
         await db.execute(
             delete(PublicMcpDocKey).where(PublicMcpDocKey.resource_pk == p.resource_pk)

@@ -7,7 +7,8 @@ raises, so a slow or absent database cannot slow a search.
 
 A drainer task batches up to ``PUBLIC_TELEMETRY_BATCH_MAX`` rows or one
 flush interval and writes them in one transaction (events, then the batch's
-doc keys under a savepoint) bounded by the write timeout. A failed batch is
+doc keys under a savepoint, then the per-day counts of the calls the
+transaction inserted, #3053) bounded by the write timeout. A failed batch is
 retried once after a short backoff and then dropped. Every dropped event —
 queue full, write failed, shutdown — is counted and becomes a ``gap`` row
 written at the head of the next successful batch, so the stream says where
@@ -56,6 +57,7 @@ from services.public_mcp_usage_events import (
     build_gap_row,
     build_usage_event_row,
 )
+from services.public_mcp_usage_rollup import add_batch_to_day_counts
 from utils.datetime import utcnow
 from utils.logger import get_logger
 
@@ -372,6 +374,11 @@ class PublicMcpUsageWriter:
                         await session.execute(_DOC_KEY_INSERT, doc_rows)
                 except IntegrityError:
                     logger.info("public_mcp_doc_keys_skipped", count=len(doc_rows))
+            # #3053: the calls inserted above, added to their days' counts
+            # in the same transaction (a retry that inserts nothing adds nothing).
+            days = {row["occurred_at"].date() for row in rows if row["kind"] == "tool_call"}
+            if days:
+                await add_batch_to_day_counts(session, days)
             await session.commit()
 
     # ------------------------------------------------------------------
