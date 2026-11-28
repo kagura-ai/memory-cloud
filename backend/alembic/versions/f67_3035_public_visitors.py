@@ -1,4 +1,4 @@
-"""#3035: route and caller on public usage events; daily visitors; a counts index.
+"""#3035: route and caller on public usage events; daily visitors; day-count statistics.
 
 Adds two nullable columns to ``public_mcp_usage_events``: ``caller``
 (VARCHAR(16), CHECK ``valid_pmue_caller``: ``anonymous``, ``bound_key``) and
@@ -19,11 +19,8 @@ instead of sorting every row of the window; the table's
 for a fifth of the table in new rows), so the pages of recent rows are
 vacuumed and marked all-visible soon after they fill; and one ``ANALYZE``
 fills the new statistics (a bounded sample, whatever the table's size).
-
-Last, builds ``ix_pmue_endpoint_counts`` ``CONCURRENTLY``: the owner's day
-counts read every column they name from it, without the table once its pages
-are all-visible. An index left INVALID by an interrupted build is dropped and
-built again on the next run.
+No index is built for them: the day counts read the window's rows from the
+table.
 
 No backfill: every existing row reads NULL (metadata-only on PostgreSQL).
 
@@ -33,11 +30,9 @@ on ``public_mcp_usage_events`` under the migration ``lock_timeout``; the
 first commit point releases it. Each VALIDATE scan then holds ``SHARE UPDATE
 EXCLUSIVE`` (inserts continue), as do ``CREATE STATISTICS``, the storage
 parameter and the ``ANALYZE`` (a brief hold under the migration
-``lock_timeout``; reads and inserts continue). The concurrent index build
-holds ``SHARE UPDATE EXCLUSIVE`` and waits for older transactions without
-blocking reads or inserts; it runs outside the migration ``lock_timeout`` on purpose, and
-its time grows with the events table. The new table has no foreign key. No
-lock is taken on ``users``, ``workspaces``, ``contexts`` or any other table.
+``lock_timeout``; reads and inserts continue). The new table has no
+foreign key. No lock is taken on ``users``, ``workspaces``, ``contexts`` or
+any other table.
 
 Order: run this migration BEFORE starting the new code. Both columns are
 mapped, so the new writer's INSERT and the export reader name them. The
@@ -45,11 +40,11 @@ previous release never names them (its INSERT leaves them NULL) and does not
 know the new table, so it keeps working against the migrated schema.
 Re-runnable (``IF NOT EXISTS`` / ``DROP CONSTRAINT IF EXISTS``).
 
-Downgrade drops the index concurrently, deletes the REST rows (the previous
-schema cannot tell them from public MCP calls) in batches of 5,000 by id, each
-batch committed on its own (a primary-key range walk, linear in the table;
-inserts continue), then drops the visitor table, the statistics, the storage
-parameter, both CHECKs and both columns.
+Downgrade deletes the REST rows (the previous schema cannot tell them from
+public MCP calls) in batches of 5,000 by id, each batch committed on its own
+(a primary-key range walk, linear in the table; inserts continue), then drops
+the visitor table, the statistics, the storage parameter, both CHECKs and
+both columns.
 
 Revision ID: f67_3035_public_visitors
 Revises: f66_3019_sleep_coverage
@@ -59,7 +54,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from alembic import op
-from db.migration_helpers import index_is_invalid, validate_constraint
+from db.migration_helpers import validate_constraint
 
 revision: str = "f67_3035_public_visitors"
 down_revision: str | None = "f66_3019_sleep_coverage"
@@ -68,16 +63,8 @@ depends_on: str | None = None
 
 _TABLE = "public_mcp_usage_events"
 _VISITORS = "public_mcp_daily_visitors"
-_COUNTS_INDEX = "ix_pmue_endpoint_counts"
 _DOWNGRADE_BATCH = 5_000
 
-_CREATE_COUNTS_INDEX = (
-    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_pmue_endpoint_counts "
-    "ON public_mcp_usage_events (endpoint_id, occurred_at) "
-    "INCLUDE (workspace_id, kind, tool, outcome, route, caller) "
-    "WHERE endpoint_id IS NOT NULL"
-)
-_DROP_COUNTS_INDEX = "DROP INDEX CONCURRENTLY IF EXISTS ix_pmue_endpoint_counts"
 _CREATE_DAY_COUNTS_STATS = (
     "CREATE STATISTICS IF NOT EXISTS pmue_day_counts_stats "
     "ON ((occurred_at)::date), tool, outcome FROM public_mcp_usage_events"
@@ -124,16 +111,8 @@ def upgrade() -> None:
     op.execute(_SET_INSERT_VACUUM)
     op.execute("ANALYZE public_mcp_usage_events")
 
-    invalid = index_is_invalid(_COUNTS_INDEX)
-    with op.get_context().autocommit_block():
-        if invalid:
-            op.execute(_DROP_COUNTS_INDEX)
-        op.execute(_CREATE_COUNTS_INDEX)
-
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute(_DROP_COUNTS_INDEX)
     bind = op.get_bind()
     has_route = bind.execute(
         sa.text(

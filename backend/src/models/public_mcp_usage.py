@@ -98,17 +98,6 @@ PMU_SEARCH_TOOL = "recall"
 # A REST request has no session: its era.
 PMU_REST_ERA = "stateless"
 
-# The columns the owner's day counts read, all in one index (#3035), so that
-# read needs no heap fetch once the visibility map is set.
-PMU_ENDPOINT_COUNTS_INCLUDE: tuple[str, ...] = (
-    "workspace_id",
-    "kind",
-    "tool",
-    "outcome",
-    "route",
-    "caller",
-)
-
 # 4 KB JSONB cap (the llm_call_log / memory_access_events precedent).
 PMU_DOCUMENTS_MAX_BYTES = 4096
 
@@ -211,17 +200,10 @@ class PublicMcpUsageEvent(Base):
             "occurred_at",
             postgresql_where=text("endpoint_id IS NOT NULL"),
         ),
-        # The owner's day counts read every column they name from this index.
-        # f67 also adds the statistics ``pmue_day_counts_stats`` (day, tool,
-        # outcome) and a lower ``autovacuum_vacuum_insert_scale_factor`` on the
-        # table; neither is declared here (create_all does not build them).
-        Index(
-            "ix_pmue_endpoint_counts",
-            "endpoint_id",
-            "occurred_at",
-            postgresql_include=list(PMU_ENDPOINT_COUNTS_INCLUDE),
-            postgresql_where=text("endpoint_id IS NOT NULL"),
-        ),
+        # f67 adds the statistics ``pmue_day_counts_stats`` (day, tool,
+        # outcome) for the owner's day counts and a lower
+        # ``autovacuum_vacuum_insert_scale_factor`` on the table; neither is
+        # declared here (create_all does not build them).
     )
 
 

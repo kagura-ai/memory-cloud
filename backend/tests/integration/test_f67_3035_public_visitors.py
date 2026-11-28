@@ -1,22 +1,22 @@
-"""#3035 (f67): route and caller on usage events, the daily visitor table, a counts index.
+"""#3035 (f67): route and caller on usage events, the daily visitor table, day-count statistics.
 
 1. The upgrade adds ``caller`` VARCHAR(16) and ``route`` VARCHAR(8), both
    nullable with no default, with their CHECKs validated; creates
    ``public_mcp_daily_visitors`` (primary key ``endpoint_id, day,
-   visitor_key``, the key-shape CHECK, ``ix_pmdv_day``); and builds
-   ``ix_pmue_endpoint_counts`` valid, with its key and INCLUDE columns and
-   its predicate; adds the statistics ``pmue_day_counts_stats`` on (day,
-   tool, outcome) and sets ``autovacuum_vacuum_insert_scale_factor`` to 0.01
-   on the events table. It takes no lock on another table: it runs while
-   ``users``, ``workspaces`` and ``contexts`` are held in ``ACCESS
-   EXCLUSIVE`` by a transaction that ran only ``LOCK TABLE``.
+   visitor_key``, the key-shape CHECK, ``ix_pmdv_day``); adds the
+   statistics ``pmue_day_counts_stats`` on (day, tool, outcome) and sets
+   ``autovacuum_vacuum_insert_scale_factor`` to 0.01 on the events table.
+   It builds no ``ix_pmue_endpoint_counts`` index. It takes no lock on
+   another table: it runs while ``users``, ``workspaces`` and ``contexts``
+   are held in ``ACCESS EXCLUSIVE`` by a transaction that ran only ``LOCK
+   TABLE``.
 2. An INSERT that names neither column (the previous release) stores NULL;
    an unknown caller or route and a visitor key that is not 32 hex are
    refused.
-3. A rerun after an interrupted upgrade (the index left INVALID) rebuilds
-   the index; downgrade deletes the REST rows over more than one batch,
-   keeps the others, and drops the rest (the statistics and the storage
-   parameter included); the round trip is repeatable.
+3. A rerun with the version stamped back at f66 succeeds and leaves the same
+   schema; downgrade deletes the REST rows over more than one batch, keeps
+   the others, and drops the rest (the statistics and the storage parameter
+   included); the round trip is repeatable.
 
 Not executed in the local unit run — needs the DB container.
 """
@@ -176,21 +176,7 @@ def test_f67_round_trip_without_locking_other_tables() -> None:
                 ["endpoint_id", "day", "visitor_key"],
                 ["ix_pmdv_day", "public_mcp_daily_visitors_pkey"],
             )
-            assert _index(conn) == (
-                True,
-                [
-                    "endpoint_id",
-                    "occurred_at",
-                    "workspace_id",
-                    "kind",
-                    "tool",
-                    "outcome",
-                    "route",
-                    "caller",
-                ],
-                2,
-                "(endpoint_id IS NOT NULL)",
-            )
+            assert _index(conn) is None, "f67 builds no counts index"
             # PostgreSQL lists the columns first, then the expression.
             assert _day_counts_stats(conn) == "tool, outcome, (occurred_at::date)"
             assert _reloptions(conn) == ["autovacuum_vacuum_insert_scale_factor=0.01"]
@@ -224,21 +210,15 @@ def test_f67_round_trip_without_locking_other_tables() -> None:
             )
         assert _sqlstate(refused.value) == "23514"
 
-        # An interrupted upgrade: the index left INVALID, the version back
-        # at f66. Running it again rebuilds the index.
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE pg_index SET indisvalid = false "
-                    "WHERE indexrelid = 'ix_pmue_endpoint_counts'::regclass"
-                )
-            )
+        # An interrupted upgrade: the version back at f66 with the schema
+        # in place. Running it again succeeds and leaves the same schema.
         with _alembic_at_test_db():
             command.stamp(_get_alembic_config(), BEFORE)
         _upgrade_to(REVISION)
         with engine.begin() as conn:
-            index = _index(conn)
-            assert index is not None and index[0] is True
+            assert set(_columns(conn)) == {"caller", "route"}
+            assert all(validated for _, validated in _checks(conn).values())
+            assert _index(conn) is None
             assert _day_counts_stats(conn) is not None
             assert _reloptions(conn) == ["autovacuum_vacuum_insert_scale_factor=0.01"]
 
@@ -286,7 +266,8 @@ def test_f67_round_trip_without_locking_other_tables() -> None:
         _upgrade_to(REVISION)
         with engine.begin() as conn:
             assert set(_columns(conn)) == {"caller", "route"}
-            assert _index(conn) is not None
+            assert _visitor_table(conn) is not None
+            assert _index(conn) is None
     finally:
         try:
             _reset_alembic_state()

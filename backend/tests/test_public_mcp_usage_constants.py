@@ -116,21 +116,9 @@ def test_f67_check_literals_equal_the_model():
     assert shape in _f67_literals()
 
 
-def test_f67_counts_index_names_the_model_columns():
-    index = next(
-        i
-        for i in PublicMcpUsageEvent.__table_args__
-        if isinstance(i, Index) and i.name == "ix_pmue_endpoint_counts"
-    )
-    keys = [c.name for c in index.columns]
-    include = list(index.dialect_options["postgresql"]["include"])
-    where = str(index.dialect_options["postgresql"]["where"])
-    assert keys == ["endpoint_id", "occurred_at"]
-    assert include == ["workspace_id", "kind", "tool", "outcome", "route", "caller"]
-    ddl = next(t for t in _f67_literals() if t.startswith("CREATE INDEX CONCURRENTLY"))
-    assert ddl == (
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_pmue_endpoint_counts "
-        "ON public_mcp_usage_events (" + ", ".join(keys) + ") "
-        "INCLUDE (" + ", ".join(include) + ") "
-        "WHERE " + where
-    )
+def test_f67_builds_no_endpoint_counts_index():
+    """The owner's day counts read the heap: f67 and the model build no counts index."""
+    names = {i.name for i in PublicMcpUsageEvent.__table_args__ if isinstance(i, Index)}
+    assert "ix_pmue_endpoint_counts" not in names
+    assert not any("ix_pmue_endpoint_counts" in t for t in _f67_literals())
+    assert not any("CONCURRENTLY" in t for t in _f67_literals())
