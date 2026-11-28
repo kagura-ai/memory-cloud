@@ -25,8 +25,8 @@ counted again when they are closed). Re-runnable (``IF NOT EXISTS``).
 
 Downgrade drops both tables.
 
-Revision ID: f68_3053_usage_rollup
-Revises: f67_3035_public_visitors
+Revision ID: f69_3053_usage_rollup
+Revises: f68_3051_carried_text_edit
 """
 
 import sqlalchemy as sa
@@ -34,8 +34,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "f68_3053_usage_rollup"
-down_revision: str | None = "f67_3035_public_visitors"
+revision: str = "f69_3053_usage_rollup"
+down_revision: str | None = "f68_3051_carried_text_edit"
 branch_labels: str | None = None
 depends_on: str | None = None
 

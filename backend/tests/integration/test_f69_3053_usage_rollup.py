@@ -1,4 +1,4 @@
-"""#3053 (f68): the per-day counts of public usage events and the closed days.
+"""#3053 (f69): the per-day counts of public usage events and the closed days.
 
 1. The upgrade creates ``public_mcp_usage_day_counts`` (primary key
    ``endpoint_id, day, workspace_id, tool, outcome, route, caller``, every
@@ -9,7 +9,7 @@
    ``workspaces``, ``contexts`` and ``public_mcp_usage_events`` are held in
    ``ACCESS EXCLUSIVE`` by a transaction that ran only ``LOCK TABLE``.
 2. A count that is not positive is refused.
-3. A rerun with the version stamped back at f67 succeeds and leaves the same
+3. A rerun with the version stamped back at f68 succeeds and leaves the same
    schema; downgrade drops both tables; the round trip is repeatable.
 
 Not executed in the local unit run — needs the DB container.
@@ -34,8 +34,8 @@ from tests.integration.test_alembic_migrations import (
     _upgrade_to,
 )
 
-REVISION = "f68_3053_usage_rollup"
-BEFORE = "f67_3035_public_visitors"
+REVISION = "f69_3053_usage_rollup"
+BEFORE = "f68_3051_carried_text_edit"
 COUNTS = "public_mcp_usage_day_counts"
 CLOSED = "public_mcp_usage_closed_days"
 
@@ -111,7 +111,7 @@ EXPECTED = (
 )
 
 
-def test_f68_round_trip_without_locking_other_tables() -> None:
+def test_f69_round_trip_without_locking_other_tables() -> None:
     _reset_alembic_state()
     engine = _sync_engine()
     holder = _sync_engine()
@@ -152,7 +152,7 @@ def test_f68_round_trip_without_locking_other_tables() -> None:
                 )
             assert _sqlstate(refused.value) == "23514"
 
-        # An interrupted upgrade: the version back at f67 with the schema in
+        # An interrupted upgrade: the version back at f68 with the schema in
         # place. Running it again succeeds and leaves the same schema.
         with _alembic_at_test_db():
             command.stamp(_get_alembic_config(), BEFORE)
