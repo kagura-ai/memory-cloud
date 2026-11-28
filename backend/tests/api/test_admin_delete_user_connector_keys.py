@@ -21,6 +21,7 @@ async def test_response_reports_moved_and_deleted_keys_after_commit():
         agent_api_keys=1,
         agents_suspended=1,
         agents_reowned=5,
+        bound_api_keys=6,
     )
 
     async def finish(_result):
@@ -41,6 +42,7 @@ async def test_response_reports_moved_and_deleted_keys_after_commit():
         "api_keys": 3,
         "contexts": 0,
         "agent_api_keys": 1,
+        "bound_api_keys": 6,
     }
     assert response["reowned"] == {"connector_api_keys": 2, "agents": 5}
     assert response["suspended"] == {"agents": 1}

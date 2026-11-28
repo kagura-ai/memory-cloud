@@ -15,7 +15,7 @@ On real PostgreSQL rows:
   404 on both routes like a missing context, with a key and without;
 * deleting a workspace's rows for good (admin user deletion, account
   erasure) deletes every key bound to its contexts: none stays without its
-  binding;
+  binding, and the result counts them (``bound_api_keys``);
 * a soft-deleted context cannot be bound at mint.
 
 Every row a test commits is deleted afterwards (``world`` fixture).
@@ -319,10 +319,11 @@ async def test_admin_user_deletion_deletes_the_keys_bound_to_its_workspaces(worl
     )
     await w.db.commit()
 
-    await delete_user_rows(w.db, owner)
+    result = await delete_user_rows(w.db, owner)
     await w.db.commit()
 
     assert await _surviving(w, {doomed_key, kept_key}) == {kept_key}
+    assert result.bound_api_keys == 1
 
 
 async def test_account_erasure_deletes_the_keys_bound_to_its_workspaces(world):
@@ -347,9 +348,10 @@ async def test_account_erasure_deletes_the_keys_bound_to_its_workspaces(world):
     from tests.integration.test_erasure_lock_order_db import _external_stores_stubbed
 
     with _external_stores_stubbed():
-        await w.erase(owner)
+        counts = await w.erase(owner)
 
     assert await _surviving(w, {doomed_key, kept_key}) == {kept_key}
+    assert counts["bound_api_keys"] == 1
 
 
 # ---------------------------------------------------------------------------

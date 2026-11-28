@@ -226,6 +226,7 @@ async def _delete_admin_rows(
         share_keys_deleted=result.share_keys,
         connector_api_keys_reowned=result.connector_api_keys,
         agent_api_keys_deleted=result.agent_api_keys,
+        bound_api_keys_deleted=result.bound_api_keys,
         agents_suspended=result.agents_suspended,
         agents_reowned=result.agents_reowned,
     )

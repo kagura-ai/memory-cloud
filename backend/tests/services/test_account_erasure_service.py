@@ -2483,6 +2483,28 @@ class TestConnectorKeysReownedInThePostgresStep:
         assert counts["agents_reowned"] == 1
         assert counts["api_keys"] == 1
 
+    @pytest.mark.asyncio
+    async def test_the_keys_bound_to_the_deleted_workspaces_are_counted_apart(self):
+        """The subject's own keys first (``api_keys``), then every key bound to
+        a context of the workspaces deleted with the subject
+        (``bound_api_keys``)."""
+        from models.auth import APIKey
+        from services.connector_key_ownership import SettledCredentials
+
+        svc = _delete_postgres_service()
+        deleted = iter([2, 5])
+
+        async def _delete(model: Any, where_clause: Any) -> int:
+            return next(deleted) if model is APIKey else 0
+
+        svc._settle_departing_credentials = AsyncMock(return_value=SettledCredentials())
+        svc._count_and_delete = AsyncMock(side_effect=_delete)
+
+        counts = (await svc._delete_postgres(_user())).counts
+
+        assert counts["api_keys"] == 2
+        assert counts["bound_api_keys"] == 5
+
 
 class TestAuditLogPseudonymizationInThePostgresStep:
     """#2287: the subject's audit rows are pseudonymized inside

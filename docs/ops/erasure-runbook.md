@@ -72,6 +72,7 @@ FK の依存逆順で削除:
 | `external_api_keys` | `user_id = :uid` | Fernet 暗号化 3rd-party キー |
 | `api_keys` (`connector_id IS NOT NULL`, `revoked_at IS NULL`) | `user_id = :uid` かつ workspace の owner が本人でない | 削除せず `user_id` を workspace の `owner_user_id` に付け替え (#2305)。connector の write key は workspace のもので、worker が持つ平文はそのまま有効、以後の rotate は owner 名義で発行される。counts キー = `connector_api_keys_reowned`。メンバー削除・admin のユーザー削除・`delete_admin` CLI も同じ helper (`services/connector_key_ownership.py`) で owner に付け替える (#2352) |
 | `api_keys` | `user_id = :uid` | connector key 以外 (revoked の connector key を含む) |
+| `api_keys` (`bound_context_id`) | 本人と一緒に削除する workspace の context に紐付いた key (他メンバーの key を含む) | 本人の key の後、context より前に削除。counts キー = `bound_api_keys` (`api_keys` とは別)。admin のユーザー削除も同じく削除し、応答の `deleted.bound_api_keys` に数える |
 | `share_keys` | `user_id = :uid` | 本人が作った share key (#2930)。`user_id` に FK はない。counts キー = `share_keys`。admin のユーザー削除・`delete_admin` CLI も削除し、メンバー削除はその workspace の context の share key を revoke する。作成したアカウントが存在しない行は migration `f57_2930_share_key_creators` が削除する |
 | `graph_memory` | `user_id = :uid` | orphan, FK cascade なし |
 | `usage_stats` | `user_id = :uid` | |

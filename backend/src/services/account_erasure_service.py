@@ -2552,9 +2552,10 @@ class AccountErasureService:
         # The keys other members public-bound to contexts of the workspaces the
         # cascade below deletes: their foreign key would only SET NULL and
         # leave each key without its binding.
-        bound_keys = await self._count_and_delete(APIKey, bound_to_contexts_of(owned_ws))
-        if bound_keys:
-            logger.info("account_erasure_bound_keys_deleted", count=bound_keys)
+        # Counted apart from the subject's own ``api_keys``.
+        counts["bound_api_keys"] = await self._count_and_delete(
+            APIKey, bound_to_contexts_of(owned_ws)
+        )
         # #2930: the subject's share keys go with its API keys (no foreign key
         # on ``share_keys.user_id`` would take them, and the row names the sub).
         counts["share_keys"] = await self._count_and_delete(ShareKey, ShareKey.user_id == user_id)
