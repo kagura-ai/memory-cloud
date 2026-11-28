@@ -227,12 +227,50 @@ async def test_unreadable_bucket_without_a_publication_still_fails_open() -> Non
 
 
 def test_a_session_changes_nothing() -> None:
-    """The handler takes no session parameter: a signed-in request is anonymous."""
+    """The handler takes no session parameter: a signed-in request is anonymous.
+
+    #3035: its one request-level dependency is the visitor header source,
+    which takes the request and reads nothing but ``Kagura-Visitor``.
+    """
     import inspect
+
+    from services.public_search_usage import VisitorHeaderSource, visitor_header_source
 
     params = inspect.signature(public_search).parameters
     assert "user" not in params
-    assert set(params) == {"context_id", "request", "api_key", "db"}
+    assert set(params) == {"context_id", "request", "api_key", "db", "visitor"}
+    source_params = inspect.signature(visitor_header_source).parameters
+    assert list(source_params) == ["request"]
+
+    class _Headers:
+        def getlist(self, name: str) -> list[str]:
+            assert name == "kagura-visitor"
+            return ["v-1"]
+
+        def get(self, name: str, default=None):
+            raise AssertionError(f"read {name}")
+
+    class _Request:
+        headers = _Headers()
+
+        def __getattr__(self, name: str):
+            raise AssertionError(f"read request.{name}")
+
+        @property
+        def state(self):
+            raise AssertionError("read request.state")
+
+        @property
+        def session(self):
+            raise AssertionError("read request.session")
+
+        @property
+        def cookies(self):
+            raise AssertionError("read request.cookies")
+
+    source = visitor_header_source(_Request())  # type: ignore[arg-type]
+    assert isinstance(source, VisitorHeaderSource)
+    assert source.values() == ["v-1"]
 
 
 @pytest.mark.asyncio

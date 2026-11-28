@@ -7,6 +7,7 @@ Provides search endpoints for public contexts with schema-aware responses.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from uuid import UUID
 
@@ -24,11 +25,21 @@ from auth.dependencies import get_api_key
 from config.plan_tiers import get_plan_tier
 from db.base import get_db
 from db.redis import incrby_counter
+from mcp_server.public.publication import ServingEndpoint
+from mcp_server.public.scope import public_rows
 from models.auth import Context, Workspace
 from models.memory import Memory
 from models.public_mcp import PublicMcpEndpoint
 from services.capacity_lock import ensure_not_capacity_locked
 from services.plan_suspension import ensure_public_serving_allowed
+from services.public_search_usage import (
+    NULL_RECORD,
+    SearchRecord,
+    VisitorHeaderSource,
+    public_search_recording_enabled,
+    start_bound_record,
+    visitor_header_source,
+)
 from services.public_usage_budget import (
     PublicUsageBudgetUnavailable,
     charge_public_usage,
@@ -441,6 +452,7 @@ async def _filter_results(
     context: Context,
     results: list[PublicSearchResult],
     limit: int,
+    publication: ServingEndpoint | None = None,
 ) -> tuple[list[PublicSearchResult], tuple[str, ...] | None, int]:
     """Answer each row once, and only the context's live rows (#3035, K4a).
 
@@ -453,11 +465,16 @@ async def _filter_results(
     unfiltered (one warning with the error class only): a transient database
     error does not fail the search.
 
+    With ``publication`` (a recorded search) the same read also tells, per
+    row, whether the public MCP endpoint serves it (``public_rows``, the MCP
+    predicate), for the event's documents.
+
     Returns:
-        The kept results; the document ids of the kept results (``None``
-        here: no publication was given); and how many results
-        de-duplication and the read removed (the cut to ``limit`` is not
-        counted).
+        The kept results; one document id per kept result, in response order
+        (the row's ``resource_doc_id`` when the publication serves it, else
+        ``""``, so later ranks stay true), or ``None`` without a publication
+        or when the read failed; and how many results de-duplication and the
+        read removed (the cut to ``limit`` is not counted).
     """
     seen: set[str] = set()
     unique: list[PublicSearchResult] = []
@@ -469,8 +486,11 @@ async def _filter_results(
     wanted = [row_id for row_id in ids.values() if row_id is not None]
     if not wanted:
         kept: list[PublicSearchResult] = []
-        return kept, None, len(results)
-    statement = select(Memory.id, Memory.resource_doc_id).where(
+        return kept, (() if publication is not None else None), len(results)
+    columns: list[Any] = [Memory.id, Memory.resource_doc_id]
+    if publication is not None:
+        columns.append(public_rows(publication).label("in_publication"))
+    statement = select(*columns).where(
         Memory.id.in_(wanted),
         Memory.workspace_id == context.workspace_id,
         Memory.context_id == context.id,
@@ -482,9 +502,18 @@ async def _filter_results(
     except Exception as exc:
         logger.warning("public_search_filter_unread", error_type=type(exc).__name__)
         return unique[:limit], None, len(results) - len(unique)
-    live = {row.id for row in rows}
+    live = {row.id: row for row in rows}
     filtered = [result for result in unique if ids[result.memory_id] in live]
-    return filtered[:limit], None, len(results) - len(filtered)
+    kept = filtered[:limit]
+    doc_ids: tuple[str, ...] | None = None
+    if publication is not None:
+        served_ids: list[str] = []
+        for result in kept:
+            row = live[ids[result.memory_id]]
+            served = bool(row.in_publication) and row.resource_doc_id is not None
+            served_ids.append(str(row.resource_doc_id) if served else "")
+        doc_ids = tuple(served_ids)
+    return kept, doc_ids, len(results) - len(filtered)
 
 
 # ============================================================================
@@ -498,6 +527,7 @@ async def public_search(
     request: PublicSearchRequest,
     api_key: str | None = Depends(get_api_key),
     db: AsyncSession = Depends(get_db),
+    visitor: VisitorHeaderSource = Depends(visitor_header_source),
 ):
     """Search public context with schema-aware response formatting.
 
@@ -524,6 +554,15 @@ async def public_search(
     A bound key's last-used time is committed once the key passes the context
     check (404 / 403 above), before the search runs, also when its own
     per-minute bucket or its plan then refuses the search.
+
+    Owner statistics (#3035, while ``PUBLIC_SEARCH_TELEMETRY_ENABLED`` is on):
+    a search made with a bound key of a context whose public MCP endpoint is
+    serving is recorded as a usage event of that endpoint (route ``rest``,
+    caller ``bound_key``). Such a key may send ``Kagura-Visitor: <value>``
+    (1-64 characters of ``[A-Za-z0-9_-]``); the value is turned at once into a
+    daily key and never stored as sent; a malformed or repeated header is
+    ignored, never refused. Anonymous searches are never recorded and their
+    ``Kagura-Visitor`` is never read.
 
     Rate Limits:
         - Anonymous access: 50 requests/minute per context (shared bucket)
@@ -585,6 +624,8 @@ async def public_search(
                given)
     """
     start_time = utcnow()
+    # #3035: the clock of a recorded search's duration (the whole route).
+    started = time.perf_counter()
     # #3035 (K8): the stage clock behind both result lines (no query text).
     timings = RecallTimings()
 
@@ -643,6 +684,12 @@ async def public_search(
     # the bucket.
     workspace: Workspace | None = None
     anonymous_bucket_counted = False
+    bound_limit = 0
+    # #3035: a bound-key search is recorded for the owner's statistics while
+    # recording is on and its plan gives bound keys an allowance (limit 0 is a
+    # bound key's plan pause, never recorded: no lookup, no header read).
+    # Anonymous searches are never recorded and their header is never read.
+    record: SearchRecord = NULL_RECORD
     if bound_key is not None:
         workspace = await db.get(Workspace, context.workspace_id)
         if workspace is None:
@@ -651,194 +698,235 @@ async def public_search(
                 detail="Context workspace not found",
             )
         plan = get_plan_tier(workspace.plan_name or "free")
-        await check_bound_key_rate_limit(bound_key.id, plan.bound_public_calls_per_minute)
-    else:
-        # Anonymous shared bucket. Workspace lookup is deferred to step 4
-        # below: under abuse, a 429 returns BEFORE any Workspace SELECT.
-        anonymous_bucket_counted = await check_public_search_rate_limit(context_id)
-
-    # 4. Resolve workspace lazily if not already fetched above. Required
-    # for the embedding-service caller user_id (search_user_id).
-    if workspace is None:
-        workspace = await db.get(Workspace, context.workspace_id)
-        if workspace is None:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Context workspace not found",
+        bound_limit = plan.bound_public_calls_per_minute
+        if public_search_recording_enabled() and bound_limit > 0:
+            record = await start_bound_record(
+                db,
+                context=context,
+                started_at=start_time,
+                clock_start=started,
+                visitor=visitor,
             )
-    # The context of a soft-deleted workspace reads as missing too (a bound
-    # key of one was refused above: its owner holds no live workspace). For
-    # an anonymous caller this is decided after the anonymous bucket, where
-    # the Workspace row is first read, so past the bucket it answers 429.
-    if workspace.deleted_at is not None:
-        raise NotFoundException("Context", str(context_id))
-
-    # #1939: anonymous serving pauses when the owner's plan has no public
-    # allowance (it fell back to Free) — after the anonymous bucket, so a
-    # flood is still refused before this lookup. The bound-key path is
-    # already refused on such a plan (zero per-key bucket), so this gate only
-    # has to cover anonymous callers.
-    if bound_key is None:
-        ensure_public_serving_allowed(workspace)
-
-    # #1941: a workspace over its Free capacity pauses search, public reads
-    # included. Placed after the rate buckets and on the already-loaded
-    # Workspace, so a 429 flood costs no lock read. Order with the plan-pause
-    # gate (#1939): plan pause (anonymous) first, then this capacity check.
-    # Every caller of this route is an outsider (anonymous or bound key), so
-    # it gets the redacted refusal.
-    await ensure_not_capacity_locked(db, workspace, outsider=True)
-    # #2918: a slot-suspended workspace serves no public read (redacted).
-    await ensure_slot_active(db, workspace, user_id=None, outsider=True)
-
-    # #2805: an anonymous search of a context with a live public MCP
-    # publication spends the workspace's public usage budget, like a public
-    # tools/call. After the bucket, the plan pause and the capacity check;
-    # before the search, so a search that fails afterwards stays counted.
-    # Bound keys are never charged.
-    if bound_key is None:
-        await _charge_public_usage_budget(db, context, bucket_counted=anonymous_bucket_counted)
-
-    # 5. Hoist usage-log attribution + caller id once so the success and
-    # error paths below share one definition.
-    log_user_id: str = str(bound_key.user_id) if bound_key is not None else "anonymous"
-    log_attribution = {
-        "context_id": str(context_id),
-        "workspace_id": str(context.workspace_id),
-        "api_key_id": bound_key.id if bound_key is not None else None,
-    }
-
-    search_service = SearchService(db)
+    # The record exists before this ``try``: every exit below offers it once,
+    # from the ``finally``; a failure after the answer was built wins.
     try:
-        # Workspace owner's user_id is used as the embedding-service caller so
-        # API-key resolution lands on the owner's keys, not the public caller.
-        owner_id = workspace.owner_user_id
-        search_user_id: str = str(owner_id) if owner_id is not None else "system"
+        if bound_key is not None:
+            # The visitor key is computed first and the raw value dropped.
+            record.resolve_visitor()
+            await check_bound_key_rate_limit(bound_key.id, bound_limit)
+        else:
+            # Anonymous shared bucket. Workspace lookup is deferred to step 4
+            # below: under abuse, a 429 returns BEFORE any Workspace SELECT.
+            anonymous_bucket_counted = await check_public_search_rate_limit(context_id)
 
-        # #3035: no caller is reranked (bound key, anonymous, session cookie or
-        # not). An explicit False: None would follow the context's search
-        # config and could rerank.
-        degradation: dict[str, Any] = {}
-        results = await search_service.hybrid_search(
-            query=request.query,
-            user_id=search_user_id,
-            workspace_id=str(context.workspace_id),
-            context_id=str(context_id),
-            # #3035 (K4a): twice the limit, as public MCP fetches, so serving
-            # each row once still fills ``limit`` in the common case.
-            k=2 * request.limit,
-            use_rerank=False,
-            search_mode=request.search_mode,
-            degradation=degradation,
-            timings=timings,
-        )
+        # 4. Resolve workspace lazily if not already fetched above. Required
+        # for the embedding-service caller user_id (search_user_id).
+        if workspace is None:
+            workspace = await db.get(Workspace, context.workspace_id)
+            if workspace is None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Context workspace not found",
+                )
+        # The context of a soft-deleted workspace reads as missing too (a bound
+        # key of one was refused above: its owner holds no live workspace). For
+        # an anonymous caller this is decided after the anonymous bucket, where
+        # the Workspace row is first read, so past the bucket it answers 429.
+        if workspace.deleted_at is not None:
+            raise NotFoundException("Context", str(context_id))
 
-        schema = (
-            await get_latest_schema(db, context.workspace_id, context.resource_id)
-            if context.resource_id is not None
-            else None
-        )
+        # #1939: anonymous serving pauses when the owner's plan has no public
+        # allowance (it fell back to Free) — after the anonymous bucket, so a
+        # flood is still refused before this lookup. The bound-key path is
+        # already refused on such a plan (zero per-key bucket), so this gate only
+        # has to cover anonymous callers.
+        if bound_key is None:
+            ensure_public_serving_allowed(workspace)
 
-        formatted_results = [
-            PublicSearchResult(
-                # The hit id is the Qdrant point id; a resource point is not the
-                # row's id, the payload carries it (#2953).
-                memory_id=str(result.get("payload", {}).get("memory_id") or result["id"]),
-                content=result.get("payload", {}).get(
-                    "summary", result.get("payload", {}).get("content", "")
-                ),
-                score=result["score"],
-                metadata=result.get("payload", {}),
-                highlighted=None,  # TODO: Implement highlighting in future
+        # #1941: a workspace over its Free capacity pauses search, public reads
+        # included. Placed after the rate buckets and on the already-loaded
+        # Workspace, so a 429 flood costs no lock read. Order with the plan-pause
+        # gate (#1939): plan pause (anonymous) first, then this capacity check.
+        # Every caller of this route is an outsider (anonymous or bound key), so
+        # it gets the redacted refusal.
+        # #3035: a serving gate's refusal leaves no event (public MCP refuses
+        # these in its transport, before any call record).
+        with record.gate():
+            await ensure_not_capacity_locked(db, workspace, outsider=True)
+            # #2918: a slot-suspended workspace serves no public read (redacted).
+            await ensure_slot_active(db, workspace, user_id=None, outsider=True)
+
+        # #2805: an anonymous search of a context with a live public MCP
+        # publication spends the workspace's public usage budget, like a public
+        # tools/call. After the bucket, the plan pause and the capacity check;
+        # before the search, so a search that fails afterwards stays counted.
+        # Bound keys are never charged.
+        if bound_key is None:
+            await _charge_public_usage_budget(db, context, bucket_counted=anonymous_bucket_counted)
+
+        # 5. Hoist usage-log attribution + caller id once so the success and
+        # error paths below share one definition.
+        log_user_id: str = str(bound_key.user_id) if bound_key is not None else "anonymous"
+        log_attribution = {
+            "context_id": str(context_id),
+            "workspace_id": str(context.workspace_id),
+            "api_key_id": bound_key.id if bound_key is not None else None,
+        }
+
+        search_service = SearchService(db)
+        try:
+            # Workspace owner's user_id is used as the embedding-service caller so
+            # API-key resolution lands on the owner's keys, not the public caller.
+            owner_id = workspace.owner_user_id
+            search_user_id: str = str(owner_id) if owner_id is not None else "system"
+
+            # #3035: no caller is reranked (bound key, anonymous, session cookie or
+            # not). An explicit False: None would follow the context's search
+            # config and could rerank.
+            degradation: dict[str, Any] = {}
+            results = await search_service.hybrid_search(
+                query=request.query,
+                user_id=search_user_id,
+                workspace_id=str(context.workspace_id),
+                context_id=str(context_id),
+                # #3035 (K4a): twice the limit, as public MCP fetches, so serving
+                # each row once still fills ``limit`` in the common case.
+                k=2 * request.limit,
+                use_rerank=False,
+                search_mode=request.search_mode,
+                degradation=degradation,
+                timings=timings,
             )
-            for result in results
-        ]
-        # #3035 (K4a): each row once, only the context's live rows, at most
-        # ``limit``; ``count`` follows, so it can be below ``limit``.
-        formatted_results, _doc_ids, results_dropped = await _filter_results(
-            db, context=context, results=formatted_results, limit=request.limit
-        )
 
-        response_time_ms = int((utcnow() - start_time).total_seconds() * 1000)
-        await log_usage(
-            db=db,
-            user_id=log_user_id,
-            endpoint=f"/api/v1/public/{context_id}/search",
-            method="POST",
-            status_code=200,
-            response_time_ms=response_time_ms,
-            **log_attribution,
-        )
+            schema = (
+                await get_latest_schema(db, context.workspace_id, context.resource_id)
+                if context.resource_id is not None
+                else None
+            )
 
-        logger.info(
-            "public_search_completed",
-            context_id=context_id,
-            result_count=len(formatted_results),
-            results_dropped=results_dropped,
-            has_schema=schema is not None,
-            response_time_ms=response_time_ms,
-            fusion=timings.fusion,
-            **timings.log_fields(),
-        )
+            formatted_results = [
+                PublicSearchResult(
+                    # The hit id is the Qdrant point id; a resource point is not the
+                    # row's id, the payload carries it (#2953).
+                    memory_id=str(result.get("payload", {}).get("memory_id") or result["id"]),
+                    content=result.get("payload", {}).get(
+                        "summary", result.get("payload", {}).get("content", "")
+                    ),
+                    score=result["score"],
+                    metadata=result.get("payload", {}),
+                    highlighted=None,  # TODO: Implement highlighting in future
+                )
+                for result in results
+            ]
+            # #3035 (K4a): each row once, only the context's live rows, at most
+            # ``limit``; ``count`` follows, so it can be below ``limit``.
+            formatted_results, doc_ids, results_dropped = await _filter_results(
+                db,
+                context=context,
+                results=formatted_results,
+                limit=request.limit,
+                publication=record.publication,
+            )
+            # #3035: the answer is known; a failure after this still wins.
+            record.served(
+                degraded=bool(degradation.get("degraded")),
+                result_count=len(formatted_results),
+                doc_ids=doc_ids,
+            )
 
-        # Extract values for type safety (SQLAlchemy Column types need explicit handling)
-        ctx_resource_id = context.resource_id
-        schema_ver: int | None = int(schema.schema_version) if schema else None  # type: ignore[arg-type]
+            # Bound path only: whether this search is recorded, and why its
+            # visitor header was ignored (never the value).
+            record_fields: dict[str, Any] = (
+                {}
+                if bound_key is None
+                else {"recorded": record.live, "visitor_ignored": record.visitor_ignored}
+            )
+            response_time_ms = int((utcnow() - start_time).total_seconds() * 1000)
+            await log_usage(
+                db=db,
+                user_id=log_user_id,
+                endpoint=f"/api/v1/public/{context_id}/search",
+                method="POST",
+                status_code=200,
+                response_time_ms=response_time_ms,
+                **log_attribution,
+            )
 
-        return PublicSearchResponse(
-            status="success",
-            query=request.query,
-            results=formatted_results,
-            count=len(formatted_results),
-            context_id=str(context_id),
-            resource_id=str(ctx_resource_id) if ctx_resource_id is not None else None,
-            schema_version=schema_ver,
-            # #1515: None (omitted from the payload) unless the search degraded.
-            degraded=degradation.get("degraded"),
-            degraded_reason=degradation.get("reason"),
-        )
-
-    except Exception as e:
-        # #3035 (K10a): the workspace cannot run searches for now. The answer
-        # is the bare 503 with no reason or figure; the operator line names
-        # the cause (its message carries the figure, so it is not logged).
-        cannot_run = isinstance(e, EmbeddingSpendCapExceeded)
-        response_time_ms = int((utcnow() - start_time).total_seconds() * 1000)
-        await log_usage(
-            db=db,
-            user_id=log_user_id,
-            endpoint=f"/api/v1/public/{context_id}/search",
-            method="POST",
-            status_code=503 if cannot_run else 500,
-            response_time_ms=response_time_ms,
-            **log_attribution,
-        )
-
-        if cannot_run:
-            logger.error(
-                "public_search_failed",
+            logger.info(
+                "public_search_completed",
                 context_id=context_id,
-                error_type=type(e).__name__,
-                reason="embedding_spend_cap",
+                result_count=len(formatted_results),
+                results_dropped=results_dropped,
+                **record_fields,
+                has_schema=schema is not None,
+                response_time_ms=response_time_ms,
                 fusion=timings.fusion,
                 **timings.log_fields(),
             )
-            raise TemporarilyUnavailableError() from None
-        logger.error(
-            "public_search_failed",
-            context_id=context_id,
-            error=str(e),
-            fusion=timings.fusion,
-            **timings.log_fields(),
-        )
-        # Do not leak the raw exception message to the (potentially
-        # anonymous) client — DB / provider / library errors can carry
-        # column names, connection strings, file paths, etc. The full
-        # message is in the logger.error above for operator triage.
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal search error",
-        ) from e
+
+            # Extract values for type safety (SQLAlchemy Column types need explicit handling)
+            ctx_resource_id = context.resource_id
+            schema_ver: int | None = int(schema.schema_version) if schema else None  # type: ignore[arg-type]
+
+            return PublicSearchResponse(
+                status="success",
+                query=request.query,
+                results=formatted_results,
+                count=len(formatted_results),
+                context_id=str(context_id),
+                resource_id=str(ctx_resource_id) if ctx_resource_id is not None else None,
+                schema_version=schema_ver,
+                # #1515: None (omitted from the payload) unless the search degraded.
+                degraded=degradation.get("degraded"),
+                degraded_reason=degradation.get("reason"),
+            )
+
+        except Exception as e:
+            # #3035 (K10a): the workspace cannot run searches for now. The answer
+            # is the bare 503 with no reason or figure; the operator line names
+            # the cause (its message carries the figure, so it is not logged).
+            cannot_run = isinstance(e, EmbeddingSpendCapExceeded)
+            response_time_ms = int((utcnow() - start_time).total_seconds() * 1000)
+            await log_usage(
+                db=db,
+                user_id=log_user_id,
+                endpoint=f"/api/v1/public/{context_id}/search",
+                method="POST",
+                status_code=503 if cannot_run else 500,
+                response_time_ms=response_time_ms,
+                **log_attribution,
+            )
+
+            if cannot_run:
+                logger.error(
+                    "public_search_failed",
+                    context_id=context_id,
+                    error_type=type(e).__name__,
+                    reason="embedding_spend_cap",
+                    fusion=timings.fusion,
+                    **timings.log_fields(),
+                )
+                raise TemporarilyUnavailableError() from None
+            logger.error(
+                "public_search_failed",
+                context_id=context_id,
+                error=str(e),
+                fusion=timings.fusion,
+                **timings.log_fields(),
+            )
+            # Do not leak the raw exception message to the (potentially
+            # anonymous) client — DB / provider / library errors can carry
+            # column names, connection strings, file paths, etc. The full
+            # message is in the logger.error above for operator triage.
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Internal search error",
+            ) from e
+    except BaseException as exc:
+        record.failed(exc)
+        raise
+    finally:
+        record.emit()
 
 
 # ============================================================================

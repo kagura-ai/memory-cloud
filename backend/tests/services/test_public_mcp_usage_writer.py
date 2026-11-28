@@ -289,3 +289,288 @@ async def test_enabled_switch_starts_one_writer(monkeypatch):
     finally:
         await writer_module.stop_usage_writer(timeout=1)
     assert writer_module.get_usage_writer() is None
+
+
+# ---------------------------------------------------------------------------
+# #3035: daily visitors, written apart from the events and in crowds
+# ---------------------------------------------------------------------------
+
+DAY_NOON = datetime(2026, 11, 6, 12, 0, 0)
+ENDPOINT_2 = UUID("0b6f6f0e-1111-4c1d-8a2b-000000000002")
+KEY = "k" * 40
+
+
+def _visit(value: str, *, endpoint: UUID | None = None, started=None, **overrides: Any):
+    from services.public_mcp_usage_events import visitor_key
+
+    endpoint = endpoint or UUID("0b6f6f0e-1111-4c1d-8a2b-000000000001")
+    started = started or DAY_NOON.replace(tzinfo=UTC)
+    values: dict[str, Any] = {
+        "endpoint_id": endpoint,
+        "route": "rest",
+        "caller": "bound_key",
+        "era": "stateless",
+        "started_at": started,
+        "visitor_key": visitor_key(endpoint, value, started.date(), KEY),
+    }
+    values.update(overrides)
+    return _event(**values)
+
+
+def _visitor_batches(db: FakeDB) -> list[list[dict]]:
+    return [
+        b["public_mcp_daily_visitors"] for b in db.committed if "public_mcp_daily_visitors" in b
+    ]
+
+
+@pytest.fixture
+def writer_today(monkeypatch):
+    """The writer's clock: noon of DAY_NOON's day (the visitors' own day)."""
+    now = {"value": DAY_NOON}
+    monkeypatch.setattr(writer_module, "utcnow", lambda: now["value"])
+    return now
+
+
+async def _passes(writer: PublicMcpUsageWriter, count: int = 8) -> None:
+    """Let the drainer run several passes (each at most two flush intervals)."""
+    await asyncio.sleep(writer._flush_interval * 2 * count)
+
+
+async def test_nine_visitors_of_one_endpoint_and_day_wait(writer_today):
+    db = FakeDB()
+    writer = _writer(db)
+    writer.start()
+    for i in range(9):
+        writer.offer(_visit(f"v{i}"))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 9)
+    await _passes(writer)
+    assert _visitor_batches(db) == []
+
+    writer.offer(_visit("v9"))
+    await _until(lambda: len(_visitor_batches(db)) == 1)
+    await writer.stop(timeout=1)
+    (batch,) = _visitor_batches(db)
+    assert len(batch) == 10
+    assert {r["endpoint_id"] for r in batch} == {_visit("v0").endpoint_id}
+    assert {r["day"] for r in batch} == {DAY_NOON.date()}
+    assert set(batch[0]) == {"endpoint_id", "day", "visitor_key", "workspace_id"}
+
+
+async def test_the_visitor_transaction_writes_no_event_row(writer_today):
+    db = FakeDB()
+    writer = _writer(db)
+    writer.start()
+    for i in range(10):
+        writer.offer(_visit(f"v{i}"))
+    await _until(lambda: len(_visitor_batches(db)) == 1)
+    await writer.stop(timeout=1)
+    for batch in db.committed:
+        if "public_mcp_daily_visitors" in batch:
+            assert set(batch) == {"public_mcp_daily_visitors"}
+        else:
+            assert "public_mcp_daily_visitors" not in batch
+
+
+async def test_other_endpoints_do_not_complete_a_crowd(writer_today):
+    db = FakeDB()
+    writer = _writer(db)
+    writer.start()
+    for i in range(9):
+        writer.offer(_visit(f"a{i}"))
+        writer.offer(_visit(f"b{i}", endpoint=ENDPOINT_2))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 18)
+    await _passes(writer)
+    assert _visitor_batches(db) == []
+    await writer.stop(timeout=1)
+
+
+async def test_a_repeated_value_counts_once(writer_today):
+    db = FakeDB()
+    writer = _writer(db)
+    writer.start()
+    for i in range(9):
+        writer.offer(_visit(f"v{i}"))
+    for _ in range(5):
+        writer.offer(_visit("v0"))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 14)
+    await _passes(writer)
+    assert _visitor_batches(db) == []
+    await writer.stop(timeout=1)
+    assert len(_visitor_batches(db)[0]) == 9
+
+
+async def test_a_finished_day_is_written_on_the_next_pass(writer_today):
+    db = FakeDB()
+    writer = _writer(db)
+    writer.start()
+    writer.offer(_visit("late"))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 1)
+    await _passes(writer, 3)
+    assert _visitor_batches(db) == []
+    writer_today["value"] = datetime(2026, 11, 7, 0, 0, 1)
+    await _until(lambda: len(_visitor_batches(db)) == 1)
+    await writer.stop(timeout=1)
+    assert [r["day"] for r in _visitor_batches(db)[0]] == [DAY_NOON.date()]
+
+
+async def test_stop_writes_every_group_whatever_its_size(writer_today):
+    db = FakeDB()
+    writer = _writer(db)
+    writer.start()
+    writer.offer(_visit("one"))
+    writer.offer(_visit("two", endpoint=ENDPOINT_2))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 2)
+    await writer.stop(timeout=1)
+    rows = [r for b in _visitor_batches(db) for r in b]
+    assert len(rows) == 2
+
+
+async def test_rows_are_sorted_by_endpoint_day_and_key(writer_today):
+    db = FakeDB()
+    writer = _writer(db, visitor_flush_min_keys=1)
+    for i in range(6):
+        writer.offer(_visit(f"v{i}", endpoint=ENDPOINT_2))
+        writer.offer(_visit(f"w{i}"))
+    writer.start()
+    await writer.stop(timeout=1)
+    rows = [r for b in _visitor_batches(db) for r in b]
+    assert len(rows) == 12
+    for batch in _visitor_batches(db):
+        keys = [(r["endpoint_id"], r["day"], r["visitor_key"]) for r in batch]
+        assert keys == sorted(keys)
+
+
+async def test_the_threshold_is_a_constructor_parameter(writer_today):
+    assert writer_module.VISITOR_FLUSH_MIN_KEYS == 10
+    db = FakeDB()
+    writer = _writer(db, visitor_flush_min_keys=2)
+    writer.start()
+    writer.offer(_visit("v0"))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 1)
+    await _passes(writer, 3)
+    assert _visitor_batches(db) == []
+    writer.offer(_visit("v1"))
+    await _until(lambda: len(_visitor_batches(db)) == 1)
+    await writer.stop(timeout=1)
+    assert len(_visitor_batches(db)[0]) == 2
+
+
+async def test_a_visitor_is_pending_only_after_its_event_was_queued(writer_today, monkeypatch):
+    db = FakeDB()
+    writer = _writer(db, queue_size=1)
+    writer.offer(_visit("queued"))
+    writer.offer(_visit("dropped-queue-full"))
+    assert writer.health().dropped_since_start == 1
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("builder bug")
+
+    with monkeypatch.context() as m:
+        m.setattr(writer_module, "build_usage_event_row", boom)
+        writer.offer(_visit("dropped-build-failed"))
+    writer.start()
+    await writer.stop(timeout=1)
+    rows = [r for b in _visitor_batches(db) for r in b]
+    from services.public_mcp_usage_events import visitor_key
+
+    assert [r["visitor_key"] for r in rows] == [
+        visitor_key(_visit("x").endpoint_id, "queued", DAY_NOON.date(), KEY)
+    ]
+
+
+async def test_an_anonymous_or_refused_call_adds_no_visitor(writer_today):
+    db = FakeDB()
+    writer = _writer(db, visitor_flush_min_keys=1)
+    writer.offer(_visit("anon", caller="anonymous"))
+    writer.offer(_visit("refused", outcome="rate_limited", error_code="rate_limit_exceeded"))
+    writer.start()
+    await writer.stop(timeout=1)
+    assert _visitor_batches(db) == []
+    assert sum(len(_events(b)) for b in db.committed) == 2
+
+
+async def test_a_failed_visitor_write_is_retried_once_then_dropped(writer_today, monkeypatch):
+    log = MagicMock()
+    monkeypatch.setattr(writer_module, "logger", log)
+
+    class VisitorFailDB(FakeDB):
+        def factory(self) -> FakeSession:
+            self.attempts += 1
+            return _VisitorFailSession(self, "ok")
+
+    class _VisitorFailSession(FakeSession):
+        async def execute(self, stmt: Any, params: list[dict] | None = None) -> None:
+            if stmt.table.name == "public_mcp_daily_visitors":
+                raise OSError("database unavailable")
+            await super().execute(stmt, params)
+
+    db = VisitorFailDB()
+    writer = _writer(db, visitor_flush_min_keys=2)
+    writer.start()
+    writer.offer(_visit("v0"))
+    writer.offer(_visit("v1"))
+    await _until(
+        lambda: any(
+            c.args[0] == "public_mcp_visitors_write_failed" for c in log.warning.call_args_list
+        )
+    )
+    # Events keep flowing.
+    writer.offer(_event())
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 3)
+    await writer.stop(timeout=1)
+    failed = next(
+        c for c in log.warning.call_args_list if c.args[0] == "public_mcp_visitors_write_failed"
+    )
+    assert failed.kwargs == {"error_type": "OSError", "dropped": 2}
+    assert _visitor_batches(db) == []
+
+
+async def test_visitors_lost_at_shutdown_are_counted(writer_today, monkeypatch):
+    log = MagicMock()
+    monkeypatch.setattr(writer_module, "logger", log)
+    db = FakeDB(default="slow")
+    writer = _writer(db, write_timeout=5.0)
+    writer.offer(_visit("v0"))
+    writer.offer(_visit("v1"))
+    writer.start()
+    await writer.stop(timeout=0.3)
+    lost = [
+        c
+        for c in log.warning.call_args_list
+        if c.args[0] == "public_mcp_telemetry_lost_at_shutdown"
+    ]
+    assert len(lost) == 1
+    assert lost[0].kwargs == {"count": 2, "visitors": 2}
+
+
+async def test_the_pending_set_is_bounded(writer_today, monkeypatch):
+    log = MagicMock()
+    monkeypatch.setattr(writer_module, "logger", log)
+    monkeypatch.setattr(writer_module, "VISITOR_PENDING_MAX", 3)
+    db = FakeDB()
+    writer = _writer(db, visitor_flush_min_keys=100)
+    for i in range(5):
+        writer.offer(_visit(f"v{i}"))
+    writer.start()
+    await writer.stop(timeout=1)
+    rows = [r for b in _visitor_batches(db) for r in b]
+    assert len(rows) == 3
+    dropped = [c for c in log.warning.call_args_list if c.args[0] == "public_mcp_visitors_dropped"]
+    assert dropped and dropped[0].kwargs["reason"] == "pending_full"
+
+
+def test_doc_key_rows_are_sorted():
+    from services.public_mcp_usage_events import BuiltUsageEvent
+    from services.public_mcp_usage_writer import _doc_key_rows
+
+    a = UUID("0b6f6f0e-4444-4c1d-8a2b-00000000000a")
+    b = UUID("0b6f6f0e-4444-4c1d-8a2b-000000000002")
+    batch = [
+        BuiltUsageEvent(row={}, doc_keys=(("ff" * 16, "d1"), ("00" * 16, "d2")), resource_pk=a),
+        BuiltUsageEvent(row={}, doc_keys=(("aa" * 16, "d3"),), resource_pk=b),
+    ]
+    rows = _doc_key_rows(batch)
+    assert [(r["resource_pk"], r["doc_key"]) for r in rows] == sorted(
+        (r["resource_pk"], r["doc_key"]) for r in rows
+    )
+    assert rows[0]["resource_pk"] == b

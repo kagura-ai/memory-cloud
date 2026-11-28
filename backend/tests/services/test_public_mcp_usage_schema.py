@@ -137,3 +137,79 @@ def test_docs_state_sessions_are_not_people_and_family_is_unverified():
     assert "Session counts are connections, not people" in docs
     assert "unverified" in docs
     assert '"client_family_verified": false' in docs
+
+
+# #3035: nothing about the caller's key, its visitor value, or the route.
+FORBIDDEN_FIELDS_3035 = {
+    "visitor_key",
+    "visitor",
+    "visitor_value",
+    "bound_key_id",
+    "api_key_id",
+    "key_id",
+    "authorization",
+    "route",
+    "caller",
+}
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        PublicMcpUsageEventV1,
+        PublicMcpUsageGapV1,
+        PublicMcpUsageDocumentV1,
+        PublicMcpUsageCoverageV1,
+        PublicMcpUsagePageV1,
+    ],
+)
+def test_the_3035_forbidden_fields_are_absent(model):
+    assert not set(model.model_fields) & FORBIDDEN_FIELDS_3035
+
+
+def test_the_v1_event_fields_are_exactly_these():
+    """Schema v1 does not change: a REST row is never exported (#3035)."""
+    assert set(PublicMcpUsageEventV1.model_fields) == {
+        "schema_version",
+        "event_id",
+        "kind",
+        "occurred_at",
+        "endpoint_id",
+        "workspace_id",
+        "context_id",
+        "resource_pk",
+        "resource_id",
+        "tool",
+        "outcome",
+        "error_code",
+        "era",
+        "protocol_version",
+        "duration_ms",
+        "result_count",
+        "continuation",
+        "documents",
+        "documents_truncated",
+        "session_key",
+        "client_family",
+    }
+
+
+def test_the_export_scope_leaves_rest_rows_out():
+    from uuid import uuid4
+
+    from sqlalchemy import select
+    from sqlalchemy.dialects import postgresql
+
+    from models.public_mcp_usage import PMU_ROUTE_REST, PublicMcpUsageEvent
+    from services.public_mcp_usage_events import _scope
+
+    for resource_pk in (None, uuid4()):
+        compiled = (
+            select(PublicMcpUsageEvent.id)
+            .where(*_scope(uuid4(), resource_pk))
+            .compile(dialect=postgresql.dialect())
+        )
+        sql = str(compiled)
+        assert "public_mcp_usage_events.route IS NULL OR public_mcp_usage_events.route !=" in sql
+        assert PMU_ROUTE_REST in compiled.params.values()
+        assert "'rest'" not in sql

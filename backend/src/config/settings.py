@@ -1420,6 +1420,20 @@ class Settings(BaseSettings):
         default=False,
         description="Record a daily session HMAC and the unverified client family",
     )
+    # #3035: REST public searches made with an API key bound to a published
+    # context, recorded in the same usage events (route `rest`, caller
+    # `bound_key`), plus the daily visitors such a key reports in the
+    # Kagura-Visitor header. Off by default; needs MCP_PUBLIC_TELEMETRY_ENABLED
+    # and a running usage writer. Anonymous REST searches are never recorded.
+    # Turn it on only behind a proxy that drops Kagura-Visitor from its logs.
+    public_search_telemetry_enabled: bool = Field(
+        default=False,
+        description=(
+            "Record REST public searches made with a key bound to a published context in "
+            "the public usage events and count the daily visitors such a key reports "
+            "(Kagura-Visitor); needs MCP_PUBLIC_TELEMETRY_ENABLED"
+        ),
+    )
 
     # #2809: verified custom domains of public MCP endpoints
     # (docs/public-mcp-domains.md). Off by default: no statement runs on
