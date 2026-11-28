@@ -259,4 +259,7 @@ async def test_route_caller_and_visitors_reach_postgres_apart(maker):
             await s.execute(
                 delete(PublicMcpDailyVisitor).where(PublicMcpDailyVisitor.endpoint_id == endpoint)
             )
+            # The workspace and its resource (and with it the doc keys).
+            await s.execute(text("DELETE FROM resources WHERE id = :id"), {"id": resource_pk})
+            await s.execute(text("DELETE FROM workspaces WHERE id = :id"), {"id": workspace_id})
             await s.commit()
