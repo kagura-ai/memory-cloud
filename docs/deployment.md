@@ -4881,6 +4881,22 @@ The event carries the error class and, for an HTTP error, the status code —
 never the error text, which for an HTTP client error embeds the request URL
 and any credentials in it.
 
+A Voyage or Cohere failure is also logged by the provider, as
+`voyage_rerank_failed` / `cohere_rerank_failed` (error) with `error_class`,
+`status_code` (the provider's HTTP status, when the error has one), `model`,
+`query_length` and `doc_count`. Neither line nor the error raised carries the
+provider's error message, which can include the response body. The voyageai
+library's own stdlib logger (`voyage`) is kept at `WARNING` whatever
+`LOG_LEVEL` says: at `INFO` it logs a failed request's error message, at
+`DEBUG` the request body (the query and every document).
+
+A Voyage or Cohere call has a time limit of 15 seconds
+(`RERANK_PROVIDER_TIMEOUT_SECONDS` in `services/reranker_service.py`): a call
+that does not answer by then fails like any other provider error
+(`error_class=TimeoutError` on the provider's line, `rerank_failed_open`
+after it) and the recall returns the un-reranked results. The Voyage call
+runs on the library's async client, so no worker thread waits on it.
+
 A rerank whose scores carry no ranking is checked in one place for every
 provider (Voyage, Cohere, `/v1/rerank`, the Ollama path), on the scores of all
 candidates before the cut to *k* (#2033):
