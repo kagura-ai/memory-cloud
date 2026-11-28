@@ -384,7 +384,7 @@ PYEOF
 
 @test "scrub: the headers that carry the token (or session material) are dropped from both logs" {
     for block in "$(log_block "$TPL")" "$(default_log_block "$TPL")"; do
-        for header in Referer Cookie Next-Router-State-Tree Next-Url X-Resource-Api-Key; do
+        for header in Referer Cookie Next-Router-State-Tree Next-Url X-Resource-Api-Key Kagura-Visitor; do
             grep -qE "^[[:space:]]*request>headers>${header} delete[[:space:]]*\$" <<< "$block" \
                 || { echo "no 'request>headers>${header} delete' in: ${block%%$'\n'*}"; return 1; }
         done

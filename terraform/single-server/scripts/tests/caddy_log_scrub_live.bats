@@ -43,6 +43,9 @@ TOKEN="k1591ScrubLiveTokenAbCdEfGhIjKlMnOpQrStUv_-9"
 # A resource token (resource-ingest credential, sent in the X-Resource-API-Key
 # request header). Distinct from TOKEN so a leak names the header it came from.
 RESOURCE_TOKEN="rtokScrubLiveResourceTokenZyXwVuTsRqPoNmLkJiHg"
+# A visitor value (sent in the Kagura-Visitor request header by a server with a
+# key bound to a public context, #3035). Distinct again, for the same reason.
+VISITOR="vis-ScrubLiveVisitorMarker-3035"
 # Distinct, synthetic OIDC credentials with the provider's 43-character suffix.
 OIDC_CODE="kmc_oidc_code_k2781CodeAbCdEfGhIjKlMnOpQrStUvWxYz01234567"
 OIDC_ACCESS="kmc_oidc_at_k2781AccessAbCdEfGhIjKlMnOpQrStUvWxYz012345"
@@ -155,8 +158,8 @@ CADDYEOF
     # Every request carries the token in the four request headers a browser on
     # the /join/<token> page sends it in, plus a resource token in the header
     # an ingester authenticates with (spelled as the API documents it; Go
-    # canonicalises it to X-Resource-Api-Key on the way in), so each line
-    # doubles as a header test.
+    # canonicalises it to X-Resource-Api-Key on the way in) and a visitor
+    # value in Kagura-Visitor, so each line doubles as a header test.
     fire() {   # $1 case id, $2 path + query, $3... extra curl arguments
         curl -s -o /dev/null --max-time 5 "${@:3}" \
             -A "scrub-case-$1" \
@@ -165,6 +168,7 @@ CADDYEOF
             -H "Next-Url: /join/$TOKEN" \
             -H "Next-Router-State-Tree: %5B%22join%22%2C%5B%22token%22%2C%22$TOKEN%22%2C%22d%22%5D%5D" \
             -H "X-Resource-API-Key: $RESOURCE_TOKEN" \
+            -H "Kagura-Visitor: $VISITOR" \
             "http://127.0.0.1:$PORT$2" || true
     }
     fire join          "/join/$TOKEN"
@@ -521,7 +525,7 @@ log0 writes to: stdout'
     done
 }
 
-@test "live: no Referer / Cookie / Next-Router-State-Tree / Next-Url / X-Resource-Api-Key key in any line" {
+@test "live: no Referer / Cookie / Next-Router-State-Tree / Next-Url / X-Resource-Api-Key / Kagura-Visitor key in any line" {
     require_live
     for c in join join-rsc join-pasted join-slash preview login login-first \
              plain-api plain-mcp plain-root plain-invites \
@@ -529,7 +533,7 @@ log0 writes to: stdout'
              plain-accept plain-pending plain-ws-inv oidc-code oidc-access oidc-refresh; do
         run logged "$c" req_headers
         [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-        # What is left is exactly what curl sent besides the five.
+        # What is left is exactly what curl sent besides the six.
         [ "$output" = "Accept User-Agent" ] || { echo "$c: $output"; return 1; }
     done
     # The POST adds the two body headers and nothing else.
@@ -644,6 +648,9 @@ log0 writes to: stdout'
     run grep -c "$RESOURCE_TOKEN" "$WORK/access.log" "$WORK/runtime.log"
     [[ "$output" == *"access.log:0"* ]]
     [[ "$output" == *"runtime.log:0"* ]]
+    run grep -c "$VISITOR" "$WORK/access.log" "$WORK/runtime.log"
+    [[ "$output" == *"access.log:0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"runtime.log:0"* ]] || { echo "$output"; return 1; }
     local credential
     for credential in "$OIDC_CODE" "$OIDC_ACCESS" "$OIDC_REFRESH"; do
         run grep -c "$credential" "$WORK/access.log" "$WORK/runtime.log"

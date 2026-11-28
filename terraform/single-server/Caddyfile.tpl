@@ -48,7 +48,7 @@
 	# so the same container log file, with the full request URI and headers. An
 	# invitee who opens a /join/<token> link while the frontend is being
 	# recreated (`deploy.sh --web`) is all it takes. So the default logger gets
-	# the same scrub: the request>uri rewrite and the five header deletes, kept
+	# the same scrub: the request>uri rewrite and the six header deletes, kept
 	# identical to the site block — the full explanation is there. Error lines
 	# carry no response headers, hence no Location / Refresh rule here.
 	#
@@ -69,6 +69,7 @@
 				request>headers>Next-Router-State-Tree delete
 				request>headers>Next-Url delete
 				request>headers>X-Resource-Api-Key delete
+				request>headers>Kagura-Visitor delete
 			}
 		}
 	}
@@ -192,7 +193,7 @@ memory.kagura-ai.com {
 	# — so any `token` query parameter is redacted too.
 	# Other requests — /api/v1/memories?..., /mcp, / — retain their diagnostics.
 	#
-	# Five request headers are dropped outright:
+	# Six request headers are dropped outright:
 	#   Referer                 a browser on the /join page may attach the URL to
 	#                           every sub-request (#1588 asks it not to)
 	#   Next-Router-State-Tree  the Next.js client sends the current route, dynamic
@@ -206,6 +207,10 @@ memory.kagura-ai.com {
 	#                           (X-Resource-Api-Key): that is the key Caddy logs,
 	#                           the lookup is case-sensitive, and the API's own
 	#                           spelling X-Resource-API-Key would match nothing.
+	#   Kagura-Visitor          the visitor value a server sends with a key bound
+	#                           to a public context, on the REST public search
+	#                           (#3035); the application never stores it as sent,
+	#                           so the proxy log must not either.
 	#
 	# Syntax notes — each is pinned by scripts/tests/log_hygiene_static.bats and
 	# proven against the real image by scripts/tests/caddy_log_scrub_live.bats:
@@ -251,6 +256,7 @@ memory.kagura-ai.com {
 				request>headers>Next-Router-State-Tree delete
 				request>headers>Next-Url delete
 				request>headers>X-Resource-Api-Key delete
+				request>headers>Kagura-Visitor delete
 			}
 		}
 	}
