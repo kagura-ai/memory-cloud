@@ -58,11 +58,20 @@ RERANK_CHUNK_TEXT_MAX_CHARS = 1500
 #: (a resource-indexed point), lead fields and context summary included.
 RERANK_RESOURCE_DOC_MAX_CHARS = 1500
 
-#: Fields of a resource-indexed point's ``metadata`` put first in its rerank
-#: document, in this order. The indexed text lists fields in schema order
-#: (by name for the sync feed schema), so a long ``brand`` or ``answer`` would
-#: otherwise push a product's title and sku or an FAQ's question past the cap.
+#: Fields of a resource-indexed point whose line of the indexed text is put
+#: first in its rerank document, in this order. The indexed text lists fields
+#: in schema order (by name for the sync feed schema), so a long ``brand`` or
+#: ``answer`` would otherwise push a product's title and sku or an FAQ's
+#: question past the cap. The value is read from the point's ``metadata``; the
+#: line is moved only when the indexed text holds it, so the document never
+#: carries a field the indexed text does not.
 RERANK_RESOURCE_LEAD_FIELDS = ("title", "question", "sku")
+
+#: Room in a resource rerank document always left to a context summary the
+#: user wrote or edited (it goes after the indexed text): at most half the cap,
+#: so a long summary never pushes the indexed text out, nor a long text the
+#: summary. A short indexed text leaves it the rest of the cap.
+RERANK_RESOURCE_USER_SUMMARY_ROOM = RERANK_RESOURCE_DOC_MAX_CHARS // 2
 
 #: The longest ``context_summary`` the resource indexer writes for a document
 #: (see :func:`resource_context_summary`).
@@ -254,25 +263,46 @@ def _is_indexer_context_summary(context_summary: str, content: str) -> bool:
         return False
 
 
-def _without_line(text: str, line: str) -> str:
-    """``text`` without ``line`` when it is one whole line of it, exactly once."""
-    padded = f"\n{text}\n"
-    needle = f"\n{line}\n"
-    if padded.count(needle) != 1:
-        return text
-    at = padded.index(needle)
-    return (padded[:at] + "\n" + padded[at + len(needle) :])[1:-1]
+def _take_lead_line(text: str, name: str, value: str) -> tuple[str | None, str]:
+    """Take the indexed-text line of field ``name`` (value ``value``) out of ``text``.
+
+    The indexed text writes a field as ``<label>: <value>``, the label being
+    the field's description when the schema gives one, else its name; a value
+    can span lines. Returns ``(line, rest)`` when exactly one line is labelled
+    ``name`` or, failing that, exactly one line of any label carries the value;
+    else ``(None, text)`` (the field is not in the indexed text, or which line
+    is its own is ambiguous).
+    """
+    needle = f": {value}"
+    spans: list[tuple[int, int, str]] = []
+    at = text.find(needle)
+    while at != -1:
+        end = at + len(needle)
+        if end == len(text) or text[end] == "\n":
+            start = text.rfind("\n", 0, at) + 1
+            if start < at:
+                spans.append((start, end, text[start:at]))
+        at = text.find(needle, at + 1)
+    named = [span for span in spans if span[2] == name]
+    picked = named if len(named) == 1 else spans if len(spans) == 1 else []
+    if not picked:
+        return None, text
+    start, end, _label = picked[0]
+    before = text[: max(start - 1, 0)]
+    after = text[end + 1 :]
+    rest = f"{before}\n{after}" if before and after else before or after
+    return text[start:end], rest
 
 
 def _resource_rerank_document(payload: dict[str, Any]) -> str:
     """Rerank document of a payload without a ``summary`` (a resource-indexed point).
 
-    The lead fields first (``RERANK_RESOURCE_LEAD_FIELDS`` found in the
-    payload's ``metadata``, each as ``<name>: <value>`` and taken out of the
-    rest when the content holds that exact line once), then the
-    ``context_summary`` unless it is the indexer's own cut of ``content``
-    (kept when the user wrote or edited it), then the rest of ``content``,
-    one per line. Cut to ``RERANK_RESOURCE_DOC_MAX_CHARS`` by the caller.
+    The lines of the lead fields first (``RERANK_RESOURCE_LEAD_FIELDS``, moved
+    out of ``content`` when it holds them, see :func:`_take_lead_line`), then
+    the rest of ``content``, then the ``context_summary`` unless it is the
+    indexer's own cut of ``content`` (kept when the user wrote or edited it).
+    Fits ``RERANK_RESOURCE_DOC_MAX_CHARS``: a kept context summary always gets
+    ``RERANK_RESOURCE_USER_SUMMARY_ROOM`` and the indexed text the rest.
     """
     content = payload.get("content")
     content = content if isinstance(content, str) else ""
@@ -286,16 +316,23 @@ def _resource_rerank_document(payload: dict[str, Any]) -> str:
                 continue
             if isinstance(value, str) and not value.strip():
                 continue
-            line = f"{name}: {value}"
-            parts.append(line)
-            rest = _without_line(rest, line)
-    context_summary = payload.get("context_summary")
-    if isinstance(context_summary, str) and not _is_indexer_context_summary(
-        context_summary, content
-    ):
-        parts.append(context_summary)
+            line, rest = _take_lead_line(rest, name, str(value))
+            if line is not None:
+                parts.append(line)
     parts.append(rest)
-    return "\n".join(p for p in parts if p.strip())
+    body = "\n".join(p for p in parts if p.strip())
+    context_summary = payload.get("context_summary")
+    if (
+        not isinstance(context_summary, str)
+        or not context_summary.strip()
+        or _is_indexer_context_summary(context_summary, content)
+    ):
+        return body
+    if not body:
+        return context_summary[:RERANK_RESOURCE_DOC_MAX_CHARS]
+    room = max(RERANK_RESOURCE_USER_SUMMARY_ROOM, RERANK_RESOURCE_DOC_MAX_CHARS - len(body) - 1)
+    kept = context_summary[:room]
+    return f"{body[: RERANK_RESOURCE_DOC_MAX_CHARS - len(kept) - 1]}\n{kept}"
 
 
 def rerank_document(candidate: dict[str, Any]) -> str:
@@ -307,8 +344,8 @@ def rerank_document(candidate: dict[str, Any]) -> str:
     document never cuts the summary.
 
     No payload key is required (#3031): a payload without a ``summary`` (the
-    point the resource indexer writes) is scored on its lead fields, a
-    context summary the user wrote and its ``content``
+    point the resource indexer writes) is scored on its ``content`` with the
+    lead fields' lines first, then a context summary the user wrote
     (:func:`_resource_rerank_document`), the whole document cut to
     ``RERANK_RESOURCE_DOC_MAX_CHARS``. A candidate with no text at all gets
     ``RERANK_EMPTY_DOCUMENT``, so one candidate never fails the whole pool and

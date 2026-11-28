@@ -13,6 +13,7 @@ from utils.content_chunks import (
     RERANK_CHUNK_TEXT_MAX_CHARS,
     RERANK_EMPTY_DOCUMENT,
     RERANK_RESOURCE_DOC_MAX_CHARS,
+    RERANK_RESOURCE_USER_SUMMARY_ROOM,
     RESOURCE_CONTEXT_SUMMARY_MAX_CHARS,
     build_chunk_payload,
     chunk_point_id,
@@ -185,8 +186,9 @@ class TestRerankDocument:
 
     def test_resource_payload_keeps_a_context_summary_the_user_wrote(self):
         # Not the indexer's cut of the content: an edit, or a remember(external_id) row.
+        # It goes after the indexed text, which stays first.
         doc = rerank_document({"payload": {"content": "title: Q3 plan", "context_summary": "why"}})
-        assert doc == "why\ntitle: Q3 plan"
+        assert doc == "title: Q3 plan\nwhy"
 
     def test_resource_payload_drops_the_indexers_own_context_summary(self):
         content = "title: Q3 plan\ndescription: budget"
@@ -201,10 +203,33 @@ class TestRerankDocument:
         assert doc == content[:RERANK_RESOURCE_DOC_MAX_CHARS]
 
     def test_a_user_context_summary_stays_inside_the_cap(self):
+        # A long content and a long user summary share the cap: the summary
+        # gets at most half of it, the content the rest.
         payload = {"content": "body: " + "b" * 3000, "context_summary": "u" * 1000}
         doc = rerank_document({"payload": payload})
         assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
-        assert doc.startswith("u" * 1000 + "\nbody: ")
+        assert doc.startswith("body: b")
+        room = RERANK_RESOURCE_USER_SUMMARY_ROOM
+        assert doc.endswith("b\n" + "u" * room)
+
+    def test_a_short_content_leaves_the_rest_of_the_cap_to_the_user_summary(self):
+        payload = {"content": "title: T", "context_summary": "u" * 2000}
+        doc = rerank_document({"payload": payload})
+        assert doc == ("title: T\n" + "u" * 2000)[:RERANK_RESOURCE_DOC_MAX_CHARS]
+
+    def test_a_long_user_summary_never_pushes_the_indexed_text_out(self):
+        # A remember(external_id) row or an edited row keeps its own context
+        # summary, up to 2,000 characters; the non-lead lines must survive it.
+        content = "title: Trail shoe\nbrand: B\ndescription: waterproof " + "w" * 400
+        payload = {
+            "content": content,
+            "context_summary": "u" * 2000,
+            "metadata": {"title": "Trail shoe"},
+        }
+        doc = rerank_document({"payload": payload})
+        assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
+        assert doc.startswith("title: Trail shoe\nbrand: B\ndescription: waterproof ")
+        assert "u" * RERANK_RESOURCE_USER_SUMMARY_ROOM in doc
 
     def test_lead_fields_come_first_from_the_metadata(self):
         content = "answer: long answer\nquestion: How do I return an item?"
@@ -226,6 +251,31 @@ class TestRerankDocument:
             {"payload": {"content": content, "metadata": {"title": "line one\nline two"}}}
         )
         assert doc == "title: line one\nline two\nbrand: B"
+
+    def test_a_lead_line_keeps_the_label_of_the_indexed_text(self):
+        # An owner schema labels a line with the field's description.
+        content = "Colour: red\nProduct name: Shoe"
+        doc = rerank_document({"payload": {"content": content, "metadata": {"title": "Shoe"}}})
+        assert doc == "Product name: Shoe\nColour: red"
+        assert "title:" not in doc
+
+    def test_a_lead_field_not_in_the_indexed_text_is_not_sent(self):
+        # metadata holds every public field, also one with only a facet hint.
+        content = "brand: B\ndescription: D"
+        payload = {"content": content, "metadata": {"title": "Shoe", "sku": "SKU-1"}}
+        doc = rerank_document({"payload": payload})
+        assert doc == content
+        assert "Shoe" not in doc
+
+    def test_a_lead_value_on_two_differently_labelled_lines_stays_in_place(self):
+        content = "Colour: Red\nProduct name: Red\nsize: 9"
+        doc = rerank_document({"payload": {"content": content, "metadata": {"title": "Red"}}})
+        assert doc == content
+
+    def test_a_numeric_lead_value_moves_its_line(self):
+        content = "brand: B\nsku: 12345"
+        doc = rerank_document({"payload": {"content": content, "metadata": {"sku": 12345}}})
+        assert doc == "sku: 12345\nbrand: B"
 
     def test_without_metadata_the_content_comes_first(self):
         content = "brand: B\ntitle: T"

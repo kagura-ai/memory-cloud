@@ -4888,7 +4888,10 @@ A Voyage or Cohere failure is also logged by the provider, as
 provider's error message, which can include the response body. The voyageai
 library's own stdlib logger (`voyage`) is kept at `WARNING` whatever
 `LOG_LEVEL` says: at `INFO` it logs a failed request's error message, at
-`DEBUG` the request body (the query and every document).
+`DEBUG` the request body (the query and every document). Leave the library's
+`VOYAGE_LOG` environment variable unset in production: set to `info` or
+`debug`, it prints the same request body and error detail straight to stderr,
+whatever `LOG_LEVEL` and the logger level say.
 
 A Voyage or Cohere call has a time limit of 15 seconds
 (`RERANK_PROVIDER_TIMEOUT_SECONDS` in `services/reranker_service.py`): a call
