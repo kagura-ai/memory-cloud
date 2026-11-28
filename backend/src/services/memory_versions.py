@@ -14,7 +14,7 @@ caller owns the transaction (the row commits with the write it describes).
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -613,7 +613,9 @@ class TextEditEvent:
     restored_from: int | None = None
 
 
-def last_text_edit_at(events: Iterable[TextEditEvent]) -> datetime | None:
+def last_text_edit_at(
+    events: Iterable[TextEditEvent], *, carried: datetime | None = None
+) -> datetime | None:
     """When an edit wrote the text a memory holds now, if one did (#3019).
 
     Walks one memory's ``updated`` events in version order. An API edit that
@@ -625,11 +627,16 @@ def last_text_edit_at(events: Iterable[TextEditEvent]) -> datetime | None:
     candidates stay. An erasure's details revert and an edit of other fields
     are skipped.
 
+    ``carried`` (#3051): the time a context merge carried to the memory
+    (``carried_text_edit_at``), the time its version-1 text was written. It is
+    the first candidate, at version 1, so a rollback that names its block
+    keeps it and one that names none drops it like the others.
+
     Returns:
         The time of the last candidate left, or None when, as far as the log
         tells, the text is the one the memory was created with.
     """
-    return text_edit_times(events).last
+    return text_edit_times(events, carried=carried).last
 
 
 @dataclass(frozen=True)
@@ -650,10 +657,14 @@ class TextEditTimes:
     unsure_until: datetime | None = None
 
 
-def text_edit_times(events: Iterable[TextEditEvent]) -> TextEditTimes:
+def text_edit_times(
+    events: Iterable[TextEditEvent], *, carried: datetime | None = None
+) -> TextEditTimes:
     """The walk of ``last_text_edit_at``, with the doubt a rollback that names
-    no block leaves (#3019)."""
-    live: list[tuple[int, datetime]] = []
+    no block leaves (#3019), from the time a context merge carried (#3051)."""
+    # An ``updated`` event moves the version to 2 or more: the carried text
+    # is version 1's.
+    live: list[tuple[int, datetime]] = [(1, carried)] if carried is not None else []
     unsure: datetime | None = None
     for event in sorted(events, key=lambda e: e.version):
         if event.writer == REVISION_WRITER_API:
@@ -712,10 +723,138 @@ def revision_log_began_query() -> Select[datetime]:
     ``content`` made after it wrote an ``updated`` revision of that memory
     (``record_edit``; the session rollback writes one too). Rows only leave
     with their memory, which can make the value later, never earlier. A
-    context-merge copy is a new row: what its source logged is not its own
-    (docs/sleep-maintenance.md). No row: nothing tells when logging began.
+    context-merge copy is a new row: its source's edits stay logged under the
+    source's id, and the last of them travels on the copy
+    (``carried_text_edit_at``, #3051). No row: nothing tells when logging
+    began.
     """
     return select(MemoryRevision.at).order_by(MemoryRevision.id).limit(1)
+
+
+# #3051: how many memory ids one revision read names. A context merge reads
+# its whole source context; a statement stays far below the driver's bind
+# parameter limit.
+TEXT_EDIT_READ_CHUNK = 1000
+
+
+def carried_text_edit_at(row: Any) -> datetime | None:
+    """The text-edit time a context merge carried to ``row`` (#3051).
+
+    ``Memory.carried_text_edited_at``; None on a row that carries none, and on
+    a row read without the column (a partial select, a test double).
+    """
+    value = getattr(row, "carried_text_edited_at", None)
+    return value if isinstance(value, datetime) else None
+
+
+def _edited_version(version: object) -> bool:
+    """A ``Memory.version`` above 1: an edit moved it at least once (#3019).
+
+    Anything that is not an int (a test double, a missing attribute) reads as
+    unedited, so no revision read is made for it.
+    """
+    return isinstance(version, int) and not isinstance(version, bool) and version > 1
+
+
+@dataclass(frozen=True)
+class TextEditReads:
+    """What ``read_text_edit_times`` found (#3019, #3051).
+
+    Attributes:
+        times: Per row id, what tells when its text was last written. A row
+            at version 1 is here only when a context merge carried an edit
+            time to it.
+        unread: The rows whose revision read failed: their logged edits are
+            unknown, and their entry in ``times`` is empty (the carried time
+            is not used either: an edit of the row itself may be later).
+        error: The read's exception, for the caller's log; None when the read
+            succeeded or none was needed.
+    """
+
+    times: dict[UUID, TextEditTimes]
+    unread: frozenset[UUID] = frozenset()
+    error: Exception | None = None
+
+
+def _pending_rows(rows: Iterable[Any], skip: Container[UUID]) -> list[Any]:
+    """``rows`` without those in ``skip`` and without repeats, in order."""
+    pending: dict[UUID, Any] = {}
+    for row in rows:
+        if row.id not in skip and row.id not in pending:
+            pending[row.id] = row
+    return list(pending.values())
+
+
+def _rows_to_read(rows: list[Any]) -> list[UUID]:
+    return [row.id for row in rows if _edited_version(getattr(row, "version", None))]
+
+
+async def _text_edit_events(db: AsyncSession, ids: list[UUID]) -> dict[UUID, list[TextEditEvent]]:
+    """The ``updated`` events of ``ids``, ``TEXT_EDIT_READ_CHUNK`` ids a statement."""
+    events: dict[UUID, list[TextEditEvent]] = {}
+    for start in range(0, len(ids), TEXT_EDIT_READ_CHUNK):
+        chunk = ids[start : start + TEXT_EDIT_READ_CHUNK]
+        for row in (await db.execute(text_edit_events_query(chunk))).all():
+            events.setdefault(row.memory_id, []).append(text_edit_event(row))
+    return events
+
+
+def _walk_rows(
+    rows: list[Any], events: Mapping[UUID, list[TextEditEvent]], read: set[UUID]
+) -> dict[UUID, TextEditTimes]:
+    """``text_edit_times`` per read row; the carried time alone for the others."""
+    times: dict[UUID, TextEditTimes] = {}
+    for row in rows:
+        carried = carried_text_edit_at(row)
+        if row.id in read:
+            times[row.id] = text_edit_times(events.get(row.id, ()), carried=carried)
+        elif carried is not None:
+            times[row.id] = TextEditTimes(last=carried)
+    return times
+
+
+async def text_edit_times_of(db: AsyncSession, rows: Iterable[Any]) -> dict[UUID, TextEditTimes]:
+    """``read_text_edit_times`` without the savepoint, for a caller whose
+    transaction ends on a failed read (a context merge): what the read raises
+    propagates."""
+    pending = _pending_rows(rows, frozenset())
+    ids = _rows_to_read(pending)
+    events = await _text_edit_events(db, ids) if ids else {}
+    return _walk_rows(pending, events, set(ids))
+
+
+async def read_text_edit_times(
+    db: AsyncSession, rows: Iterable[Any], *, skip: Container[UUID] = frozenset()
+) -> TextEditReads:
+    """When each of ``rows``' text was last written, as far as the revision
+    log and a context merge tell (#3019, #3051): the recency Sleep dedup's
+    winner rules compare, for every phase that orders two memories by it.
+
+    ``rows`` carry ``id``, ``version`` and, on a merge copy,
+    ``carried_text_edited_at`` (``carried_text_edit_at``). A row at version 1
+    was never edited through a versioned path: nothing is read for it, and
+    its text is the one it was created with (a copy's was written at its
+    carried time). The other rows' ``updated`` revisions are read in a
+    savepoint, one statement per ``TEXT_EDIT_READ_CHUNK`` ids (an index range
+    read on ``idx_memory_revisions_memory`` each), and walked by
+    ``text_edit_times`` from the carried time. A read that fails is rolled
+    back to its savepoint and reported (``TextEditReads.unread`` / ``error``);
+    the caller's transaction goes on. Ids in ``skip`` (read before) and
+    repeated rows are left out.
+    """
+    pending = _pending_rows(rows, skip)
+    ids = _rows_to_read(pending)
+    if not ids:
+        return TextEditReads(times=_walk_rows(pending, {}, set()))
+    try:
+        async with db.begin_nested():
+            events = await _text_edit_events(db, ids)
+    except Exception as exc:
+        read = set(ids)
+        times = _walk_rows([row for row in pending if row.id not in read], {}, set())
+        times.update((memory_id, TextEditTimes()) for memory_id in ids)
+        return TextEditReads(times=times, unread=frozenset(ids), error=exc)
+    return TextEditReads(times=_walk_rows(pending, events, set(ids)))
 
 
 def text_edit_event(row: Any) -> TextEditEvent:

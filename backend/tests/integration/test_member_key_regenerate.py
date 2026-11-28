@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from api.routes.member_credentials import regenerate_api_key
@@ -339,3 +339,124 @@ async def test_rotation_waits_on_the_key_owners_user_row_before_the_key(
         (await world.db.scalars(select(APIKey).where(APIKey.workspace_id == workspace_id))).all()
     )
     assert rows == []
+
+
+async def _blocked_pid(probe, holder_pid: int, task: asyncio.Task, timeout: float = 15):
+    """The backend ``holder_pid`` blocks, or None once ``task`` ended without
+    waiting on it."""
+    async with asyncio.timeout(timeout):
+        while not task.done():
+            pid = await probe.scalar(
+                text("SELECT pid FROM pg_stat_activity WHERE :h = ANY(pg_blocking_pids(pid))"),
+                {"h": holder_pid},
+            )
+            await probe.rollback()  # a fresh snapshot each round
+            if pid is not None:
+                return pid
+            await asyncio.sleep(0.02)
+    return None
+
+
+async def _tuple_locks(probe, pid: int) -> list[str]:
+    """The relations of the row locks ``pid`` waits for (a row lock waiter
+    holds the tuple lock of the row it waits on)."""
+    rows = (
+        await probe.scalars(
+            text(
+                "SELECT relation::regclass::text FROM pg_locks "
+                "WHERE pid = :pid AND locktype = 'tuple'"
+            ),
+            {"pid": pid},
+        )
+    ).all()
+    await probe.rollback()
+    return list(rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(90)
+async def test_rotation_waits_on_its_workspace_row_before_the_key(
+    connector_world, fernet_api_key_secret
+):
+    """#3052: deleting or erasing a workspace's sole owner locks the workspace
+    row first and reaches the members' keys only in the workspace delete
+    cascade. A member's rotation locks the workspace row ``FOR KEY SHARE``
+    (the lock the replacement's foreign key takes anyway) before the key, so
+    it waits on the deletion holding no key: the deletion takes the key at
+    once, deletes everything, and the rotation answers 404 without minting."""
+    from models.auth import Workspace, WorkspaceMember
+
+    world = connector_world
+    owner = await world.user("rotate-owner")
+    member = await world.user("rotate-member")
+    ws = await world.workspace(owner, **{member: "member"})
+    old = await world.db.get(APIKey, await world.personal_key(member, ws))
+    public_id = old.public_id
+    workspace_id = ws.id
+    await world.db.commit()
+    maker = async_sessionmaker(world.db.bind, expire_on_commit=False)
+    async with maker() as holder, maker() as rotating, maker() as probe:
+        await holder.execute(
+            select(Workspace.id).where(Workspace.id == workspace_id).with_for_update()
+        )
+        holder_pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(
+            _rotate(SimpleNamespace(db=rotating), ws, member, public_id, requester=member)
+        )
+        try:
+            pid = await _blocked_pid(probe, holder_pid, task)
+            assert pid is not None, "the rotation never waited on the workspace row"
+            assert await _tuple_locks(probe, pid) == ["workspaces"]
+            # It holds no key: the deletion takes the workspace's keys at once.
+            await holder.execute(
+                select(APIKey.id)
+                .where(APIKey.workspace_id == workspace_id)
+                .with_for_update(nowait=True)
+            )
+            await holder.execute(delete(APIKey).where(APIKey.workspace_id == workspace_id))
+            await holder.execute(
+                delete(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace_id)
+            )
+            await holder.execute(delete(Workspace).where(Workspace.id == workspace_id))
+            await holder.commit()
+        finally:
+            await holder.rollback()
+            outcome = await asyncio.gather(asyncio.wait_for(task, 30), return_exceptions=True)
+    error = outcome[0]
+    assert isinstance(error, HTTPException), error
+    assert error.status_code == 404
+    world.db.expire_all()
+    rows = list(
+        (await world.db.scalars(select(APIKey).where(APIKey.workspace_id == workspace_id))).all()
+    )
+    assert rows == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(90)
+async def test_rotation_does_not_wait_on_an_edit_of_its_workspace(
+    connector_world, fernet_api_key_secret
+):
+    """``FOR KEY SHARE``: a transaction editing the workspace row (``FOR NO
+    KEY UPDATE``) does not hold the rotation up."""
+    from models.auth import Workspace
+
+    world = connector_world
+    owner = await world.user("rotate-owner")
+    ws = await world.workspace(owner)
+    old = await world.db.get(APIKey, await world.personal_key(owner, ws))
+    public_id = old.public_id
+    workspace_id = ws.id
+    await world.db.commit()
+    maker = async_sessionmaker(world.db.bind, expire_on_commit=False)
+    async with maker() as holder, maker() as rotating:
+        await holder.execute(
+            update(Workspace).where(Workspace.id == workspace_id).values(name=f"edited-{public_id}")
+        )
+        try:
+            response = await asyncio.wait_for(
+                _rotate(SimpleNamespace(db=rotating), ws, owner, public_id), 10
+            )
+        finally:
+            await holder.rollback()
+    assert response.key_id != public_id

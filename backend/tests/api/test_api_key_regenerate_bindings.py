@@ -93,6 +93,8 @@ def _db(old_key) -> MagicMock:
     db.execute = AsyncMock(
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old_key))
     )
+    # #3052: the key's workspace, read before the rotation's locks.
+    db.scalar = AsyncMock(return_value=getattr(old_key, "workspace_id", None))
     db.flush = AsyncMock()
     db.commit = AsyncMock()
     return db

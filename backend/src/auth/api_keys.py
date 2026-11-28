@@ -17,7 +17,7 @@ from sqlalchemy.orm import aliased
 
 from auth.connector_keys import CONNECTOR_KEY_PREFIX
 from config.settings import get_settings
-from models.auth import APIKey, Context, Workspace, WorkspaceMember
+from models.auth import APIKey, Context, User, Workspace, WorkspaceMember
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
@@ -91,6 +91,53 @@ class VerifiedKey(NamedTuple):
     public_id: str | None = None
     connector_id: UUID | None = None
     connector_scoped: bool = False
+
+
+async def lock_key_rotation(db: AsyncSession, *, key_owner: str, workspace_id: UUID | None) -> bool:
+    """Take the locks a key rotation needs before it locks the key, in order.
+
+    The order of the paths that end a user's or a workspace's keys:
+
+    1. The key owner's ``users`` row ``FOR KEY SHARE`` (#2370). User deletion,
+       account erasure and member removal lock that row ``FOR UPDATE`` before
+       they sweep the user's contexts and keys, so the rotation reads the key
+       after any such sweep has committed (a swept key is the route's 404) and
+       never mints a replacement the sweep has passed.
+    2. For a workspace-scoped key, the workspace row ``FOR KEY SHARE`` (#3052),
+       the lock the replacement's foreign key takes anyway. Deleting or erasing
+       the workspace's sole owner locks the workspace row first and reaches
+       the members' keys only in the workspace delete cascade; a rotation that
+       locked the key first and the workspace at its insert would deadlock
+       with it. Taken first, it waits holding no key, or the deletion waits on
+       it.
+
+    ``FOR KEY SHARE`` does not wait on an ordinary edit of either row. The
+    caller reads (and locks) the key afterwards; the locks only order.
+
+    Args:
+        db: The rotation's session.
+        key_owner: The user whose key is rotated.
+        workspace_id: The key's workspace; None for a key without one (a
+            global or a public-bound key: the bound context is locked by the
+            caller, after the key is read).
+
+    Returns:
+        False when the workspace row is gone after the wait (the rotation's
+        404); True otherwise.
+    """
+    await db.execute(
+        select(User.user_id)
+        .where(User.user_id == key_owner)
+        .with_for_update(read=True, key_share=True)
+    )
+    if workspace_id is None:
+        return True
+    locked = await db.execute(
+        select(Workspace.id)
+        .where(Workspace.id == workspace_id)
+        .with_for_update(read=True, key_share=True)
+    )
+    return locked.scalar_one_or_none() is not None
 
 
 async def key_owner_holds_workspace(db: AsyncSession, *, user_id: str, workspace_id: UUID) -> bool:

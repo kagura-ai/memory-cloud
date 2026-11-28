@@ -301,6 +301,11 @@ class TestSessionOnly:
         async def _db():
             yield db
 
+        async def _probe_db():
+            # Its own session: an accepted key's verification is committed
+            # (#3052), and ``db`` pins that the refusing routes commit nothing.
+            yield AsyncMock()
+
         probe = FastAPI()
 
         @probe.get("/probe")
@@ -311,7 +316,7 @@ class TestSessionOnly:
         async def _probe_put(user: APIKeyOrSessionUser) -> dict:
             return {"user_id": user["user_id"]}
 
-        probe.dependency_overrides[get_db] = _db
+        probe.dependency_overrides[get_db] = _probe_db
         probe_client = TestClient(probe)
         assert probe_client.get("/probe", headers=headers).json() == {"user_id": "u1"}
         assert probe_client.put("/probe", headers=headers).json() == {"user_id": "u1"}

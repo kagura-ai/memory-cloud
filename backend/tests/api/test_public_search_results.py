@@ -432,6 +432,16 @@ def _counter(value: int):
     return _incr
 
 
+def _window(value: int):
+    """The pre-key bucket's counter (#3054: a returnable window slot)."""
+    from db.redis import WindowSlot
+
+    async def _take(key: str, ttl: int = 60) -> WindowSlot:
+        return WindowSlot(key=key, count=value, expires_at_ms=None)
+
+    return _take
+
+
 def test_a_rate_limit_error_without_a_reason_has_no_reason_key() -> None:
     from utils.exceptions import RateLimitError
 
@@ -460,6 +470,7 @@ async def test_each_refusal_names_its_limit(
 
     with (
         patch.object(route, "incrby_counter", _counter(count)),
+        patch.object(route, "take_window_slot", _window(count)),
         pytest.raises(RateLimitError) as exc,
     ):
         await getattr(route, check)(*args)
@@ -485,7 +496,7 @@ async def test_the_pre_auth_refusal_names_its_limit_on_search_and_info() -> None
         lambda: get_public_context_info(context_id=context_id, api_key="kagura_x", db=MagicMock()),
     ):
         with (
-            patch.object(route, "incrby_counter", _counter(201)),
+            patch.object(route, "take_window_slot", _window(201)),
             pytest.raises(RateLimitError) as exc,
         ):
             await call()

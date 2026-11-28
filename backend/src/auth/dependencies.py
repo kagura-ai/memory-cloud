@@ -514,6 +514,33 @@ def _apply_connector_key_scope(request: Request, verified: VerifiedKey) -> None:
     )
 
 
+async def _commit_key_verification(db: AsyncSession) -> None:
+    """End the transaction that verified an accepted API key, before the route runs.
+
+    ``APIKeyManager.verify_key`` writes the throttled ``last_used_at`` (and an
+    agent key's ``last_seen_at``) in the request's session. Left open until the
+    request's final commit, that write would keep the key row locked through
+    the whole route. A key rotation locks the key's workspace row ``FOR KEY
+    SHARE`` before the key (#3052, ``lock_key_rotation``); a route that then
+    locks the workspace row ``FOR UPDATE`` (the memory quota check, a context
+    creation) would wait on the rotation while the rotation waits on its key
+    row. Committed here, as ``verify_api_key`` (MCP) and the public search
+    already do, the request holds no key row past authentication, and
+    concurrent requests with the same key do not queue behind its stamp.
+
+    Called only once every check has accepted the key: a refused key raises
+    before this point and the request's rollback drops what the verification
+    wrote. ``expire_on_commit=False`` keeps the loaded rows usable. A failed
+    commit loses only that metadata and does not fail the authentication: it
+    is rolled back and logged.
+    """
+    try:
+        await db.commit()
+    except Exception as commit_err:
+        logger.warning("api_key_last_used_commit_failed", error_type=type(commit_err).__name__)
+        await db.rollback()
+
+
 async def verify_api_key_user(
     request: Request,
     api_key: str | None = Depends(get_api_key),
@@ -561,6 +588,8 @@ async def verify_api_key_user(
 
     # #2929: a connector key only where a connector key is accepted.
     _apply_connector_key_scope(request, result)
+    # The key is accepted: the request keeps no lock on its key row (#3052).
+    await _commit_key_verification(db)
 
     # Issue #1275: record the verified agent binding for the chokepoints.
     from auth.agent_scope import set_agent_scope_from_verified
@@ -748,6 +777,8 @@ async def get_user_from_api_key_or_session(
             # #2929: a connector key only where a connector key is accepted. A
             # refusal raises here: the session branch below is never reached.
             _apply_connector_key_scope(request, result)
+            # The key is accepted: the request keeps no lock on its key row (#3052).
+            await _commit_key_verification(db)
             # Issue #1275: record the verified agent binding for the chokepoints.
             from auth.agent_scope import set_agent_scope_from_verified
 

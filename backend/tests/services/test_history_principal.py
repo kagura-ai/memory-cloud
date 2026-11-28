@@ -108,7 +108,7 @@ async def test_real_rest_auth_adapters_replace_stale_principal(monkeypatch):
 
     key = VerifiedKey(1, "owner", uuid4(), None, public_id="akey_" + "a" * 22)
     monkeypatch.setattr("auth.api_keys.APIKeyManager.verify_key", AsyncMock(return_value=key))
-    await get_user_from_api_key_or_session(request, "kagura_test", MagicMock())
+    await get_user_from_api_key_or_session(request, "kagura_test", AsyncMock())
     assert get_history_principal().kind == "api_key"
     assert get_history_principal().credential_id == key.public_id
 

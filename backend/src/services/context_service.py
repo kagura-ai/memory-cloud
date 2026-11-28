@@ -1340,6 +1340,16 @@ class ContextService:
         )
         source_memories = result.scalars().all()
 
+        # #3051: when an edit last wrote each source's text. The copy is a new
+        # row at version 1 with no revision log of its own (its source's edits
+        # stay logged under the source's id), so the time travels on the copy
+        # and Sleep dedup's recency rule reads it. One indexed read per
+        # thousand edited sources; a source never edited (version 1) reads
+        # nothing and passes on what it carries itself (a copy of a copy).
+        from services.memory_versions import text_edit_times_of
+
+        text_written = await text_edit_times_of(self.db, source_memories)
+
         # Build ID mapping and copy memories in PostgreSQL.
         #
         # #1497: only rows that HAVE a vector go into the mapping — that dict is
@@ -1358,6 +1368,7 @@ class ContextService:
             embedded = mem.embedding_status == "success" and not erased_author
             if embedded:
                 memory_id_mapping[str(mem.id)] = str(new_id)
+            written = text_written.get(mem.id)
 
             # Normalize nested context JSON to reference target context
             ctx_json = mem.context
@@ -1445,6 +1456,10 @@ class ContextService:
                 embedding_attempted_at=mem.embedding_attempted_at if erased_author else None,
                 created_at=mem.created_at,
                 updated_at=utcnow(),
+                # #3051: None when the source's text is the one it was created
+                # with, or when a session rollback naming no reverted block
+                # left it unknown which edit's text it holds.
+                carried_text_edited_at=written.last if written is not None else None,
             )
             self.db.add(new_mem)
             rows_by_new_id[str(new_id)] = new_mem
