@@ -194,12 +194,19 @@ async def world(async_engine) -> AsyncIterator[World]:
             await s.rollback()
             ids = list(ws.values())
             users = [owner, admin, member, outsider]
-            from models.auth import ShareKey
+            from models.auth import AuditLog, ShareKey
+            from models.memory_access_event import MemoryAccessEvent
+            from models.operation_history import OperationHistory
 
             for stmt in (
                 delete(WorkspaceSlotSuspension).where(
                     WorkspaceSlotSuspension.workspace_id.in_(ids)
                 ),
+                # No foreign keys: the history, the access audit and the
+                # purge's audit rows outlive the workspaces.
+                delete(OperationHistory).where(OperationHistory.workspace_id.in_(ids)),
+                delete(MemoryAccessEvent).where(MemoryAccessEvent.workspace_id.in_(ids)),
+                delete(AuditLog).where(AuditLog.resource.in_([f"workspace:{i}" for i in ids])),
                 delete(ShareKey).where(ShareKey.user_id.in_(users)),
                 delete(Agent).where(Agent.workspace_id.in_(ids)),
                 delete(Workspace).where(Workspace.id.in_(ids)),

@@ -19,6 +19,7 @@ from auth.workspace_roles import WorkspaceRole
 from models.agent import Agent, AgentContextBinding
 from models.auth import APIKey, AuditLog, Context, User, Workspace, WorkspaceMember
 from models.erasure import REASON_USER_REQUEST_VIA_SUPPORT, STATUS_COMPLETE, ErasureRequest
+from models.operation_history import OperationHistory
 from services.account_erasure_service import AccountErasureService, _audit_salt
 from services.connector_key_ownership import DEPARTED_MEMBER_CREDENTIALS_ACTION
 from services.workspace_service import WorkspaceService
@@ -197,6 +198,7 @@ class _ConnectorWorld:
         self.db.expire_all()
 
     async def cleanup(self) -> None:
+        """Delete what the test committed through this world, by its own ids."""
         await self.db.rollback()
         pseudonyms = [sha256_hex(t, salt=_audit_salt()) for t in self.targets]
         await self.db.execute(
@@ -205,11 +207,18 @@ class _ConnectorWorld:
                 & AuditLog.user_id.in_(pseudonyms)
             )
         )
+        # Every audit row its users wrote (a link, a departure's credentials),
+        # and the ones an operator wrote about its workspaces (a transfer, a
+        # purge).
+        await self.db.execute(delete(AuditLog).where(AuditLog.user_id.in_(self.targets)))
         await self.db.execute(
             delete(AuditLog).where(
-                (AuditLog.action == DEPARTED_MEMBER_CREDENTIALS_ACTION)
-                & AuditLog.user_id.in_(self.targets)
+                AuditLog.resource.in_([f"workspace:{ws_id}" for ws_id in self.workspace_ids])
             )
+        )
+        # No foreign key: the history outlives its workspace.
+        await self.db.execute(
+            delete(OperationHistory).where(OperationHistory.workspace_id.in_(self.workspace_ids))
         )
         await self.db.execute(
             delete(ErasureRequest).where(ErasureRequest.user_id.in_(self.targets + pseudonyms))
