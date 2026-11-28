@@ -3,6 +3,8 @@
 Targets:
 - _try_parse_relevance_score: pure score-string parser (percent / fraction / plain; None for no number)
 - VoyageReranker / CohereReranker: input validation + success/error mapping
+  (what a failure logs and raises, and the time limit:
+  test_reranker_provider_errors.py)
   (external clients are imported lazily inside rerank(), so we inject fakes
   into sys.modules — never a real network call)
 - SelfHostedReranker: httpx.AsyncClient.post is patched to return canned JSON,
@@ -167,14 +169,14 @@ class TestVoyageReranker:
         """A successful voyage call maps results to index/relevance_score dicts."""
         fake_module = types.ModuleType("voyageai")
 
-        class _Client:
-            def __init__(self, api_key):
+        class _AsyncClient:
+            def __init__(self, api_key, **kwargs):
                 self.api_key = api_key
 
-            def rerank(self, query, documents, model, top_k):
+            async def rerank(self, query, documents, model, top_k):
                 return _FakeRerankResponse([_FakeRerankResult(1, 0.9), _FakeRerankResult(0, 0.4)])
 
-        fake_module.Client = _Client
+        fake_module.AsyncClient = _AsyncClient
         monkeypatch.setitem(sys.modules, "voyageai", fake_module)
 
         r = VoyageReranker("k", model="rerank-2.5")
@@ -189,14 +191,14 @@ class TestVoyageReranker:
         """An exception from the voyage client is wrapped in VoyageError."""
         fake_module = types.ModuleType("voyageai")
 
-        class _Client:
-            def __init__(self, api_key):
+        class _AsyncClient:
+            def __init__(self, api_key, **kwargs):
                 pass
 
-            def rerank(self, **kwargs):
+            async def rerank(self, **kwargs):
                 raise RuntimeError("boom")
 
-        fake_module.Client = _Client
+        fake_module.AsyncClient = _AsyncClient
         monkeypatch.setitem(sys.modules, "voyageai", fake_module)
 
         r = VoyageReranker("k")
@@ -207,14 +209,14 @@ class TestVoyageReranker:
         """A ValueError raised inside the client is re-raised as-is, not wrapped."""
         fake_module = types.ModuleType("voyageai")
 
-        class _Client:
-            def __init__(self, api_key):
+        class _AsyncClient:
+            def __init__(self, api_key, **kwargs):
                 pass
 
-            def rerank(self, **kwargs):
+            async def rerank(self, **kwargs):
                 raise ValueError("bad arg")
 
-        fake_module.Client = _Client
+        fake_module.AsyncClient = _AsyncClient
         monkeypatch.setitem(sys.modules, "voyageai", fake_module)
 
         r = VoyageReranker("k")
@@ -250,7 +252,7 @@ class TestCohereReranker:
         fake_module = types.ModuleType("cohere")
 
         class _AsyncClient:
-            def __init__(self, api_key):
+            def __init__(self, api_key, **kwargs):
                 self.api_key = api_key
 
             async def rerank(self, model, query, documents, top_n):
@@ -270,7 +272,7 @@ class TestCohereReranker:
         fake_module = types.ModuleType("cohere")
 
         class _AsyncClient:
-            def __init__(self, api_key):
+            def __init__(self, api_key, **kwargs):
                 pass
 
             async def rerank(self, **kwargs):
@@ -287,7 +289,7 @@ class TestCohereReranker:
         fake_module = types.ModuleType("cohere")
 
         class _AsyncClient:
-            def __init__(self, api_key):
+            def __init__(self, api_key, **kwargs):
                 pass
 
             async def rerank(self, **kwargs):
@@ -864,7 +866,16 @@ class TestRerankerServiceRerank:
             ]
         )
         monkeypatch.setattr(service, "get_active_provider", AsyncMock(return_value=fake_provider))
-        resource = {"payload": {"content": "title: Q3 plan\nowner: ops", "context_summary": "c"}}
+        # The indexer writes the indexed text as the context summary too; it is
+        # not sent twice.
+        indexed = "owner: ops\ntitle: Q3 plan"
+        resource = {
+            "payload": {
+                "content": indexed,
+                "context_summary": indexed,
+                "metadata": {"owner": "ops", "title": "Q3 plan"},
+            }
+        }
         candidates = [self._candidate("ordinary summary"), resource]
         outcome: dict = {}
 
@@ -872,7 +883,7 @@ class TestRerankerServiceRerank:
 
         assert outcome["scored"] is True
         documents = fake_provider.rerank.await_args.args[1]
-        assert documents == ["ordinary summary ", "title: Q3 plan\nowner: ops c"]
+        assert documents == ["ordinary summary ", "title: Q3 plan\nowner: ops"]
         assert all(d.strip() for d in documents)
         assert out[0] is resource
 

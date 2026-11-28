@@ -149,6 +149,10 @@ def _wrap_uvicorn_handlers() -> None:
                 handler.setFormatter(_RedactingStdlibFormatter(handler.formatter))
 
 
+#: Stdlib loggers of provider libraries kept at WARNING whatever LOG_LEVEL says.
+_QUIET_LIBRARY_LOGGERS = ("voyage",)
+
+
 def setup_logger(
     log_level: str | None = None,
     enable_colors: bool = True,
@@ -203,6 +207,13 @@ def setup_logger(
         root_logger.addHandler(stdlib_handler)
 
     _wrap_uvicorn_handlers()
+
+    # Provider libraries that log request or error text through stdlib
+    # logging: voyageai logs a failed request's error message at INFO and the
+    # request body at DEBUG on "voyage". Their warnings still come through;
+    # our own failure lines carry the error class and status instead.
+    for name in _QUIET_LIBRARY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     # Determine if colors should be enabled
     use_colors = enable_colors and (os.getenv("LOG_COLORIZE", "true").lower() == "true")
