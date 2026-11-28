@@ -424,7 +424,10 @@ async def test_a_soft_deleted_context_cannot_be_bound(world):
             user={"user_id": member, "sub": member, "email": f"{member}@example.test"},
             db=w.db,
         )
-    assert refused.value.status_code == 404
+    assert (refused.value.status_code, refused.value.detail) == (
+        404,
+        "bound_context_id: context not found",
+    )
     await w.db.rollback()
     assert (
         await w.db.scalar(
