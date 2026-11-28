@@ -88,6 +88,8 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 
 import { OnboardingCard } from "./OnboardingCard";
 import { ApiError } from "@/lib/api/base";
+import en from "@/messages/en.json";
+import ja from "@/messages/ja.json";
 
 function setWorkspace(role: string = "owner") {
   mockUseWorkspace.mockReturnValue({
@@ -214,6 +216,15 @@ describe("OnboardingCard trigger gating", () => {
     expect(await screen.findByText(text)).toBeVisible();
     expect(screen.queryByText("errors.saveFailed")).not.toBeInTheDocument();
     expect(screen.queryByText("English server prose")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["en", en, "(1,000 of 1,000)"],
+    ["ja", ja, "（1,000 / 1,000 件）"],
+  ])("formats the memory limit counts for the locale (%s)", async (locale, messages, counts) => {
+    const { createTranslator } = await vi.importActual<typeof import("next-intl")>("next-intl");
+    const t = createTranslator({ locale, messages, namespace: "onboarding" });
+    expect(t("errors.memoryLimit", { current: 1000, limit: 1000 })).toContain(counts);
   });
 
   it("keeps the generic save failure for another quota refusal", async () => {
