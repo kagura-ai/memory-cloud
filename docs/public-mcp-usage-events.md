@@ -70,7 +70,7 @@ So the stream says where it is incomplete instead of skipping silently. If the d
 
 ## Retention
 
-A daily job (04:50 UTC, on the scheduler leader) deletes events older than `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` (default 90), gap rows included, and the document keys of resources that have had no live public endpoint since before that cutoff. Daily visitor rows ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) go in the same run once their UTC day is before the cutoff's day.
+A daily job (04:50 UTC, on the scheduler leader) deletes events older than `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` (default 90), gap rows included, and the document keys of resources that have had no live public endpoint since before that cutoff. Daily visitor rows ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) go in the same run once their UTC day is before the cutoff's day. The per-day counts ([Day counts](#day-counts)) go in the same run for every day that starts before the cutoff.
 
 ## Reading the stream: the commit-safe cursor
 
@@ -121,6 +121,15 @@ A page envelope: `{schema_version, deployment_id, as_of, events, next_cursor, ha
 - Bounds: one read has a time budget of about six seconds, each statement a timeout of at most five seconds; a workspace can read its statistics 30 times per minute (`429` `RATE-001` with `Retry-After: 60`). When the day counts cannot be read the answer is `503` `usage_stats_unavailable` with `Retry-After: 60`. The route writes nothing.
 
 Statistics exist for the live endpoint only: publishing again creates a new endpoint that starts at zero.
+
+### Day counts
+
+The day counts of a past UTC day are read from a small table of per-day counts ([#3053](https://github.com/kagura-ai/memory-cloud/issues/3053)), so a 30- or 90-day window does not read every event of the window; only today, and any past day that is not closed yet, is counted from the events. The numbers are the same either way, and the response does not say which was read.
+
+- **Written with the events.** The usage writer adds a batch's calls to the counts of their endpoint, UTC day, workspace, tool, outcome, route and caller in the transaction that inserts the batch. It counts the rows that transaction inserted, so a batch that is sent again after a commit that landed adds nothing, and a batch that fails adds nothing. A call counts for the UTC day it started on, also when it is written after midnight.
+- **Closed days.** An hourly job (at minute 20, on the scheduler leader) closes every retained day that ended at least 15 minutes earlier: it counts the day again from its events in one transaction and marks it closed, newest day first, for at most ten minutes per run. Only closed days are read from the counts. Events written before this table existed, or by a release that does not keep the counts while a deployment changes over, are counted when their day is closed; until then that day is read from the events. Yesterday is closed at about 00:20 UTC.
+- A call written later for a day that is already closed is added to that day's counts. The writer and the close of a day take one lock per UTC day, so the close never misses or double counts a call that is being written.
+- **Retention.** The daily purge deletes the counts and the closed mark of every day that starts before its cutoff. A statistics window never reaches such a day.
 
 The canonical owner can read the same body for a synchronization installation's endpoint through the installation's registered browser client (`GET /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-usage-stats`, experimental, `public.usage.stats.v1`; [Workspace sync installations](ops/workspace-sync-installations.md)). Its reads count in the same 30 reads per minute of the workspace.
 
