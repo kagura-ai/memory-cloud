@@ -481,7 +481,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "rows indexed from connected sources count; deleting frees it). quota_type "
         "'memories_per_day' counts creations per UTC day and frees itself at resets_at "
         "(deleting does not help). Both carry gate 'quota', current, limit, current_plan "
-        "and required_plan when a tier lifts the limit; get_usage shows the numbers. "
+        "and required_plan when a tier lifts the limit; get_usage, outside the core "
+        'profile (describe_tools(["get_usage"]) has its schema), shows the numbers. '
         "The total limit adds remedies ('cleanup', then 'upgrade' or 'admin'), help and "
         "never_delivered_count: how many of YOUR memories in the target context are over "
         f"{NEVER_DELIVERED_AGE_DAYS} days old and were never delivered (the total of "
