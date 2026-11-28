@@ -327,3 +327,135 @@ async def test_remember_names_the_target_context_on_the_refusal(is_private) -> N
     )
     # The daily gate is never reached once the total cap refused.
     refusing.check_memories_per_day.assert_not_awaited()
+
+
+# ---------------------------------------------------------------- a replacement at the cap
+
+
+def _counts(live: int, replaced: int) -> MagicMock:
+    """The one row of the live count with the replaced rows among it."""
+    result = MagicMock()
+    result.one.return_value = (live, replaced)
+    return result
+
+
+async def _check_replacing(live: int, replaced: int, *, limit: int = 1000):
+    from services.quota_service import QuotaService
+
+    db = _execute_returning(
+        _workspace_result(SimpleNamespace(plan_name=PlanName.FREE)), _counts(live, replaced)
+    )
+    effective = MagicMock(get_effective_quotas=AsyncMock(return_value={"memory_limit": limit}))
+    with (
+        patch("services.quota_service.EffectiveQuotaService", return_value=effective),
+        patch("services.plan_headroom.billing_configured", return_value=True),
+        ph.collect_plan_headroom_counts() as counts,
+    ):
+        try:
+            outcome: object = await QuotaService(db).check_memory_quota(
+                uuid4(), raise_on_exceeded=True, replacing=(uuid4(),)
+            )
+        except QuotaExceededError as e:
+            outcome = e
+    return outcome, counts.readings[ph.MEMORIES], db
+
+
+class TestReplacementAtTheCap:
+    """update_memory(external_id=...) creates the new row before it forgets the
+    old one; the live count does not grow, so the total cap allows it."""
+
+    @pytest.mark.asyncio
+    async def test_a_replacement_at_the_cap_is_allowed(self) -> None:
+        outcome, reading, db = await _check_replacing(1000, 1)
+
+        assert outcome == (True, None)
+        # The count this write leaves: the new row in, the replaced one out.
+        assert (reading.used, reading.limit) == (1000, 1000)
+        # The live count and the replaced rows among it: one statement.
+        assert db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_replaced_row_that_is_gone_makes_no_room(self) -> None:
+        """A replaced row someone else forgot meanwhile is not live any more:
+        the write is a creation and the cap refuses it."""
+        outcome, reading, _ = await _check_replacing(1000, 0)
+
+        assert isinstance(outcome, QuotaExceededError)
+        assert mcr.is_memory_cap(outcome)
+        assert (outcome.details["current"], outcome.details["limit"]) == (1000, 1000)
+        assert reading.used == 1000
+
+    @pytest.mark.asyncio
+    async def test_a_replacement_over_the_cap_is_still_refused(self) -> None:
+        """Over the cap (a downgrade) a replacement still leaves too many rows."""
+        outcome, _, _ = await _check_replacing(1001, 1)
+
+        assert isinstance(outcome, QuotaExceededError)
+        assert outcome.details["current"] == 1001
+        assert outcome.message.startswith("Memory quota exceeded. Current: 1001, Limit: 1000 ")
+
+
+def _quota_service(**over: object) -> MagicMock:
+    return MagicMock(
+        check_memory_quota=AsyncMock(return_value=(True, None)),
+        check_memories_per_day=AsyncMock(return_value=(True, None)),
+        **over,
+    )
+
+
+@pytest.mark.asyncio
+async def test_remember_hands_the_replaced_rows_to_the_total_cap() -> None:
+    from services.memory_service import MemoryService
+
+    service = MemoryService(_execute_returning())
+    service.memory_repo = MagicMock(create=AsyncMock())
+    service._finish_remember = AsyncMock()  # type: ignore[method-assign]
+    context = MagicMock(id=uuid4(), workspace_id=uuid4(), is_private=False)
+    service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+        return_value=(context, str(context.workspace_id), str(context.id))
+    )
+    service.db.commit = AsyncMock()
+    replaced = (uuid4(), uuid4())
+    quota = _quota_service()
+    with patch("services.quota_service.QuotaService", return_value=quota):
+        await service.remember(
+            RememberRequest(summary="a summary long enough", content="c", type="note"),
+            user_id="u",
+            current_context_id=context.id,
+            _skip_daily_quota=True,
+            _replacing=replaced,
+        )
+
+    quota.check_memory_quota.assert_awaited_once_with(
+        context.workspace_id, raise_on_exceeded=True, replacing=replaced
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rows", [0, 1, 2])
+async def test_the_upsert_names_every_row_it_replaces(rows: int) -> None:
+    from models.schemas import UpdateMemoryRequest
+    from services.memory_service import MemoryService
+
+    service = MemoryService(_execute_returning())
+    matches = [MagicMock(id=uuid4(), details=None, delivery_mode="on_recall") for _ in range(rows)]
+    service.memory_repo = MagicMock(list_by_resource_id=AsyncMock(return_value=matches))
+    service._is_private_context = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    remembered = MagicMock(memory_id=uuid4(), scope="working", persistence=None, lint=[])
+    for field in ("observed_at", "event_start", "event_end", "event_phrase"):
+        setattr(remembered, field, None)
+    service.remember = AsyncMock(return_value=remembered)  # type: ignore[method-assign]
+    service.forget = AsyncMock()  # type: ignore[method-assign]
+
+    response = await service.update_memory(
+        UpdateMemoryRequest(
+            external_id="doc-1", summary="an upserted summary", content="c", type="note"
+        ),
+        user_id="u",
+        current_context_id=uuid4(),
+    )
+
+    kwargs = service.remember.await_args.kwargs
+    assert kwargs["_replacing"] == tuple(m.id for m in matches)
+    assert kwargs["_skip_daily_quota"] is (rows > 0)
+    assert response.operation == ("replaced" if rows else "created")

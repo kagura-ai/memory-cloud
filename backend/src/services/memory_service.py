@@ -1387,6 +1387,7 @@ class MemoryService:
         tags_normalize: bool = False,
         dedupe: str = DEDUPE_SUGGEST,
         tag_canonical: dict[str, list[tuple[str, int]]] | None = None,
+        _replacing: Collection[UUID] = (),
     ) -> RememberResponse:
         """Store new memory.
 
@@ -1411,6 +1412,10 @@ class MemoryService:
                 memory-creation quota. Private: only ``_upsert_by_external_id``
                 sets it, when the new row REPLACES an existing external_id
                 (an update from the caller's point of view, not a creation).
+            _replacing: The rows the new one replaces (#3022). Private: only
+                ``_upsert_by_external_id`` sets it; the total memory cap
+                leaves those still live out of the count, as the upsert
+                forgets them once this row is committed.
 
         Returns:
             RememberResponse with memory_id and scope
@@ -1434,6 +1439,7 @@ class MemoryService:
             dedupe=dedupe,
             tag_canonical=tag_canonical,
             private_workspace_id=private_workspace_id,
+            replacing=_replacing,
         )
         if private_workspace_id is not None:
             await self._check_private_target(
@@ -1515,6 +1521,7 @@ class MemoryService:
         private_workspace_id: UUID | None = None,
         isolation: tuple[Any, str | None, str | None] | None = None,
         tag_canonical: dict[str, list[tuple[str, int]]] | None = None,
+        replacing: Collection[UUID] = (),
     ) -> _PreparedRemember:
         """Everything ``remember`` does before the row is committed (#1853).
 
@@ -1522,6 +1529,7 @@ class MemoryService:
         context_id_str)`` when the caller prepares several rows for one
         context (``remember_many``); ``tag_canonical`` the per-call fold map
         for ``tags_normalize``, shared so later items see earlier spellings.
+        ``replacing`` the rows this one replaces (see ``remember``).
 
         Context resolution and the write gate, the optional duplicate check,
         quotas, size, the details transforms and the row itself — but no
@@ -1595,7 +1603,7 @@ class MemoryService:
         # lands in; the resolution above is shared with the daily gate.
         try:
             can_create, error = await quota_service.check_memory_quota(
-                target_workspace_id, raise_on_exceeded=True
+                target_workspace_id, raise_on_exceeded=True, replacing=replacing
             )
         except QuotaExceededError as e:
             # #3022: the surface that answers the refusal counts the caller's
@@ -3615,7 +3623,9 @@ class MemoryService:
         #
         # #1549: a REPLACEMENT is an update to the caller (the memory count
         # does not grow), so only a brand-new external_id is charged against
-        # the daily memory-creation quota.
+        # the daily memory-creation quota. #3022: for the same reason the
+        # total cap leaves the rows it replaces out of the count — a
+        # workspace at its limit can still update a memory by external_id.
         result = await self.remember(
             remember_request,
             user_id=user_id,
@@ -3624,6 +3634,7 @@ class MemoryService:
             current_workspace_id=current_workspace_id,
             key_workspace_id=key_workspace_id,
             _skip_daily_quota=existing is not None,
+            _replacing=tuple(match.id for match in matches),
         )
 
         # Only forget old memory after new one is successfully created.

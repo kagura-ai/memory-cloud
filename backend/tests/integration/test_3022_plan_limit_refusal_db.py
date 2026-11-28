@@ -4,9 +4,11 @@ A workspace at its (patched, small) effective memory limit holds old,
 never-delivered memories of the caller and of another member. A refused write
 answers with ``never_delivered_count`` equal to the ``total`` of the caller's
 own ``never_delivered`` list for the target context, on MCP ``remember``,
-``remember_batch`` and REST ``POST /memory/remember``; in a private context
-and under an agent binding too. The count runs after the refused transaction
-was rolled back: the workspace row lock is free while it runs.
+``remember_batch``, ``update_memory``'s create half and REST
+``POST /memory/remember``; in a private context and under an agent binding
+too. The count runs after the refused transaction was rolled back: the
+workspace row lock is free while it runs. A replacement by external_id at
+the limit is no new memory and is not refused.
 
 The tests commit, so each deletes what it wrote, by its own ids: later files
 in the same CI shard read whole tables and expect them empty.
@@ -22,12 +24,13 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.workspace_roles import WorkspaceRole
 from config.constants import NEVER_DELIVERED_AGE_DAYS
 from models.auth import Context, User, Workspace, WorkspaceMember
+from models.deferred_point_delete import DeferredPointDelete
 from models.memory import Memory
 from models.schemas import RememberRequest
 from services import exempt_tags as exempt_module
@@ -55,6 +58,14 @@ async def _delete_committed_rows(db_session: AsyncSession):
     yield
     await db_session.rollback()
     workspaces = _committed["workspaces"]
+    # A forget queues its row's point delete; the rows' revisions cascade.
+    await db_session.execute(
+        delete(DeferredPointDelete).where(
+            DeferredPointDelete.memory_id.in_(
+                select(Memory.id).where(Memory.workspace_id.in_(workspaces))
+            )
+        )
+    )
     await db_session.execute(delete(Memory).where(Memory.workspace_id.in_(workspaces)))
     await db_session.execute(delete(Context).where(Context.workspace_id.in_(workspaces)))
     await db_session.execute(
@@ -307,3 +318,92 @@ async def test_rest_remember_names_the_same_number(db_session, at_the_limit):
     assert details["quota_type"] == "memories"
     assert details["never_delivered_count"] == expected == 3
     assert raised.value.message.endswith("plan + addons). " + never_delivered_sentence(3))
+
+
+# ---------------------------------------------------------------- update_memory at the limit
+
+EXTERNAL_ID = "doc-at-the-limit"
+
+
+@pytest.fixture
+def memory_limit(monkeypatch) -> dict[str, int]:
+    """Every workspace's effective memory limit is ``value``, set by the test."""
+    limit = {"value": 0}
+
+    async def _limit(self, workspace_id):
+        return {"memory_limit": limit["value"]}
+
+    monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit)
+    return limit
+
+
+async def _live(db: AsyncSession, ws: UUID) -> int:
+    count = await db.scalar(
+        select(func.count(Memory.id)).where(Memory.workspace_id == ws, Memory.deleted_at.is_(None))
+    )
+    await db.rollback()
+    return int(count or 0)
+
+
+async def _mcp_update(db: AsyncSession, caller: str, ws: UUID, ctx: UUID, external_id: str) -> dict:
+    from mcp_server.tools.memory import handle_update_memory
+
+    with (
+        patch("db.base.get_db", new=_get_db(db)),
+        patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),
+        patch("services.memory_service.process_pending_embedding", new=AsyncMock()),
+        patch.object(MemoryService, "delete_forgotten_points", new=AsyncMock()),
+    ):
+        (block,) = await handle_update_memory(
+            {
+                "context_id": str(ctx),
+                "external_id": external_id,
+                "summary": "the external document, rewritten",
+                "content": "new content",
+                "type": "note",
+            },
+            caller,
+            ws,
+        )
+    return json.loads(block.text)
+
+
+async def test_update_memory_replaces_an_external_id_at_the_limit(db_session, memory_limit):
+    caller, ws, ctx = await _world(db_session)
+    old = await _row(db_session, caller, ws, ctx, details={"resource_id": EXTERNAL_ID})
+    await db_session.commit()
+    memory_limit["value"] = at_the_limit = await _live(db_session, ws)
+
+    payload = await _mcp_update(db_session, caller, ws, ctx, EXTERNAL_ID)
+
+    assert "error" not in payload, payload
+    assert payload["operation"] == "replaced"
+    rows = (
+        await db_session.execute(
+            select(Memory.id, Memory.deleted_at).where(
+                Memory.context_id == ctx, Memory.resource_id == EXTERNAL_ID
+            )
+        )
+    ).all()
+    assert {row.id for row in rows if row.deleted_at is None} == {UUID(payload["memory_id"])}
+    assert {row.id for row in rows if row.deleted_at is not None} == {old}
+    assert await _live(db_session, ws) == at_the_limit
+
+
+async def test_update_memory_with_a_new_external_id_at_the_limit_is_refused(
+    db_session, memory_limit
+):
+    caller, ws, ctx = await _world(db_session)
+    memory_limit["value"] = await _live(db_session, ws)
+    expected = await _listed_total(db_session, caller, ctx, private=False)
+
+    payload = await _mcp_update(db_session, caller, ws, ctx, EXTERNAL_ID)
+
+    assert payload["error"] == "quota_exceeded"
+    assert (payload["gate"], payload["quota_type"]) == ("quota", "memories")
+    assert payload["never_delivered_count"] == expected == 3
+    assert payload["remedies"][0] == "cleanup"
+    stored = await db_session.scalar(
+        select(Memory.id).where(Memory.context_id == ctx, Memory.resource_id == EXTERNAL_ID)
+    )
+    assert stored is None

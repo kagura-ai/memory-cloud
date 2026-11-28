@@ -11,6 +11,7 @@ Responsibilities:
 
 import asyncio
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -39,7 +40,7 @@ from models.auth import (
     WorkspaceMember,
 )
 from services.effective_quota_service import EffectiveQuotaService
-from services.memory_counts import count_live_memories
+from services.memory_counts import count_live_memories, count_live_memories_among
 from services.plan_headroom import (
     MEMORIES,
     MEMORIES_PER_DAY,
@@ -150,12 +151,19 @@ class QuotaService:
         self,
         workspace_id: UUID,
         raise_on_exceeded: bool = False,
+        *,
+        replacing: Collection[UUID] = (),
     ) -> tuple[bool, str | None]:
         """Check if workspace can create more memories.
 
         Args:
             workspace_id: Workspace ID
             raise_on_exceeded: If True, raise QuotaExceededError instead of returning False
+            replacing: The rows this write replaces (``update_memory`` by
+                external_id writes the new row, then forgets these). Those
+                still live in this workspace are left out of the count, so a
+                replacement at the limit is allowed; one that is gone already
+                makes no room.
 
         Returns:
             Tuple of (can_create, error_message)
@@ -184,7 +192,16 @@ class QuotaService:
         # workspaces too and refused remember before the limit was reached.
         # Note: This count is still subject to TOCTOU race conditions between check and insert.
         #       For strict enforcement, consider adding a database CHECK constraint.
-        current_count = await count_live_memories(self.db, workspace_id)
+        # The rows this write replaces are counted in the same statement,
+        # under the workspace row lock: a row another request forgot meanwhile
+        # is in neither number, so it cannot make room twice.
+        if replacing:
+            current_count, replaced = await count_live_memories_among(
+                self.db, workspace_id, replacing
+            )
+        else:
+            current_count, replaced = await count_live_memories(self.db, workspace_id), 0
+        counted = current_count - replaced
 
         # No zero-count shortcut (#1939): a tier whose memory_limit is 0 must
         # refuse the first memory too, so the limit is always read.
@@ -193,13 +210,14 @@ class QuotaService:
         effective_quotas = await effective_quota_service.get_effective_quotas(workspace_id)
         memory_limit = effective_quotas["memory_limit"]
 
-        # #2615: the count this write leaves (its own row included) for the
-        # plan headroom notice of an MCP write; a no-op on every other path.
+        # #2615: the count this write leaves (its own row included, the rows
+        # it replaces left out) for the plan headroom notice of an MCP write;
+        # a no-op on every other path.
         record_quota_reading(
             MEMORIES,
             QuotaReading(
                 workspace_id=workspace_id,
-                used=current_count + 1 if current_count < memory_limit else current_count,
+                used=counted + 1 if counted < memory_limit else current_count,
                 limit=memory_limit,
                 plan=workspace.plan_name,
             ),
@@ -239,7 +257,7 @@ class QuotaService:
             return False, error
 
         # Check against effective limit
-        if current_count >= memory_limit:
+        if counted >= memory_limit:
             return _refuse()
 
         return True, None
