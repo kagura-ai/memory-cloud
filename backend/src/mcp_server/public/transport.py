@@ -90,14 +90,14 @@ logger = get_logger(__name__)
 PUBLIC_SERVER_INFO = {"name": "kagura-memory-cloud-public", "version": APP_VERSION}
 
 PUBLIC_INSTRUCTIONS_NAME_CAP = 40
-# The whole text, name and counts included (worst case 378, #2995, #3035).
-PUBLIC_INSTRUCTIONS_MAX = 380
+# The whole text, name and counts included (worst case 478, #2995, #3035, #3055).
+PUBLIC_INSTRUCTIONS_MAX = 500
 # The last sentence says what a call leaves on the server; "24 hours" is
 # ``embedding_service.EMBEDDING_CACHE_TTL_SECONDS`` (a test pins the two).
 _PUBLIC_INSTRUCTIONS = (
     "Read-only public data of {name}{facts}. Call get_context_info first for the owner's "
     "description and usage guide. recall searches it{by}; list_tags lists categories. "
-    "Calls are counted without query text; a search's embedding is cached for 24 hours."
+    "{note}Calls are counted without query text; a search's embedding is cached for 24 hours."
 )
 
 NOT_PUBLISHED_BODY = {
@@ -122,9 +122,9 @@ def public_instructions(endpoint: ServingEndpoint, facts: DatasetFacts | None) -
     guide are data, returned by ``get_context_info``.
     """
     name = cut_summary(flatten_summary(endpoint.public_name), PUBLIC_INSTRUCTIONS_NAME_CAP)
-    shown, by = render_facts(facts) if facts is not None else (None, "")
+    shown, by, note = render_facts(facts) if facts is not None else (None, "", "")
     return _PUBLIC_INSTRUCTIONS.format(
-        name=name or "this dataset", facts=f": {shown}" if shown else "", by=by
+        name=name or "this dataset", facts=f": {shown}" if shown else "", by=by, note=note
     )
 
 

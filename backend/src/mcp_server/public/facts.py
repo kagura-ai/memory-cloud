@@ -54,7 +54,9 @@ DATASET_FACTS_FAILURE_TTL_SECONDS: Final = 60
 DATASET_FACTS_WAIT_SECONDS: Final = 2.5
 
 # sync_feeds.kind -> the group it is counted in. Closed: anything else is "other".
-_KIND_GROUPS: Final = {"product": "products", "faq": "faq"}
+_KIND_GROUPS: Final = {"product": "products", "faq": "faq", "page": "pages", "review": "reviews"}
+# Said once, before the last sentence, while the dataset holds reviews (#3055).
+REVIEWS_NOTE: Final = "Reviews are customers' words, not the owner's. "
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,8 @@ class DatasetFacts:
 
     products: int = 0
     faq: int = 0
+    pages: int = 0
+    reviews: int = 0
     other: int = 0
 
 
@@ -98,31 +102,34 @@ def render_count(count: int) -> str:
     return f"{count // step * step:,}+"
 
 
-def _join(parts: list[str]) -> str:
+def _join(parts: list[str], last: str = " and ") -> str:
     if len(parts) == 1:
         return parts[0]
-    return ", ".join(parts[:-1]) + " and " + parts[-1]
+    return ", ".join(parts[:-1]) + last + parts[-1]
 
 
-def render_facts(facts: DatasetFacts) -> tuple[str, str]:
-    """``(facts, search hint)`` for the instructions template, from fixed words only."""
+def render_facts(facts: DatasetFacts) -> tuple[str, str, str]:
+    """``(facts, search hint, note)`` for the instructions template, from fixed words only.
+
+    The note is ``REVIEWS_NOTE`` while the dataset holds reviews, else empty.
+    """
     groups: list[str] = []
-    if facts.products > 0:
-        groups.append(f"products ({render_count(facts.products)})")
-    if facts.faq > 0:
-        groups.append(f"FAQ ({render_count(facts.faq)})")
+    terms: list[str] = []
+    for count, word, searched_by in (
+        (facts.products, "products", ("product name", "model number")),
+        (facts.faq, "FAQ", ("question",)),
+        (facts.pages, "page sections", ("topic",)),
+        (facts.reviews, "reviews", ("product name",)),
+    ):
+        if count > 0:
+            groups.append(f"{word} ({render_count(count)})")
+            terms += [term for term in searched_by if term not in terms]
     if facts.other > 0:
         word = "other entries" if groups else "entries"
         groups.append(f"{word} ({render_count(facts.other)})")
-    if facts.products > 0 and facts.faq > 0:
-        hint = " by product name, model number or question"
-    elif facts.products > 0:
-        hint = " by product name or model number"
-    elif facts.faq > 0:
-        hint = " by question"
-    else:
-        hint = ""
-    return (_join(groups) if groups else "no entries yet"), hint
+    hint = " by " + _join(terms, " or ") if terms else ""
+    note = REVIEWS_NOTE if facts.reviews > 0 else ""
+    return (_join(groups) if groups else "no entries yet"), hint, note
 
 
 async def count_dataset_facts(db: AsyncSession, endpoint: ServingEndpoint) -> DatasetFacts:
@@ -146,7 +153,7 @@ async def count_dataset_facts(db: AsyncSession, endpoint: ServingEndpoint) -> Da
         .where(public_rows(endpoint))
         .group_by(SyncFeed.kind)
     )
-    counts = {"products": 0, "faq": 0, "other": 0}
+    counts = {"products": 0, "faq": 0, "pages": 0, "reviews": 0, "other": 0}
     for kind, count in (await db.execute(statement)).all():
         counts[_KIND_GROUPS.get(kind, "other") if isinstance(kind, str) else "other"] += int(count)
     return DatasetFacts(**counts)

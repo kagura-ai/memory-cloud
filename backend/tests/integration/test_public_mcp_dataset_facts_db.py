@@ -129,7 +129,7 @@ async def world(async_engine) -> AsyncIterator[SimpleNamespace]:
                 config_version=1,
                 revision=1,
             )
-            for kind in ("product", "faq")
+            for kind in ("product", "faq", "page", "review")
         }
         s.add_all(list(feeds.values()))
         event = ResourceEvent(
@@ -149,6 +149,11 @@ async def world(async_engine) -> AsyncIterator[SimpleNamespace]:
             ("product", "sync:p3"),
             ("faq", "sync:f1"),
             ("faq", "sync:f2"),
+            # #3055: the kinds of record schema version 2.
+            ("page", "sync:g1"),
+            ("page", "sync:g2"),
+            ("page", "sync:g3"),
+            ("review", "sync:r1"),
         ]
         for kind, doc in records:
             s.add(
@@ -170,6 +175,10 @@ async def world(async_engine) -> AsyncIterator[SimpleNamespace]:
             _memory(ws.id, ctx.id, owner, slug=slug, doc="sync:p3", deleted_at=utcnow()),
             _memory(ws.id, ctx.id, owner, slug=slug, doc="sync:f1"),
             _memory(ws.id, ctx.id, owner, slug=slug, doc="sync:f2"),
+            _memory(ws.id, ctx.id, owner, slug=slug, doc="sync:g1"),
+            _memory(ws.id, ctx.id, owner, slug=slug, doc="sync:g2"),
+            _memory(ws.id, ctx.id, owner, slug=slug, doc="sync:g3"),
+            _memory(ws.id, ctx.id, owner, slug=slug, doc="sync:r1"),
             # Ingested through the plain resource API: no sync record.
             _memory(ws.id, ctx.id, owner, slug=slug, doc="manual-1"),
             # A member's hand-written note in the same context.
@@ -214,7 +223,7 @@ async def world(async_engine) -> AsyncIterator[SimpleNamespace]:
 async def test_counts_are_live_documents_per_kind(world) -> None:
     async with world.factory() as db:
         assert await count_dataset_facts(db, world.endpoint) == DatasetFacts(
-            products=2, faq=2, other=1
+            products=2, faq=2, pages=3, reviews=1, other=1
         )
 
 

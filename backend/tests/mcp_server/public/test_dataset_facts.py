@@ -95,7 +95,8 @@ _TAIL = (
 # The last sentence of the instructions (#3035): what a call leaves on the server.
 _KEPT = " Calls are counted without query text; a search's embedding is cached for 24 hours."
 # The longest text any variant renders, pinned as a number beside the cap.
-_LONGEST = 378
+_LONGEST = 478
+_REVIEWS_NOTE = " Reviews are customers' words, not the owner's."
 
 
 def _expected(head: str, by: str = "") -> str:
@@ -145,10 +146,90 @@ def _expected(head: str, by: str = "") -> str:
             "Read-only public data of Example Shop",
             "",
         ),
+        (
+            DatasetFacts(pages=40),
+            "Read-only public data of Example Shop: page sections (40)",
+            " by topic",
+        ),
+        (
+            DatasetFacts(products=3, pages=120, other=2),
+            "Read-only public data of Example Shop: products (3), page sections (120+) "
+            "and other entries (2)",
+            " by product name, model number or topic",
+        ),
+        (
+            DatasetFacts(products=1, faq=2, pages=3),
+            "Read-only public data of Example Shop: products (1), FAQ (2) and page sections (3)",
+            " by product name, model number, question or topic",
+        ),
     ],
 )
 def test_template_variants(counts: DatasetFacts | None, head: str, by: str) -> None:
     assert pt.public_instructions(_endpoint(), counts) == _expected(head, by)
+
+
+@pytest.mark.parametrize(
+    ("counts", "head", "by"),
+    [
+        (
+            DatasetFacts(reviews=5),
+            "Read-only public data of Example Shop: reviews (5)",
+            " by product name",
+        ),
+        (
+            DatasetFacts(products=2, reviews=1_234),
+            "Read-only public data of Example Shop: products (2) and reviews (1,200+)",
+            " by product name or model number",
+        ),
+    ],
+)
+def test_reviews_add_one_sentence_before_the_last(counts: DatasetFacts, head: str, by: str) -> None:
+    expected = _expected(head, by).replace(_KEPT, _REVIEWS_NOTE + _KEPT)
+    assert pt.public_instructions(_endpoint(), counts) == expected
+
+
+def _previous_render(name: str, counts: DatasetFacts | None) -> str:
+    """v0.187.0's text (products, FAQ and other entries only), copied unchanged."""
+    cut = pt.cut_summary(pt.flatten_summary(name), pt.PUBLIC_INSTRUCTIONS_NAME_CAP)
+    if counts is None:
+        shown, by = None, ""
+    else:
+        groups = []
+        if counts.products > 0:
+            groups.append(f"products ({render_count(counts.products)})")
+        if counts.faq > 0:
+            groups.append(f"FAQ ({render_count(counts.faq)})")
+        if counts.other > 0:
+            word = "other entries" if groups else "entries"
+            groups.append(f"{word} ({render_count(counts.other)})")
+        if not groups:
+            shown = "no entries yet"
+        elif len(groups) == 1:
+            shown = groups[0]
+        else:
+            shown = ", ".join(groups[:-1]) + " and " + groups[-1]
+        if counts.products > 0 and counts.faq > 0:
+            by = " by product name, model number or question"
+        elif counts.products > 0:
+            by = " by product name or model number"
+        elif counts.faq > 0:
+            by = " by question"
+        else:
+            by = ""
+    return (
+        "Read-only public data of " + (cut or "this dataset") + (f": {shown}" if shown else "")
+        + "." + _TAIL.format(by=by)
+    )  # fmt: skip
+
+
+def test_every_previous_variant_renders_unchanged() -> None:
+    """Without pages and reviews, every endpoint's instructions are the previous text."""
+    for name in _NAMES:
+        for counts in [
+            None,
+            *(DatasetFacts(p, f, 0, 0, o) for p, f, o in itertools.product(_COUNTS, repeat=3)),
+        ]:
+            assert pt.public_instructions(_endpoint(name), counts) == _previous_render(name, counts)
 
 
 def test_blank_name_falls_back_to_this_dataset() -> None:
@@ -172,8 +253,8 @@ _COUNTS = (0, 1, 99, 100, 1_234, 100_000, 10**9)
 def _variants():
     for name in _NAMES:
         yield name, None
-        for products, faq, other in itertools.product(_COUNTS, repeat=3):
-            yield name, DatasetFacts(products=products, faq=faq, other=other)
+        for counts in itertools.product(_COUNTS, repeat=5):
+            yield name, DatasetFacts(*counts)
 
 
 def test_every_variant_is_bounded_one_line_and_free_of_instruction_wording() -> None:
