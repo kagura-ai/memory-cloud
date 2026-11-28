@@ -78,6 +78,7 @@ from services.sleep.coverage import (
     sweep_call_share,
 )
 from services.sleep.judge_lane import judge_platform_only
+from services.sleep.pair_write import locked_refusals, write_sleep_supersedes_edge
 from services.sleep.prompts import (
     DEDUP_JUDGE_SYSTEM,
     DEDUP_JUDGE_USER,
@@ -197,22 +198,6 @@ def _edited_version(version: object) -> bool:
     unedited, so no revision read is made for it.
     """
     return isinstance(version, int) and not isinstance(version, bool) and version > 1
-
-
-def _edited_since_fetch(memory: Memory, locked_version: object) -> bool:
-    """The locked row's version is not the one ``memory`` was fetched with (#3019).
-
-    Both must be ints (bool excluded) for the comparison to mean anything; a
-    test double without one reads as unchanged.
-    """
-    fetched = getattr(memory, "version", None)
-    return (
-        isinstance(fetched, int)
-        and not isinstance(fetched, bool)
-        and isinstance(locked_version, int)
-        and not isinstance(locked_version, bool)
-        and fetched != locked_version
-    )
 
 
 # Similarity threshold for auto-merge without LLM (LLM-off mode)
@@ -2123,32 +2108,16 @@ class DedupMergePhase(EmbeddingSpendTracker):
             return False, None
         if await self._pinned_or_gone_since_fetch(winner, loser):
             return False, None
-        from models.memory import EDGE_ORIGIN_SEMANTIC, EDGE_TYPE_SUPERSEDES
-
-        prior = await self.edge_repo.get_edge(
-            user_id, winner.id, loser.id, workspace_id, context_id
-        )
-        prior_edge: dict[str, Any] | None = None
-        if prior is not None and prior.edge_type != EDGE_TYPE_SUPERSEDES:
-            prior_edge = {
-                "edge_type": prior.edge_type,
-                "origin": prior.origin,
-                "weight": prior.weight,
-                "confidence": prior.confidence,
-                "edge_metadata": prior.edge_metadata,
-            }
-
-        await self.edge_repo.create_or_update_edge(
+        # #3020: the writer the supersede-apply phase shares. No metadata (a
+        # dedup shadow edge always carries NULL metadata) and no declared-link
+        # protection: the statements of #1208.
+        prior_edge, _edge = await write_sleep_supersedes_edge(
+            self.edge_repo,
             user_id=user_id,
-            src_id=winner.id,
-            dst_id=loser.id,
-            edge_type=EDGE_TYPE_SUPERSEDES,
-            weight=1.0,
-            confidence=1.0,
+            newer_id=winner.id,
+            older_id=loser.id,
             workspace_id=workspace_id,
             context_id=context_id,
-            origin=EDGE_ORIGIN_SEMANTIC,
-            return_fresh_edge=False,
         )
         logger.info(
             "dedup_shadow_merge",
@@ -2300,46 +2269,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         while the judge ran, so the judge compared text that is gone and the
         recency the winner rules read is stale.
         """
-        rows = (
-            await self.db.execute(
-                select(
-                    Memory.id,
-                    pinned_predicate().label("pinned"),
-                    tool_triggered_predicate().label("tool_triggered"),
-                    resource_owned_predicate().label("resource_owned"),
-                    Memory.deleted_at,
-                    Memory.type,
-                    # #3019: the partition the row was fetched in.
-                    Memory.user_id,
-                    Memory.context_id,
-                    # #3019: every versioned edit moves it.
-                    Memory.version,
-                )
-                .where(Memory.id.in_([winner.id, loser.id]))
-                .with_for_update()
-            )
-        ).all()
-        state = {row.id: row for row in rows}
-        reasons: list[str] = []
-        for label, memory in (("winner", winner), ("loser", loser)):
-            row = state.get(memory.id)
-            if row is None:
-                reasons.append(f"{label}_missing")
-            elif row.deleted_at is not None:
-                reasons.append(f"{label}_deleted")
-            elif row.pinned:
-                reasons.append(f"{label}_pinned")
-            elif row.tool_triggered:
-                reasons.append(f"{label}_tool_triggered")
-            elif row.resource_owned:
-                reasons.append(f"{label}_resource_owned")
-            elif row.type == MEMORY_TYPE_TIME:
-                reasons.append(f"{label}_time")
-            elif row.user_id != memory.user_id or row.context_id != memory.context_id:
-                # #3019: moved to another context (or user) since the fetch.
-                reasons.append(f"{label}_moved")
-            elif _edited_since_fetch(memory, row.version):
-                reasons.append(f"{label}_edited")
+        # #3020: the statement and the rules live in ``pair_write``, shared
+        # with the supersede-apply phase.
+        reasons, _locked = await locked_refusals(self.db, (("winner", winner), ("loser", loser)))
         if not reasons:
             return False
         if any(reason.endswith("_resource_owned") for reason in reasons):
