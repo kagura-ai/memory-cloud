@@ -360,6 +360,15 @@ class Memory(Base):
     # seven-day cadence reads this column. NULL = never judged since the
     # column exists. Not exported (``DERIVED_ONLY_FIELD_NAMES``). No index.
     importance_reevaluated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #3051: on a context-merge copy, when an edit last wrote the text it was
+    # copied with (its source's last logged text edit, or the time the source
+    # itself carried). The copy starts at version 1 and its source's edits
+    # stay logged under the source's id, so Sleep dedup's recency rule reads
+    # this as the copy's version-1 text time (``memory_versions
+    # .read_text_edit_times``). NULL on every other row, on a copy of a source
+    # whose text was never edited, and on copies made before the column
+    # existed. Written once, by ``merge_contexts``. No index.
+    carried_text_edited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     accessed_by_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     # ``access_count`` counts *surfacing*: every recall top-k return + explore
     # spreading-activation hit + reference(). It is the signal Sleep

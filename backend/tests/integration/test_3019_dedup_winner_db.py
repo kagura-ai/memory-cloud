@@ -702,7 +702,7 @@ async def test_a_failed_revision_read_rolls_back_to_its_savepoint(
     scope = await _Scope.create(db_session)
     a, b, c, d = await _two_pairs(scope, now, a_stamped_days_ago=a_stamped_days_ago)
 
-    with patch.object(dedup_merge, "text_edit_events_query", _failing_query):
+    with patch("services.memory_versions.text_edit_events_query", _failing_query):
         result, phase = await scope.run(log_began=now - timedelta(days=365))
 
     assert phase._text_edited_at == {a.id: None}
@@ -740,3 +740,155 @@ async def test_a_failed_log_start_read_rolls_back_to_its_savepoint(db_session):
     state = await scope.state(a, b, c, d)
     assert state[c.id].deleted_by == DELETED_BY_SLEEP_MERGE
     assert state[a.id].deleted_at is None and state[b.id].deleted_at is None
+
+
+# ---------------------------------------------------------------------------
+# #3051: a context-merge copy keeps its source's last text-edit time
+# ---------------------------------------------------------------------------
+
+
+async def _merge(scope: _Scope, source: Context, target: Context) -> None:
+    """``merge_contexts`` as the tool runs it (it commits); the vector store
+    copy is faked and moves each copied row's test vector to the copy."""
+    from services.context_service import ContextService
+
+    with (
+        patch(
+            "services.permission_service.PermissionService.check_context_owner",
+            AsyncMock(),
+        ),
+        patch(
+            "db.qdrant.copy_context_points",
+            AsyncMock(side_effect=lambda **kw: set(kw["memory_id_mapping"].values())),
+        ),
+    ):
+        await ContextService(scope.db).merge_contexts(scope.owner, source.id, target.id)
+
+
+async def _copy_in(scope: _Scope, target: Context, original: Memory) -> Memory:
+    """The copy of ``original`` in ``target``; its test vector moves with it."""
+    copy = (
+        await scope.db.execute(
+            select(Memory).where(Memory.context_id == target.id, Memory.summary == original.summary)
+        )
+    ).scalar_one()
+    scope.vectors[str(copy.id)] = scope.vectors.pop(str(original.id))
+    return copy
+
+
+async def _corrected_and_stale(scope: _Scope, now: datetime) -> tuple[Memory, Memory, datetime]:
+    """The issue's pair in ``scope.ctx``: T (six months old) corrected in place
+    by ``update_memory`` now, C (two months old) still holding the stale value.
+    Returns T, C and the time of T's text edit (its revision's ``at``)."""
+    t = await scope.add(
+        created_at=now - timedelta(days=180),
+        vector=scope.axis(0),
+        summary="the deploy target is blue",
+    )
+    c = await scope.add(
+        created_at=now - timedelta(days=60),
+        vector=scope.axis(0),
+        summary="the deploy target is blue, as before",
+    )
+    await scope.db.commit()
+    await _edit(scope, t, summary="the deploy target is green")
+    await scope.db.refresh(t)
+    assert t.version == 2
+    edited_at = (
+        await scope.db.execute(
+            select(MemoryRevision.at).where(
+                MemoryRevision.memory_id == t.id, MemoryRevision.kind == "updated"
+            )
+        )
+    ).scalar_one()
+    return t, c, edited_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judged", [True, False], ids=["judge", "rule_path"])
+async def test_a_merge_copy_keeps_the_time_its_text_was_corrected(db_session, judged):
+    """#3051, the issue's scenario. In the source context T's text is newer
+    than C. After a context merge both are copies at version 1 with a fresh
+    ``updated_at``; T's copy carries the time of T's edit, so in the target the
+    copy holding the correction wins (the judge picking the stale copy is
+    overridden; the rule path keeps the newer one at equal importance) and
+    the stale copy is the one retired."""
+    now = utcnow()
+    scope = await _Scope.create(db_session)
+    t, c, edited_at = await _corrected_and_stale(scope, now)
+    target = await _Scope._context(db_session, scope.owner, scope.ws)
+    await db_session.commit()
+
+    await _merge(scope, scope.ctx, target)
+    t_copy = await _copy_in(scope, target, t)
+    c_copy = await _copy_in(scope, target, c)
+    assert (t_copy.version, c_copy.version) == (1, 1)
+    assert t_copy.carried_text_edited_at == edited_at
+    assert c_copy.carried_text_edited_at is None
+    scope.ctx = target
+
+    result, phase = await scope.run(
+        judge_picks=c_copy if judged else None, log_began=now - timedelta(days=90)
+    )
+
+    assert result.details["merged"] == 1
+    state = await scope.state(t_copy, c_copy)
+    assert state[t_copy.id].deleted_at is None
+    assert state[c_copy.id].deleted_by == DELETED_BY_SLEEP_MERGE
+    assert phase._text_edited_at == {t_copy.id: edited_at}
+    if judged:
+        assert result.details["winner_overrides"] == 1
+        assert f"last_updated={edited_at:%Y-%m-%d %H:%M}," in scope.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_copy_carries_the_time_on(db_session):
+    """A merged copy merged again: the second copy carries what the first one
+    carried (it was never edited, so nothing of its own is read)."""
+    now = utcnow()
+    scope = await _Scope.create(db_session)
+    t, _c, edited_at = await _corrected_and_stale(scope, now)
+    first = await _Scope._context(db_session, scope.owner, scope.ws)
+    second = await _Scope._context(db_session, scope.owner, scope.ws)
+    await db_session.commit()
+
+    await _merge(scope, scope.ctx, first)
+    await _merge(scope, first, second)
+
+    copy = await _copy_in(scope, second, t)
+    assert copy.version == 1
+    assert copy.carried_text_edited_at == edited_at
+
+
+@pytest.mark.asyncio
+async def test_an_edited_copy_is_walked_from_the_carried_time(db_session):
+    """The copy's own revisions are read and walked from the carried time: an
+    edit of other fields leaves it, a text edit is later, and a session
+    rollback of that text edit (which names its block) puts it back."""
+    from services.memory_versions import read_text_edit_times
+
+    now = utcnow()
+    scope = await _Scope.create(db_session)
+    t, _c, edited_at = await _corrected_and_stale(scope, now)
+    target = await _Scope._context(db_session, scope.owner, scope.ws)
+    await db_session.commit()
+    await _merge(scope, scope.ctx, target)
+    copy = await _copy_in(scope, target, t)
+    scope.ctx = target
+
+    await _log_edit(scope, copy, now + timedelta(minutes=1), "meta", importance=0.7)
+    await db_session.commit()
+    reads = await read_text_edit_times(db_session, [copy])
+    assert reads.times[copy.id].last == edited_at
+
+    await _log_edit(scope, copy, now + timedelta(minutes=2), "text", content="rewritten")
+    await db_session.commit()
+    reads = await read_text_edit_times(db_session, [copy])
+    assert reads.times[copy.id].last == now + timedelta(minutes=2)
+
+    await _rollback(scope, "text")
+    await db_session.refresh(copy)
+    assert copy.content != "rewritten"
+    reads = await read_text_edit_times(db_session, [copy])
+    assert reads.times[copy.id].last == edited_at
+    assert reads.unread == frozenset()

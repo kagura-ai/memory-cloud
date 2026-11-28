@@ -58,13 +58,7 @@ from repositories.neural_edge import NeuralEdgeRepository
 from services.deferred_point_deletes import PointDelete, queue_point_deletes
 from services.embedding_service import EmbeddingService
 from services.llm_service import LLMService, billed_usage
-from services.memory_versions import (
-    TextEditEvent,
-    revision_log_began_query,
-    text_edit_event,
-    text_edit_events_query,
-    text_edit_times,
-)
+from services.memory_versions import read_text_edit_times, revision_log_began_query
 from services.resource_indexer import unshared_point_id
 from services.sleep.coverage import (
     BUDGET,
@@ -188,15 +182,6 @@ def _fmt_minute(dt: datetime | None) -> str | None:
 def _to_minute(dt: datetime) -> datetime:
     """``dt`` at the minute precision the winner rules compare at."""
     return dt.replace(second=0, microsecond=0)
-
-
-def _edited_version(version: object) -> bool:
-    """A ``Memory.version`` above 1: an edit moved it at least once (#3019).
-
-    Anything that is not an int (a test double, a missing attribute) reads as
-    unedited, so no revision read is made for it.
-    """
-    return isinstance(version, int) and not isinstance(version, bool) and version > 1
 
 
 def _edited_since_fetch(memory: Memory, locked_version: object) -> bool:
@@ -1731,7 +1716,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
 
     def _recency_key(self, mem: Memory) -> datetime | None:
         """When this memory's text was last written: the later of
-        ``created_at`` and its last text edit, else None (#1198, #3019).
+        ``created_at`` and its last text edit, else None (#1198, #3019,
+        #3051).
 
         created_at alone misses an in-place edit (#1198 review): an edit keeps
         created_at, so the row holding the current fact can carry the older
@@ -1740,8 +1726,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         context-merge copy, and importance re-evaluation before it kept its own
         clock), so a stamped old row would outrank a newer duplicate and the
         newer fact would be the one retired. The edit time comes from the
-        revision log (``_load_text_edit_times``); a memory with no edit known
-        there is compared by its creation time.
+        revision log, and for a context-merge copy from the time its source's
+        text was last edited, which the merge carried (``_load_text_edit_times``);
+        a memory with no edit known is compared by its creation time.
         """
         created = getattr(mem, "created_at", None)
         edited = (getattr(self, "_text_edited_at", None) or {}).get(mem.id)
@@ -1749,41 +1736,33 @@ class DedupMergePhase(EmbeddingSpendTracker):
         return max(stamps) if stamps else None
 
     async def _load_text_edit_times(self, cluster_memories: list[Memory]) -> None:
-        """Read when each edited cluster member's text was last written (#3019).
+        """Read when each cluster member's text was last written (#3019, #3051).
 
-        A member at version 1 was never edited through a versioned path, so
-        its creation time is its recency and nothing is read; Sleep, the
-        context-merge copy and the other writes that stamp ``updated_at``
-        without an edit never move the version. The other members' ``updated``
-        revisions are read in one statement for the cluster and walked by
-        ``text_edit_times``. Each id is read once a run. A read that fails
-        is rolled back to its savepoint and leaves those members at their
-        creation time, the direction that never makes an old row look newer,
-        and marks them unread: their logged edits are unknown, so
-        ``_recency_unknowable`` keeps a pair they lose when their stamp says an
-        edit could make them the newer row.
+        ``memory_versions.read_text_edit_times``: a member at version 1 was
+        never edited through a versioned path, so nothing is read for it; its
+        recency is its creation time, or for a context-merge copy the time its
+        source's text was last edited (``Memory.carried_text_edited_at``). Sleep
+        and the other writes that stamp ``updated_at`` without an edit never
+        move the version. The other members' ``updated`` revisions are read in
+        one statement for the cluster and walked from the carried time. Each
+        id is read once a run. A read that fails is rolled back to its
+        savepoint and leaves those members at their creation time, the
+        direction that never makes an old row look newer, and marks them
+        unread: their logged edits are unknown, so ``_recency_unknowable``
+        keeps a pair they lose when their stamp says an edit could make them
+        the newer row.
         """
         self._ensure_audit_state()
         known = self._text_edited_at
-        ids = [
-            mem.id
-            for mem in cluster_memories
-            if _edited_version(getattr(mem, "version", None)) and mem.id not in known
-        ]
-        if not ids:
-            return
-        try:
-            async with self.db.begin_nested():
-                rows = (await self.db.execute(text_edit_events_query(ids))).all()
-        except Exception as e:
-            logger.warning("dedup_text_edit_times_unavailable", count=len(ids), error=str(e))
-            rows = []
-            self._text_edit_unread.update(ids)
-        events: dict[UUID, list[TextEditEvent]] = {}
-        for row in rows:
-            events.setdefault(row.memory_id, []).append(text_edit_event(row))
-        for memory_id in ids:
-            times = text_edit_times(events.get(memory_id, ()))
+        reads = await read_text_edit_times(self.db, cluster_memories, skip=known)
+        if reads.error is not None:
+            logger.warning(
+                "dedup_text_edit_times_unavailable",
+                count=len(reads.unread),
+                error=str(reads.error),
+            )
+            self._text_edit_unread.update(reads.unread)
+        for memory_id, times in reads.times.items():
             known[memory_id] = times.last
             if times.unsure_until is not None:
                 self._text_edit_unsure[memory_id] = times.unsure_until
@@ -1830,9 +1809,9 @@ class DedupMergePhase(EmbeddingSpendTracker):
         logged edits are unknown). One a session rollback naming no block put
         older text back on is kept when the latest edit it may have restored
         (``TextEditTimes.unsure_until``) is later than the winner's recency.
-        The documented exception: a context-merge copy starts at version 1 and
-        its source's edits are logged under the source's id, so an edit made
-        there before the merge is not seen even after the log began.
+        A context-merge copy starts at version 1 and its source's edits are
+        logged under the source's id; the last of them travels on the copy
+        (#3051) and counts as a logged edit here.
         """
         self._ensure_audit_state()
         winner_minute = self._recency_minute(winner)
