@@ -221,6 +221,9 @@ class NeuralMemoryConfig:
         sleep_consolidation_judge_enabled: Let the LLM judge decide promotion
             of the memories consolidation's rules leave borderline (off by
             default, #3021; rule promotion always runs)
+        sleep_supersede_apply_enabled: Let Sleep turn judge-verified
+            supersede suggestions into supersedes links (off by default,
+            #3020; rollback_sleep_run removes them)
         sleep_archive_exempt_tags: Tags (exact match) that keep a memory off
             the losing side of a near-duplicate merge (env-only, #2584)
 
@@ -439,6 +442,9 @@ class NeuralMemoryConfig:
     # #3021: the consolidation LLM judge for borderline memories. Off by
     # default; rule promotion runs either way.
     sleep_consolidation_judge_enabled: bool = False
+    # #3020: the supersede-apply phase. Off by default; a deployment key (a
+    # stored neural_config row wins), not per context.
+    sleep_supersede_apply_enabled: bool = False
     # #2584: a memory carrying one of these tags is never the retired side of a
     # near-duplicate merge; removing the tag returns it to the normal
     # lifecycle. Empty = no exemption. Env-only (SLEEP_ARCHIVE_EXEMPT_TAGS, see
@@ -858,6 +864,7 @@ class NeuralMemoryConfig:
             sleep_edge_discovery_sample_size=get_int("SLEEP_EDGE_DISCOVERY_SAMPLE_SIZE", 30),
             sleep_importance_reeval_enabled=get_bool("SLEEP_IMPORTANCE_REEVAL_ENABLED", False),
             sleep_consolidation_judge_enabled=get_bool("SLEEP_CONSOLIDATION_JUDGE_ENABLED", False),
+            sleep_supersede_apply_enabled=get_bool("SLEEP_SUPERSEDE_APPLY_ENABLED", False),
             sleep_archive_exempt_tags=sleep_archive_exempt_tags_from_env(),
         )
 
@@ -1166,6 +1173,10 @@ class NeuralMemoryConfig:
             sleep_consolidation_judge_enabled=configs.get(
                 "sleep_consolidation_judge_enabled",
                 base_config.sleep_consolidation_judge_enabled,
+            ),
+            sleep_supersede_apply_enabled=configs.get(
+                "sleep_supersede_apply_enabled",
+                base_config.sleep_supersede_apply_enabled,
             ),
             sleep_archive_exempt_tags=base_config.sleep_archive_exempt_tags,  # env-only (#2584)
         )

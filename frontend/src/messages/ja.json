@@ -3336,7 +3336,8 @@
         "sleep_edge_discovery_enabled": "エッジ発見フェーズを有効化（既定はオフ）",
         "sleep_edge_discovery_sample_size": "エッジ発見 1 回あたりのサンプルメモリ数",
         "sleep_importance_reeval_enabled": "重要度再評価フェーズを有効化（既定はオフ）",
-        "sleep_consolidation_judge_enabled": "consolidation のルールで昇格しなかった working メモリの昇格を LLM ジャッジに判定させる（既定はオフ。ルールによる昇格は常に実行）"
+        "sleep_consolidation_judge_enabled": "consolidation のルールで昇格しなかった working メモリの昇格を LLM ジャッジに判定させる（既定はオフ。ルールによる昇格は常に実行）",
+        "sleep_supersede_apply_enabled": "ジャッジが検証した supersede 候補を Sleep が supersedes リンクとして適用する（既定はオフ。rollback_sleep_run で取り消せる）"
       }
     },
     "cost": {

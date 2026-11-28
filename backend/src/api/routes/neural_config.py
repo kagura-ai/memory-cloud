@@ -129,6 +129,8 @@ DEFAULT_VALUES: dict[str, str] = {
     "sleep_edge_discovery_sample_size": "30",
     "sleep_importance_reeval_enabled": "false",
     "sleep_consolidation_judge_enabled": "false",
+    # #3020: Sleep applies verified supersede suggestions only when switched on.
+    "sleep_supersede_apply_enabled": "false",
 }
 
 

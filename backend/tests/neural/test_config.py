@@ -719,6 +719,52 @@ class TestSleepPhaseDefaults3021:
         assert [DEFAULT_VALUES[k] for k in self._KEYS] == ["false", "false", "false"]
 
 
+class TestSupersedeApplySwitch3020:
+    """#3020: the switch that lets Sleep apply judge-verified supersede
+    suggestions is off in code, in env and for a database without its row; a
+    stored true wins, and a reset sets it back to off."""
+
+    _KEY = "sleep_supersede_apply_enabled"
+
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, monkeypatch):
+        monkeypatch.delenv("SLEEP_SUPERSEDE_APPLY_ENABLED", raising=False)
+        NeuralMemoryConfig.invalidate_cache()
+        yield
+        NeuralMemoryConfig.invalidate_cache()
+
+    _db = staticmethod(TestForgetRetentionConfigPlumbing._db)
+
+    def test_off_in_code(self):
+        assert NeuralMemoryConfig().sleep_supersede_apply_enabled is False
+
+    def test_env_default_is_off(self):
+        assert NeuralMemoryConfig.from_env().sleep_supersede_apply_enabled is False
+
+    async def test_a_database_without_the_row_gets_off(self):
+        config = await NeuralMemoryConfig.from_db(self._db({}))
+        assert config.sleep_supersede_apply_enabled is False
+
+    async def test_a_stored_true_wins(self):
+        config = await NeuralMemoryConfig.from_db(self._db({self._KEY: True}))
+        assert config.sleep_supersede_apply_enabled is True
+
+    async def test_the_env_switches_it_on_without_a_row(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_SUPERSEDE_APPLY_ENABLED", "true")
+        config = await NeuralMemoryConfig.from_db(self._db({}))
+        assert config.sleep_supersede_apply_enabled is True
+
+    async def test_a_stored_false_wins_over_the_env(self, monkeypatch):
+        monkeypatch.setenv("SLEEP_SUPERSEDE_APPLY_ENABLED", "true")
+        config = await NeuralMemoryConfig.from_db(self._db({self._KEY: False}))
+        assert config.sleep_supersede_apply_enabled is False
+
+    def test_the_reset_default_is_off(self):
+        from api.routes.neural_config import DEFAULT_VALUES
+
+        assert DEFAULT_VALUES[self._KEY] == "false"
+
+
 class TestSupersedeVerifyConfig:
     """#2016: judge switches are env-only with validated ranges."""
 

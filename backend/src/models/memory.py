@@ -1232,6 +1232,12 @@ EDGE_ORIGIN_HEBBIAN = "hebbian"
 EDGE_ORIGIN_SEMANTIC = "semantic"
 EDGE_ORIGIN_DECLARED = "declared"
 
+# #3020: ``metadata.source`` of a ``supersedes`` edge Sleep's supersede-apply
+# phase wrote from a judge-verified suggestion. The edge's metadata is exactly
+# ``{"source": EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY, "report_id": <run>}``; a
+# rollback of that run removes only an edge that still carries both.
+EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY = "sleep_supersede_apply"
+
 _ALL_EDGE_ORIGINS: tuple[str, ...] = (
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,

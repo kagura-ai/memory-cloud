@@ -3336,7 +3336,8 @@
         "sleep_edge_discovery_enabled": "Enable edge discovery phase (off by default)",
         "sleep_edge_discovery_sample_size": "Number of memories to sample per edge discovery run",
         "sleep_importance_reeval_enabled": "Enable importance re-evaluation phase (off by default)",
-        "sleep_consolidation_judge_enabled": "Let the LLM judge promote the working memories the consolidation rules leave borderline (off by default; rule promotion always runs)"
+        "sleep_consolidation_judge_enabled": "Let the LLM judge promote the working memories the consolidation rules leave borderline (off by default; rule promotion always runs)",
+        "sleep_supersede_apply_enabled": "Let Sleep turn judge-verified supersede suggestions into supersedes links (off by default; rollback_sleep_run removes them)"
       }
     },
     "cost": {
