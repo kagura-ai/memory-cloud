@@ -1,9 +1,11 @@
-# Staged product and FAQ synchronization
+# Staged feed synchronization
 
 Issue #2807 adds full snapshots for one feed within an existing workspace-owned
 installation. The server chooses the Resource, Context, endpoint, document ID,
 versions and deletion namespace. These endpoints cannot issue API keys or select
-another target. Multiple product/FAQ feeds share the installation's Resource.
+another target. Multiple feeds share the installation's Resource. A feed's kind
+is `product` or `faq`, and on [record schema version 2](#record-schema-versions)
+also `page` or `review` (#3055).
 
 ## Rollout and authority
 
@@ -46,6 +48,8 @@ commit. No OIDC human token is promoted into general REST/MCP or Resource auth.
 
 ## Public fields and bounds
 
+This section describes record schema version 1; version 2 keeps all of it and
+adds the kinds and fields of [Record schema versions](#record-schema-versions).
 Products require `title` and HTTPS `url`. Optional fields are `description`,
 `image_url`, `price`, `currency`, `availability`, `brand`, `sku`, `gtin`, `mpn`
 and `condition`. Price is a nonnegative decimal string with up to four decimal
@@ -87,10 +91,15 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
    the source configuration, not a URL or a secret. The reply returns
    `config_version`, `schema_version` and `schema_hash`. Changed configuration
    increments a monotonic version: A → B → A cannot revive old runs/consent.
-   Feed kind is immutable. The fixed schema is created only if none exists;
-   an existing incompatible schema is never overwritten.
+   Feed kind is immutable. The record schema is created only if none exists
+   (version 1, or version 2 while `sync.schema.v2` is advertised); an existing
+   schema is never overwritten, and an unregistered one is `409 RES-002`. A
+   kind the installation's version does not have (`page` or `review` on
+   version 1) is `400 invalid_request`, the answer of an unknown kind, before
+   any comparison or write.
 2. Worker `GET /sync/installations/{iid}/schema` uses `schema:read` to inspect
-   the current approved schema and limits.
+   the installation's stored schema and limits (the version-1 and version-2
+   answers are fixed bytes; see [Record schema versions](#record-schema-versions)).
 3. Worker `POST /sync/installations/{iid}/runs` uses `records:write` with
    `feed_id`, `operation_id` (UUIDs), `config_hash`, `config_version`,
    `schema_hash`, `schema_version`, `source_hash`, `snapshot_hash`, `chunks`
@@ -100,7 +109,9 @@ ambiguous credentials and invalid payloads receive fixed no-store errors.
 4. `PUT .../runs/{run}/chunks/{index}` uploads
    `{"records":[{"external_id":"sku-1","fields":{"title":"Item","url":"https://brand.example/item"}}]}`.
    Chunk indices are zero-based. Identical chunk digests return their receipt;
-   changed content at the same index returns 409. Cumulative bytes and record
+   changed content at the same index returns 409. A refused record is
+   `400 {"error":"invalid_record","record":<index>,"field":"<name>","reason":"<code>"}`
+   (see [Refused records](#refused-records)). Cumulative bytes and record
    count are checked before storage. Neither staging nor preparation emits
    Resource events or changes canonical/published records.
 5. `POST .../runs/{run}/prepare` requires every declared chunk, exact record
@@ -147,6 +158,156 @@ array sorted by external ID UTF-8 bytes. JSON uses sorted object keys, no ASCII
 escaping, separators `,` and `:`, and rejects non-finite numbers. It hashes the
 `external_id`/`fields` upload shape, not server-added fields or chunk wrappers.
 The implementation helper is `models.sync_feed_schemas.snapshot_digest`.
+
+## Record schema versions
+
+An installation's record schema is its stored pair (`schema_version`,
+`schema_hash`), set at its first feed configuration and changed only by the
+upgrade below. Validation, `/schema`, the run manifest, configuration
+snapshots, the records read and resume all follow the stored pair, never a
+deployment constant. Version 1 has no end date.
+
+| | Version 1 | Version 2 (#3055) |
+| --- | --- | --- |
+| `schema_hash` | `bdb55d3bdbbbb72a92a33fb96e6a2dc60ccbaf5b09638dcc1f1619d016dfec0d` | `8ddfbbbde388dd0ac44899e10be2a6c26d0a4521098a9bd59f74784a59bb3834` |
+| Definitions | 16 (6 indexed) | 36 (15 indexed) |
+| `kinds` | `product`, `faq` | `product`, `faq`, `page`, `review` |
+| `/schema` `limits` | 8 keys | the same 8, then `record_bytes`, `field_chars`, `attributes` |
+
+Each definition has exactly `name`, `type` (`text`), `classification`
+(`public`), `required` (true only for `record_type` and `external_id`) and
+`index_hint`, in code-point order of the names; `schema_hash` is the digest of
+that list. The exact `/schema` bytes of both versions are
+`backend/tests/fixtures/sync-schema-v1.json` and `sync-schema-v2.json`
+(compact JSON, no trailing newline).
+
+### Kinds and fields of version 2
+
+| Kind | Fields (required in bold) |
+| --- | --- |
+| `product` | version 1's (**`title`**, **`url`**, …) plus `availability_note`, `product_highlights`, `product_types`, `product_details`, `color`, `size`, `material`, `sale_price`, `sale_price_effective_date`, `attributes` |
+| `faq` | unchanged: **`question`**, **`answer`**, `url` |
+| `page` (one section of a web page) | **`title`**, **`url`**, **`body`**, `heading` |
+| `review` (one product review) | **`body`**, `title`, `url`, `rating`, `rating_min`, `rating_max`, `reviewed_at`, `product_name`, `product_url`, `gtin`, `brand`, `sku`, `mpn`, `incentivized`, `verified_purchase` |
+
+No field about persons is accepted (no reviewer names). Every record valid
+under version 1 is valid under version 2. Indexed for search, besides version
+1's: `body`, `heading`, `product_name`, `product_highlights`, `product_types`,
+`product_details`, `color`, `size`, `material`.
+
+### Value rules
+
+A character is a Unicode code point; patterns match the whole value. The
+server never trims or normalizes a value: it stores it as sent or refuses the
+record. CONTROL is U+0000-U+001F, U+007F-U+009F, U+2028 and U+2029;
+WHITESPACE is the Unicode `White_Space` property; a value is blank when every
+character is WHITESPACE.
+
+- Every version-1 field keeps its version-1 rule in both versions (no code point
+  below U+0020 except tab, LF and CR).
+- `body` and `product_name`: no CONTROL except tab, LF and CR.
+- `product_highlights`, `product_types`, `product_details`: one entry per line;
+  no CONTROL except LF; every line non-empty, without WHITESPACE at either end.
+- Every other new field: one line, no CONTROL.
+
+| Field | Characters | Rule |
+| --- | --- | --- |
+| `availability_note` | 200 | one line |
+| `color`, `size`, `material`, `heading` | 2,048 | one line |
+| `body` | 16,000 | text |
+| `product_name` | 2,048 | text |
+| `product_url` | 2,048 | the `url` rule (HTTPS, a host, no user info, no whitespace) |
+| `sale_price` | 2,048 | the `price` pattern; needs `price` (and so `currency`); not compared with `price` |
+| `sale_price_effective_date` | 80 | `<start>/<end>`: exactly one `/`, two date-times, start strictly before end as instants; needs `sale_price` |
+| `reviewed_at` | 40 | one date-time |
+| `rating`, `rating_min`, `rating_max` | 2,048 | `(?:0\|[1-9][0-9]{0,5})(?:\.[0-9]{1,2})?`; all three or none; compared as decimals: `rating_min < rating_max` and `rating_min <= rating <= rating_max` |
+| `incentivized`, `verified_purchase` | 2,048 | `true` or `false` |
+| `attributes` | 8,192 | below |
+
+A date-time is `YYYY-MM-DDTHH:MM:SS`, an optional fraction of 1-6 digits and
+`Z` or `+HH:MM` / `-HH:MM`: years 0001-9999, a valid day, hour 00-23, minute
+and second 00-59 (no leap second), offset hours 00-23 and minutes 00-59,
+`-00:00` refused, uppercase `T` and `Z` only.
+
+`attributes` is a JSON text in a string field: an object of 1 to 50 keys, each
+key matching `[a-z][a-z0-9_]{0,63}` and not one of version 2's 36 field names,
+each value a list of 1 to 20 distinct strings, each string at most 2,048
+characters, without CONTROL, not blank, without WHITESPACE at either end, and
+NFC. The text is at most 8,192 UTF-8 bytes, without repeated keys, and must
+equal its canonical form `json.dumps(value, sort_keys=True,
+separators=(",", ":"), ensure_ascii=False)`: no whitespace between tokens,
+keys sorted, lists in the sender's order, only `"` and `\` escaped, `/` and
+non-ASCII written raw. Example: `{"fit":["slim"],"pattern":["solid","striped"]}`.
+It is not indexed.
+
+A record's JSON (`record_type`, `external_id` and the fields, default
+separators, non-ASCII raw) is at most 32,768 UTF-8 bytes in both versions, so
+three-byte text fits about 10,880 characters in one record; page sections of
+1,000 to 2,000 characters are recommended.
+
+### Refused records
+
+`PUT .../runs/{run}/chunks/{index}` answers a refused record, for every
+installation, with
+
+```json
+{"error":"invalid_record","record":3,"field":"sale_price_effective_date","reason":"interval_order"}
+```
+
+`record` is the 0-based index of the first refused record in the chunk;
+`reason` is one of 37 codes; `field` names the field (absent for
+`record_too_large`, and for an unknown key that is not a field name of the
+installation's version). No value is ever reflected; clients treat the three
+keys as optional. The checks run in this order, and the first failure is
+reported: unknown keys in the record's key order (`unknown_field`), missing
+required keys in code-point order (`missing_field`), then each value in the
+record's key order (`too_long`, `control_character`, `blank`, then its format:
+`invalid_url`, `invalid_price`, `invalid_currency`, `invalid_enum`,
+`invalid_date_time`, `invalid_interval`, `interval_order`, `invalid_rating`,
+`empty_line`, `line_whitespace`, or one of the 18 `attributes_*` codes), then the
+rules across fields (`requires_field` for `price` without `currency`,
+`currency` without `price`, `sale_price` without `price`,
+`sale_price_effective_date` without `sale_price` and an incomplete rating
+group; `invalid_rating_range`; `rating_out_of_range`), then
+`record_too_large`. A version-1 installation reports only `unknown_field`,
+`missing_field`, `too_long`, `control_character`, `blank`, `invalid_url`,
+`invalid_price`, `invalid_currency`, `invalid_enum`, `requires_field` and
+`record_too_large`, and accepts and refuses exactly what it did before.
+
+### Getting version 2
+
+With `SYNC_SCHEMA_V2_ENABLED` on (and `sync.schema.v2` advertised; see
+[the rollout gates](sync-contract-rollout.md#record-schema-version-2-sync_schema_v2_enabled-3055)),
+a new installation stores version 2 at its first feed configuration, and an
+existing one is upgraded once by a current Context Editor with
+`integrations:manage`:
+
+```http
+POST /api/v1/workspaces/{wid}/sync-installations/{iid}/schema/upgrade
+{"target_schema_version":2,"expected":{"schema_version":1,"schema_hash":"bdb55d3b…","generation":7}}
+```
+
+The body is strict (at most 8,192 bytes, no unknown or repeated keys, no
+`null`). In order: the switch off is `404 not_found` before authentication;
+no stored schema or an unregistered one is `409 RES-002`; an installation
+already on version 2 answers `200` with `"changed":false` whatever `expected`
+says and writes nothing; an `expected` that differs from the stored pair or
+the installation generation is `409 RES-002`; an active run (`uploading` or
+`prepared`, unexpired, a manual run only while its request is current) is
+`409 sync_schema_upgrade_runs_active`. Otherwise one transaction appends the
+version-2 schema, makes the installation's resume candidates inactive (records
+dropped), deletes its resume preview and records `sync.schema.upgraded`, and
+the answer is
+`{"schema_hash":"8ddfbbbd…","schema_version":2,"generation":7,"changed":true}`.
+
+The generation is not bumped (worker credentials and authorizations stay
+valid); feeds, their configuration versions and the stored records are not
+changed (their indexed text is the same). A live manual request and a records
+cursor are bound to the stored schema, so they end (`409 RES-002`; restart
+pagination). The upgrade is allowed in every management mode and is one-way.
+A sender stops scheduling and aborts its open runs first, then reads `/schema`
+again; a worker that still sends the version-1 hash gets `400
+invalid_manifest`.
 
 ## Current configuration and conditional updates
 

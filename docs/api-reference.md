@@ -1404,6 +1404,16 @@ The response, and each row of `GET /api/v1/workspace-connectors`, carries `unrou
 
 ---
 
+### Staged feed synchronization: record schema versions
+
+The worker and human feed routes of a synchronization installation are described in [Staged feed synchronization](ops/staged-feed-sync.md) (OIDC and installation-bound worker tokens, fixed `{"error": "<code>"}` envelopes). Record schema version 2 ([#3055](https://github.com/kagura-ai/memory-cloud/issues/3055)) adds the `page` and `review` kinds and ten product fields; each installation is validated against the schema it stores.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/sync/installations/{installation_id}/schema` | Worker (`schema:read`): the stored schema's definitions, kinds and limits. Version 1's answer is unchanged; version 2's `limits` also carry `record_bytes`, `field_chars` and `attributes`. `409` `RES-002` without a registered stored schema |
+| `PUT /api/v1/sync/installations/{installation_id}/runs/{run_id}/chunks/{chunk_index}` | A refused record answers `400` `{"error":"invalid_record","record":n,"field":"...","reason":"..."}`; `field` is absent for `record_too_large` and for an unknown key that is not a field name of the installation's version; `reason` is one of 37 codes |
+| `POST /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/schema/upgrade` | A current Context Editor with an `integrations:manage` OIDC token upgrades the installation to version 2 with `{"target_schema_version":2,"expected":{"schema_version","schema_hash","generation"}}` → `200` `{schema_hash, schema_version, generation, changed}` (`changed: false` when already on version 2). `404` while `sync.schema.v2` is not advertised (`SYNC_SCHEMA_V2_ENABLED` off); `409` `RES-002` for a changed snapshot or no / an unregistered stored schema; `409` `sync_schema_upgrade_runs_active` while a run of the installation is active. One-way; clears the installation's resume candidates and preview; the generation is not changed |
+
 ## Public Read API
 
 `POST /api/v1/public/{context_id}/search` and `GET /api/v1/public/{context_id}/info` expose `is_public=true` contexts to anonymous and attributed callers (Issue #238, extended by Issue #626).

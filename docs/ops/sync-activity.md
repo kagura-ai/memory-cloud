@@ -155,7 +155,10 @@ pseudonymizes the human audit column and sets request user/token FKs to NULL.
 Events cover consent creation/revocation/supersession, activation/unlink,
 service/key registration/rotation/revocation, token issuance, authenticated
 authority denials, feed configuration, admission/preparation/abort/commit,
-destructive approval and managed-mode transitions. Each carries the available
+destructive approval, managed-mode transitions and the record schema upgrade
+(`sync.schema.upgraded`, #3055: written only by an upgrade that changed the
+schema, so never while `SYNC_SCHEMA_V2_ENABLED` is off; a client of
+`/activity/events` treats an action it does not know as opaque). Each carries the available
 fixed workspace/installation/resource/context/endpoint/run/feed/operation and
 generation references. Mode events additionally carry mode/epoch/drain
 watermark/generation. Pre-installation consent and global service key actions
@@ -171,7 +174,7 @@ insertion. An erased account or a newly registered account with the same
 subject cannot restore the erased account's raw subject to audit history.
 The fallback warning is constant and contains no request or exception text.
 There are no private/public keys, tokens, authorization codes, payment secrets,
-product/FAQ bodies, arbitrary headers or source URLs in this envelope.
+feed record bodies, arbitrary headers or source URLs in this envelope.
 
 Protocol-v1 audit and manual request records have a 90-day retention window.
 Run maintenance prunes at most 500 of each once an hour per process (the first
