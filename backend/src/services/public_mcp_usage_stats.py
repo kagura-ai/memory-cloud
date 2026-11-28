@@ -11,7 +11,10 @@ Nothing is written.
 
 Bounds: one wall-clock budget for the whole read (no step starts after it);
 before each step a transaction-local ``statement_timeout`` of the smaller of
-``USAGE_STATS_STATEMENT_TIMEOUT_MS`` and the time left; each section runs
+``USAGE_STATS_STATEMENT_TIMEOUT_MS`` and the time left, and custom plans
+(``plan_cache_mode``): the driver keeps statements prepared per connection,
+and a cached generic plan would read every window, 7 or 90 days, with the
+plan of none of them; each section runs
 read-only inside its own savepoint, so a failure in it leaves the session
 usable; the document scan reads at most ``USAGE_STATS_DOCUMENT_SCAN_LIMIT``
 events; reads are counted per workspace and minute.
@@ -77,7 +80,12 @@ _LIVE_ENDPOINT = text(
     "WHERE workspace_id = :workspace_id AND resource_id = :slug AND revoked_at IS NULL"
 )
 _READ_ONLY = text("SET TRANSACTION READ ONLY")
-_STATEMENT_TIMEOUT = text("SELECT set_config('statement_timeout', :ms, true)")
+# Each step: its timeout, and a plan made for this execution's window (see the
+# module docstring). Both end with the transaction.
+_STATEMENT_TIMEOUT = text(
+    "SELECT set_config('statement_timeout', :ms, true), "
+    "set_config('plan_cache_mode', 'force_custom_plan', true)"
+)
 # Route and caller: NULL (a row written before f67) is a public MCP call by
 # an anonymous caller; both defaults are bound, never written in the SQL.
 DAY_COUNTS = text(

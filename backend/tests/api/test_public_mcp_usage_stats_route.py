@@ -655,6 +655,20 @@ async def test_statement_timeout_is_set_in_the_reading_transaction(world: World)
     assert after == before
 
 
+async def test_the_reading_transaction_plans_each_statement_for_its_window(
+    world: World,
+) -> None:
+    async with world.factory() as db:
+        before = (await db.execute(text("SHOW plan_cache_mode"))).scalar()
+        await _read(db, world)
+        during = (await db.execute(text("SHOW plan_cache_mode"))).scalar()
+        await db.rollback()
+        after = (await db.execute(text("SHOW plan_cache_mode"))).scalar()
+    assert before == "auto"
+    assert during == "force_custom_plan"
+    assert after == before
+
+
 async def test_nothing_is_written(world: World) -> None:
     async def counts() -> tuple[int, int]:
         async with world.factory() as db:

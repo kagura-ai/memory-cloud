@@ -195,6 +195,24 @@ async def test_statements_get_a_naive_utc_bound_and_both_ids(serving) -> None:
     assert db.sql().count(str(stats._READ_ONLY)) == 3
 
 
+async def test_every_statement_is_planned_for_its_own_window(serving) -> None:
+    """The driver keeps statements prepared per connection; a cached generic plan
+    of a statement would serve a 7-day and a 90-day window with one plan."""
+    step_sql = str(stats._STATEMENT_TIMEOUT)
+    assert "set_config('plan_cache_mode', 'force_custom_plan', true)" in step_sql
+    assert "set_config('statement_timeout', :ms, true)" in step_sql
+    clock = _Clock()
+    db = _Session(clock)
+    db.results[stats.TOP_DOCUMENTS] = [
+        SimpleNamespace(scanned=1, scanned_since=None, doc_key="b" * 32, searches=1, best_rank=1)
+    ]
+    await _read(db, clock)
+    statements = [s for s, _ in db.executed]
+    for read in (stats.DAY_COUNTS, stats.VISITORS_BY_DAY, stats.TOP_DOCUMENTS):
+        at = statements.index(read)
+        assert stats._STATEMENT_TIMEOUT in statements[:at]
+
+
 async def test_both_sections_take_search_from_one_definition(serving) -> None:
     """The document scan and the day counts agree on which tool is a search.
 
