@@ -126,6 +126,7 @@ async def pub(connector_world, fernet_api_key_secret) -> AsyncIterator[SimpleNam
         db=w.db,
         owner=owner,
         ws=ws,
+        ws_id=ws_id,
         slug=slug,
         resource_pk=resource.id,
         ctx=ctx,
@@ -571,3 +572,115 @@ async def test_a_rest_row_is_not_exported(pub, writer, hits, client):
     exported = {e.event_id for e in page.events}
     assert mcp_event_id in exported
     assert rest.event_id not in exported
+
+
+# ---------------------------------------------------------------------------
+# Through the owner statistics (#3035)
+# ---------------------------------------------------------------------------
+
+
+async def _owner_stats(pub) -> dict:
+    from auth.dependencies import get_user_from_api_key_or_session
+
+    async def _user() -> dict:
+        return {
+            "user_id": pub.owner,
+            "email": f"{pub.owner}@example.test",
+            "role": "user",
+            "current_workspace_id": pub.ws_id,
+        }
+
+    app.dependency_overrides[get_user_from_api_key_or_session] = _user
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            response = await c.get(f"/api/v1/resources/{pub.slug}/public-mcp/usage-stats")
+    finally:
+        app.dependency_overrides.pop(get_user_from_api_key_or_session, None)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_the_owner_statistics_split_routes_callers_and_count_visitors(
+    pub, writer, hits, client, monkeypatch
+):
+    from datetime import timedelta
+
+    from api.routes import public_search as route
+    from services.public_mcp_usage_events import (
+        UsageEventInput,
+        build_usage_event_row,
+        visitor_key,
+    )
+    from utils.datetime import utcnow
+    from utils.exceptions import RateLimitError
+
+    hits.ids = [pub.d1.id]
+    for _ in range(2):
+        response = await _search(client, pub.ctx, pub.key1, visitor="same-value")
+        assert response.status_code == 200, response.text
+    real_bucket = route.check_bound_key_rate_limit
+
+    async def refused(key_id: int, limit: int) -> None:
+        raise RateLimitError("over", retry_after=60, reason="key_limit")
+
+    monkeypatch.setattr(route, "check_bound_key_rate_limit", refused)
+    assert (await _search(client, pub.ctx, pub.key1, visitor="refused-value")).status_code == 429
+    monkeypatch.setattr(route, "check_bound_key_rate_limit", real_bucket)
+    await _wait_events(pub, 3)
+    await writer.stop(timeout=5)
+
+    key = get_settings().audit_hmac_key
+    now = utcnow()
+    yesterday = now.date() - timedelta(days=1)
+    other_endpoint = uuid4()
+    pub.endpoints.append(other_endpoint)
+    mcp_row = build_usage_event_row(
+        UsageEventInput(
+            endpoint_id=pub.endpoint,
+            workspace_id=pub.ws_id,
+            context_id=pub.ctx,
+            resource_pk=pub.resource_pk,
+            resource_id=pub.slug,
+            tool="recall",
+            outcome="success",
+            era="session",
+            started_at=now,
+            duration_ms=3,
+        ),
+        key=key,
+        session_details_enabled=False,
+    ).row
+    async with AsyncSession(pub.db.bind) as s:
+        await s.execute(PublicMcpUsageEvent.__table__.insert().values(mcp_row))
+        await s.execute(
+            PublicMcpDailyVisitor.__table__.insert().values(
+                [
+                    {
+                        "endpoint_id": pub.endpoint,
+                        "day": yesterday,
+                        "visitor_key": visitor_key(pub.endpoint, "same-value", yesterday, key),
+                        "workspace_id": pub.ws_id,
+                    },
+                    {
+                        "endpoint_id": other_endpoint,
+                        "day": now.date(),
+                        "visitor_key": visitor_key(other_endpoint, "same-value", now.date(), key),
+                        "workspace_id": pub.ws_id,
+                    },
+                ]
+            )
+        )
+        await s.commit()
+
+    body = await _owner_stats(pub)
+    totals = body["totals"]
+    assert totals["calls_by_route"] == {"mcp": 1, "rest": 3}
+    assert totals["calls_by_caller"] == {"anonymous": 1, "bound_key": 3}
+    assert totals["searches_by_route"] == {"mcp": 1, "rest": 3}
+    # The refused search is a search, not an answered one.
+    assert totals["searches_answered_by_route"] == {"mcp": 1, "rest": 2}
+    assert totals["search_outcomes"]["rate_limited"] == 1
+    days = body["days"]
+    assert (days[-2]["visitors"], days[-1]["visitors"]) == (1, 1)
+    assert body["rest_recording_enabled"] is True
+    assert body["visitors"] == {"status": "ok", "counting_enabled": True}

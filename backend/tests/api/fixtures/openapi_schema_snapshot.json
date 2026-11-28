@@ -10658,28 +10658,46 @@
       "PublicMcpUsageStatsCounts": {
         "properties": {
           "calls": {},
+          "calls_by_caller": {},
+          "calls_by_route": {},
           "search_outcomes": {},
-          "searches": {}
+          "searches": {},
+          "searches_answered_by_route": {},
+          "searches_by_route": {}
         },
         "required": [
           "calls",
+          "calls_by_caller",
+          "calls_by_route",
           "search_outcomes",
-          "searches"
+          "searches",
+          "searches_answered_by_route",
+          "searches_by_route"
         ],
         "type": "object"
       },
       "PublicMcpUsageStatsDay": {
         "properties": {
           "calls": {},
+          "calls_by_caller": {},
+          "calls_by_route": {},
           "date": {},
           "search_outcomes": {},
-          "searches": {}
+          "searches": {},
+          "searches_answered_by_route": {},
+          "searches_by_route": {},
+          "visitors": {}
         },
         "required": [
           "calls",
+          "calls_by_caller",
+          "calls_by_route",
           "date",
           "search_outcomes",
-          "searches"
+          "searches",
+          "searches_answered_by_route",
+          "searches_by_route",
+          "visitors"
         ],
         "type": "object"
       },
@@ -10702,6 +10720,7 @@
           "items": {},
           "publication_serving": {},
           "scan_limit": {},
+          "scanned_since": {},
           "searches_scanned": {},
           "status": {}
         },
@@ -10724,8 +10743,10 @@
           "last_day": {},
           "recording_enabled": {},
           "resource_id": {},
+          "rest_recording_enabled": {},
           "retention_days": {},
           "totals": {},
+          "visitors": {},
           "window_days": {}
         },
         "required": [
@@ -10737,9 +10758,22 @@
           "last_day",
           "recording_enabled",
           "resource_id",
+          "rest_recording_enabled",
           "retention_days",
           "totals",
+          "visitors",
           "window_days"
+        ],
+        "type": "object"
+      },
+      "PublicMcpUsageStatsVisitors": {
+        "properties": {
+          "counting_enabled": {},
+          "status": {}
+        },
+        "required": [
+          "counting_enabled",
+          "status"
         ],
         "type": "object"
       },
