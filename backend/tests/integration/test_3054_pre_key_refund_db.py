@@ -175,26 +175,33 @@ async def test_unknown_keys_still_use_up_the_pre_key_limit_for_every_key(world):
 
 
 @pytest.mark.asyncio
-async def test_a_refused_key_keeps_its_slot(world):
+@pytest.mark.parametrize(
+    ("kind", "status"),
+    [("bound_elsewhere", 403), ("owner_scoped", 403), ("revoked", 401)],
+)
+async def test_a_refused_key_keeps_its_slot(world, kind: str, status: int):
     """A key bound to another context (403), an owner-scoped key (403) and a
-    revoked key (401) verify or fail before any per-key bucket: each keeps its
-    pre-key slot."""
+    revoked key bound to this context (401) are refused before any per-key
+    bucket: the request is the context's first with a key, so it gets past
+    the pre-key limit, reaches the key check, and keeps its pre-key slot."""
     ctx, owner = await world.public_context()
-    other, other_owner = await world.public_context()
-    elsewhere, _ = await world.key(other_owner, bound_context_id=other.id)
-    unbound, _ = await world.key(owner)
-    revoked, revoked_id = await world.key(owner, bound_context_id=ctx.id)
-    row = await world.db.get(APIKey, revoked_id)
-    row.revoked_at = utcnow()
-    await world.db.commit()
+    if kind == "bound_elsewhere":
+        other, other_owner = await world.public_context()
+        key, key_id = await world.key(other_owner, bound_context_id=other.id)
+    elif kind == "owner_scoped":
+        key, key_id = await world.key(owner)
+    else:
+        key, key_id = await world.key(owner, bound_context_id=ctx.id)
+        row = await world.db.get(APIKey, key_id)
+        row.revoked_at = utcnow()
+        await world.db.commit()
 
-    statuses = [(await _search(ctx.id, key)).status_code for key in (elsewhere, unbound)]
-    assert statuses == [403, 403]
-    assert await _count(f"public_search_pre_auth:{ctx.id}:minute") == 2
-    response = await _search(ctx.id, revoked)
-    assert response.status_code == 429  # the third request with a key
-    assert _reason(response) == "pre_auth_limit"
-    assert await _count(f"public_search_pre_auth:{ctx.id}:minute") == 3
+    response = await _search(ctx.id, key)
+
+    assert response.status_code == status
+    assert _reason(response) != "pre_auth_limit"
+    assert await _count(f"public_search_pre_auth:{ctx.id}:minute") == 1
+    assert await _count(f"public_bound_key:{key_id}:minute") == 0
 
 
 @pytest.mark.asyncio
