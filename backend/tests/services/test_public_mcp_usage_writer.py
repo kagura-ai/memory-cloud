@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
@@ -399,18 +399,65 @@ async def test_a_repeated_value_counts_once(writer_today):
     assert len(_visitor_batches(db)[0]) == 9
 
 
-async def test_a_finished_day_is_written_on_the_next_pass(writer_today):
+async def test_a_finished_day_waits_out_its_late_searches_then_is_written_once(writer_today):
+    """A search that started before midnight and answered after it joins its day's last group."""
+    assert timedelta(minutes=5) <= writer_module.VISITOR_DAY_GRACE <= timedelta(hours=1)
     db = FakeDB()
     writer = _writer(db)
     writer.start()
-    writer.offer(_visit("late"))
-    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 1)
+    for i in range(3):
+        writer.offer(_visit(f"v{i}"))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 3)
     await _passes(writer, 3)
     assert _visitor_batches(db) == []
-    writer_today["value"] = datetime(2026, 11, 7, 0, 0, 1)
+
+    next_day = datetime(2026, 11, 7)
+    writer_today["value"] = next_day + timedelta(seconds=1)
+    await _passes(writer, 3)
+    assert _visitor_batches(db) == [], "the day's group waits after midnight"
+    straddler = datetime(2026, 11, 6, 23, 59, 59, 800000, tzinfo=UTC)
+    writer.offer(_visit("straddler", started=straddler))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 4)
+    await _passes(writer, 3)
+    assert _visitor_batches(db) == [], "a late search does not open a group of its own"
+
+    writer_today["value"] = next_day + writer_module.VISITOR_DAY_GRACE - timedelta(seconds=1)
+    await _passes(writer, 3)
+    assert _visitor_batches(db) == []
+    writer_today["value"] = next_day + writer_module.VISITOR_DAY_GRACE
     await _until(lambda: len(_visitor_batches(db)) == 1)
     await writer.stop(timeout=1)
-    assert [r["day"] for r in _visitor_batches(db)[0]] == [DAY_NOON.date()]
+    (batch,) = _visitor_batches(db)
+    assert len(batch) == 4
+    assert {r["day"] for r in batch} == {DAY_NOON.date()}
+
+
+async def test_a_visitor_of_a_day_already_written_is_dropped_not_written_alone(
+    writer_today, monkeypatch
+):
+    log = MagicMock()
+    monkeypatch.setattr(writer_module, "logger", log)
+    db = FakeDB()
+    writer = _writer(db)
+    writer.start()
+    writer.offer(_visit("v0"))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 1)
+    next_day = datetime(2026, 11, 7)
+    writer_today["value"] = next_day + writer_module.VISITOR_DAY_GRACE
+    await _until(lambda: len(_visitor_batches(db)) == 1)
+
+    # A search of that day answering after its group was due: its event is
+    # stored, its visitor is dropped and counted.
+    writer.offer(_visit("very-late", started=datetime(2026, 11, 6, 23, 59, tzinfo=UTC)))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 2)
+    await _passes(writer, 3)
+    await writer.stop(timeout=1)
+    assert [len(b) for b in _visitor_batches(db)] == [1]
+    assert writer._visitors_dropped == 1
+    dropped = [c for c in log.warning.call_args_list if c.args[0] == "public_mcp_visitors_dropped"]
+    assert [c.kwargs["reason"] for c in dropped] == ["late"]
+    # The current day's visitors are unaffected.
+    assert writer._visitors_pending == 0
 
 
 async def test_stop_writes_every_group_whatever_its_size(writer_today):
