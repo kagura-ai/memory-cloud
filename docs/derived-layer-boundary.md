@@ -148,6 +148,15 @@ workspace with the running period's start, count and number. It contains no
 person, address, client identifier or content, never enters exports and
 cascades with workspace deletion.
 
+The daily visitors of a public endpoint (`public_mcp_daily_visitors`, #3035)
+are operational usage state: one row per endpoint, UTC day and visitor key,
+where the key is an HMAC of a value a server reported with a key bound to the
+context, the day and the endpoint (the value itself is never stored), plus the
+workspace id. No person, call, time-of-day or API-key column and no foreign
+key; never exported. The rows age out with the usage events
+(`MCP_PUBLIC_TELEMETRY_RETENTION_DAYS`); account erasure has nothing to remove
+from them, and on a workspace's hard delete they age out the same way.
+
 Derived signal is *supposed* to act on every query — that is its value. The
 ban is on **bulk portability**, not on serving:
 

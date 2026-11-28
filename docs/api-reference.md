@@ -1304,7 +1304,7 @@ Workspace owner only (session or owner API key). Publishes a resource's public c
 | `POST /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-text` | Experimental ([#2995](https://github.com/kagura-ai/memory-cloud/issues/2995)): a managing application, acting for the canonical owner with the installation's browser client and an `integrations:manage` OIDC token, sets the description and usage guide (not the name) of the installation's endpoint, with the binding last read; advertised as `public.text.operations.v1`. Same limits, blank handling and `integration.updated` record as `PATCH`, plus the acting client. See [Workspace sync installations](ops/workspace-sync-installations.md) |
 | `DELETE /api/v1/resources/{resource_id}/public-mcp` | Unpublish → `204`; `404` when none is live. Publishing again mints a new address |
 | `GET /api/v1/resources/{resource_id}/public-mcp/usage-health` | Usage event health ([#2678](https://github.com/kagura-ai/memory-cloud/issues/2678)): `{resource_id, endpoint_id, window_hours, events, outcomes, gaps: {count, dropped_events, last_gap_at}, writer: {enabled, queue_depth, queue_capacity, dropped_since_start, last_flush_at, last_flush_ok, process_local}, retention_days}`. `endpoint_id` is the live endpoint (`null` when unpublished); `events` / `outcomes` count its calls of the last 24 hours; `gaps` are the deployment's gap rows in that window (events the server could not record); `writer` is the answering API process only. `404` for a slug of another workspace. See [Public MCP usage events](public-mcp-usage-events.md) |
-| `GET /api/v1/resources/{resource_id}/public-mcp/usage-stats?days=7` | Usage statistics of the live endpoint ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)), workspace owner: `{resource_id, endpoint_id, window_days, first_day, last_day, retention_days, recording_enabled, totals: {calls, searches, search_outcomes}, days: [{date, calls, searches, search_outcomes}], documents: {status, publication_serving, searches_scanned, scan_limit, items: [{doc_key, searches, best_rank, title, source_url}]}, generated_at}`. Calls to the public MCP endpoint per UTC day (`days` 1–90, at most the retention); searches through the REST public search are not included, and answers a cache in front of the endpoint served are not counted. Calls, not visitors. `title` / `source_url` only while the endpoint serves. `404` (one body) for an unknown slug, a resource without a live endpoint or a context the credential cannot read; `422` for `days` out of range; `429` `RATE-001` (30 reads per minute per workspace) and `503` `usage_stats_unavailable` with `Retry-After: 60`. See [Statistics for the owner](public-mcp-usage-events.md#statistics-for-the-owner) |
+| `GET /api/v1/resources/{resource_id}/public-mcp/usage-stats?days=7` | Usage statistics of the live endpoint ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)), workspace owner: `{resource_id, endpoint_id, window_days, first_day, last_day, retention_days, recording_enabled, rest_recording_enabled, visitors: {status, counting_enabled}, totals: {calls, searches, search_outcomes, calls_by_route, searches_by_route, searches_answered_by_route, calls_by_caller}, days: [{date, calls, searches, search_outcomes, calls_by_route, searches_by_route, searches_answered_by_route, calls_by_caller, visitors}], documents: {status, publication_serving, searches_scanned, scan_limit, scanned_since, items: [{doc_key, searches, best_rank, title, source_url}]}, generated_at}`. Per UTC day (`days` 1–90, at most the retention): calls to the public MCP endpoint and, while `PUBLIC_SEARCH_TELEMETRY_ENABLED` is on, REST public searches of the context made with a key bound to it (route `mcp` / `rest`, caller `anonymous` / `bound_key`); anonymous REST public searches are not included, and answers a cache in front of the server served are not counted. `days[].visitors` is the number of distinct visitor values servers reported with a bound key that UTC day (null when they could not be read); there is no window total. `documents.scanned_since` is the time of the oldest search the list is based on. `title` / `source_url` only while the endpoint serves. `404` (one body) for an unknown slug, a resource without a live endpoint or a context the credential cannot read; `422` for `days` out of range; `429` `RATE-001` (30 reads per minute per workspace) and `503` `usage_stats_unavailable` with `Retry-After: 60`. See [Statistics for the owner](public-mcp-usage-events.md#statistics-for-the-owner) |
 
 Response: `{public_id, endpoint_path, resource_id, context_id, public_name, public_description, public_usage_guide, created_at, updated_at, serving, usage_budget}`. `endpoint_path` is a path on this deployment; `serving` is true while `MCP_PUBLIC_ENDPOINTS_ENABLED` is on and the context is still public and bound to the resource.
 
@@ -1417,7 +1417,12 @@ curl -X POST https://memory.example.com/api/v1/public/CTX_UUID/search \
 
 Rate-limited to **50 requests/minute per context**, shared across all anonymous callers. The bucket is `public_search:{ctx}:minute` in Redis. The shared quota means a single noisy client can saturate the bucket — that's the gap public-bound API keys fill.
 
-When the operator enables the public usage budget (`MCP_PUBLIC_USAGE_BUDGET_ENABLED`, [#2805](https://github.com/kagura-ai/memory-cloud/issues/2805)), an anonymous search of a context that has a live public MCP endpoint also spends that workspace's seven-day budget, shared with its public MCP endpoints: over it the search answers `429` `usage_budget_exhausted` with `Retry-After` (60–3600 s), and when the budget cannot be charged — or the per-minute bucket cannot be read — `503` `temporarily_unavailable` with `Retry-After: 60`. A request with a bound key is never charged; the route does not read the session cookie, so a signed-in request is bucketed, paused and charged like an anonymous one, and reranks only with a bound key ([#2823](https://github.com/kagura-ai/memory-cloud/issues/2823)). A context without a live publication is not counted. Contract: [Public usage budget](public-usage-budget.md).
+When the operator enables the public usage budget (`MCP_PUBLIC_USAGE_BUDGET_ENABLED`, [#2805](https://github.com/kagura-ai/memory-cloud/issues/2805)), an anonymous search of a context that has a live public MCP endpoint also spends that workspace's seven-day budget, shared with its public MCP endpoints: over it the search answers `429` `usage_budget_exhausted` with `Retry-After` (60–3600 s), and when the budget cannot be charged — or the per-minute bucket cannot be read — `503` `temporarily_unavailable` with `Retry-After: 60`. A request with a bound key is never charged; the route does not read the session cookie, so a signed-in request is bucketed, paused and charged like an anonymous one ([#2823](https://github.com/kagura-ai/memory-cloud/issues/2823)). A context without a live publication is not counted. Contract: [Public usage budget](public-usage-budget.md).
+
+### Results ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035))
+
+- **No caller is reranked.** `use_rerank` is accepted and ignored (it is marked deprecated in the schema), with or without a key.
+- **Each row once, only the context's live rows.** The search fetches twice `limit`, answers each row once (at its first position), and returns only rows that live in the context and are not deleted, at most `limit`. A search can therefore return fewer results than `limit`; `count` is the number returned. When that check cannot be read, the results are returned without it (each row still once).
 
 ### Attributed access (with public-bound API key)
 
@@ -1433,8 +1438,27 @@ When the bound key matches the URL context (CWE-639 IDOR guard fires otherwise w
 - **Per-key rate-limit bucket** (`public_bound_key:{key_id}:minute`) sized by the workspace plan's `bound_public_calls_per_minute` (PRO default: 100/min).
 - **Per-key audit attribution** in `usage_stats` (`api_key_id` populated alongside `context_id` and `workspace_id`).
 - **Independent revocation** — the key can be deleted without flipping `is_public=false` on the context.
+- **Last-used time** — the key's last-used time is updated once it passes the context check (`404` / `403` above), before the search runs, also when its own per-minute limit or its plan then refuses the search. A key refused before that keeps its row unchanged.
+- **Owner statistics** ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) — while the operator switch `PUBLIC_SEARCH_TELEMETRY_ENABLED` is on, a search made with the bound key of a context whose public MCP endpoint is serving is recorded for the owner's statistics of that endpoint (route `rest`, caller `bound_key`; see [Statistics for the owner](public-mcp-usage-events.md#statistics-for-the-owner)). Anonymous searches, and searches of a context without a serving endpoint, are not recorded.
 
 The bound key MUST be created with `bound_context_id` set (see API Keys Management); a regular owner-scoped or workspace-scoped key passed here is rejected with `403`.
+
+### Visitors (`Kagura-Visitor`)
+
+A server calling with a bound key may send the header `Kagura-Visitor: <value>`, one per search, so the owner's statistics can count distinct visitors per UTC day ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)):
+
+```bash
+curl -X POST https://memory.example.com/api/v1/public/CTX_UUID/search \
+  -H "Authorization: Bearer kagura_xxxxxxxxxxxx" \
+  -H "Kagura-Visitor: 3f9c2a7d-visit" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is Hebbian learning", "limit": 3}'
+```
+
+- The value is 1–64 characters of `[A-Za-z0-9_-]`, sent once. A malformed value or a repeated header is ignored (the search is served as usual, never refused); no header means no visitor.
+- The server turns the value at once into a key valid for one UTC day and one endpoint and never stores or logs it as sent. Use a random value per visitor or per visit; never a user id, an e-mail address or anything else that names a person. Your application decides what one visitor is: one value per page view counts page views.
+- It is read only with a bound key, while the operator switch is on, on a plan that gives bound keys an allowance, for a context whose public MCP endpoint is serving. An anonymous caller's header is never read.
+- Only answered searches count a visitor.
 
 ### Error matrix
 
@@ -1445,9 +1469,10 @@ The bound key MUST be created with `bound_context_id` set (see API Keys Manageme
 | API key supplied but invalid / expired | `401` |
 | API key is not public-bound | `403` |
 | API key is bound to a different context (CWE-639) | `403` |
-| Per-key / shared rate limit exhausted | `429` |
+| Per-key / shared rate limit exhausted | `429` `RATE-001`; `details.reason` (#3035): `anonymous_limit` (the context's shared bucket), `pre_auth_limit` (requests with `Authorization` per context, also on `/info`), `key_limit` (the bound key's own bucket), `key_not_provisioned` (the plan gives bound keys no allowance) |
 | Public usage budget exhausted (anonymous, published context, #2805) | `429` `usage_budget_exhausted` |
-| Public usage budget could not be charged (#2805) | `503` `temporarily_unavailable` |
+| Public usage budget could not be charged (#2805) | `503` `temporarily_unavailable` (`Retry-After: 60`) |
+| The workspace cannot run searches for now (#3035) | `503` `temporarily_unavailable` (`Retry-After: 300`), no reason given |
 
 ---
 

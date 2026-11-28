@@ -231,7 +231,7 @@ curl "$KAGURA/api/v1/resources/products/public-mcp/usage-health" -H "Authorizati
 #    "writer": {"enabled": true, "queue_depth": 0, …, "process_local": true}, "retention_days": 90}
 ```
 
-`GET /api/v1/resources/{resource_id}/public-mcp/usage-stats?days=7` (owner, [#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) gives the live endpoint's calls, searches and search outcomes per UTC day and the documents its searches returned most often, with their public title and URL while the endpoint serves. These are calls to the public MCP endpoint only (not REST public searches), not visitors, and answers a cache in front of the endpoint served are not counted. The context's overview page shows the same numbers to the workspace owner.
+`GET /api/v1/resources/{resource_id}/public-mcp/usage-stats?days=7` (owner, [#3035](https://github.com/kagura-ai/memory-cloud/issues/3035)) gives the live endpoint's calls, searches and search outcomes per UTC day, by route and caller, the daily visitors a server with a bound key reported, and the documents its searches returned most often, with their public title and URL while the endpoint serves. These are calls to the public MCP endpoint and, while the operator records them (`PUBLIC_SEARCH_TELEMETRY_ENABLED`), REST public searches of the context made with a key bound to it; anonymous REST public searches are not included. Calls are not people, and answers a cache in front of the server served are not counted ([Statistics for the owner](public-mcp-usage-events.md#statistics-for-the-owner)). The context's overview page shows the same numbers to the workspace owner.
 
 ```bash
 curl "$KAGURA/api/v1/resources/products/public-mcp/usage-stats?days=30" -H "Authorization: Bearer kagura_{owner_key}"
