@@ -10,7 +10,9 @@ writer numbers are process-local; the gap rows are the persistent view.
 owner the live endpoint's calls, searches and search outcomes per UTC day, by
 route and caller, the daily visitors a server with a bound key reported, and
 the documents its searches returned most often, with their public title and
-URL while the endpoint serves (``services.public_mcp_usage_stats``).
+URL while the endpoint serves (``services.public_mcp_usage_stats``). The
+installation-bound read of the same statistics
+(``api.routes.sync_installations``) answers through ``usage_stats_response``.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from services.public_mcp_usage_stats import (
     USAGE_STATS_DEFAULT_DAYS,
     USAGE_STATS_MAX_DAYS,
     DayCounts,
+    LiveEndpoint,
     UsageStats,
     check_usage_stats_rate_limit,
     read_usage_stats,
@@ -341,6 +344,51 @@ def _stats_response(
     )
 
 
+async def usage_stats_response(
+    db: AsyncSession, *, endpoint: LiveEndpoint, workspace_id: UUID, resource_id: str, days: int
+) -> PublicMcpUsageStatsResponse:
+    """Count the read in the workspace's bucket, read the statistics and build the body.
+
+    The owner route and the installation-bound read answer through this one
+    function, after their own authorization: the same rate bucket, read, time
+    budget and body.
+
+    Args:
+        db: The request's session.
+        endpoint: The authorized live endpoint.
+        workspace_id: Its workspace (the rate bucket and the read's scope).
+        resource_id: The resource slug the body names.
+        days: UTC days to cover, ending today.
+
+    Returns:
+        The statistics body.
+    """
+    await check_usage_stats_rate_limit(workspace_id)
+    settings = get_settings()
+    recording, rest_recording, visitor_counting = usage_recording_flags()
+    stats = await read_usage_stats(
+        db,
+        endpoint=endpoint,
+        workspace_id=workspace_id,
+        days=days,
+        retention_days=settings.mcp_public_telemetry_retention_days,
+        recording_enabled=recording,
+        rest_recording_enabled=rest_recording,
+        visitor_counting_enabled=visitor_counting,
+    )
+    logger.info(
+        "public_mcp_usage_stats_read",
+        endpoint_id=str(endpoint.id),
+        window_days=stats.window_days,
+        calls=stats.totals.calls,
+        rest_calls=stats.totals.calls_by_route.get(PMU_ROUTE_REST, 0),
+        documents=len(stats.documents.items),
+        documents_status=stats.documents.status,
+        visitors_status=stats.visitors_status,
+    )
+    return _stats_response(resource_id, endpoint.id, stats)
+
+
 @router.get(
     "/{resource_id}/public-mcp/usage-stats",
     response_model=PublicMcpUsageStatsResponse,
@@ -375,27 +423,6 @@ async def get_public_mcp_usage_stats(
     endpoint = await resolve_stats_endpoint(
         db, user_id=user_id, workspace_id=workspace_id, resource_id=resource_id
     )
-    await check_usage_stats_rate_limit(workspace_id)
-    settings = get_settings()
-    recording, rest_recording, visitor_counting = usage_recording_flags()
-    stats = await read_usage_stats(
-        db,
-        endpoint=endpoint,
-        workspace_id=workspace_id,
-        days=days,
-        retention_days=settings.mcp_public_telemetry_retention_days,
-        recording_enabled=recording,
-        rest_recording_enabled=rest_recording,
-        visitor_counting_enabled=visitor_counting,
+    return await usage_stats_response(
+        db, endpoint=endpoint, workspace_id=workspace_id, resource_id=resource_id, days=days
     )
-    logger.info(
-        "public_mcp_usage_stats_read",
-        endpoint_id=str(endpoint.id),
-        window_days=stats.window_days,
-        calls=stats.totals.calls,
-        rest_calls=stats.totals.calls_by_route.get(PMU_ROUTE_REST, 0),
-        documents=len(stats.documents.items),
-        documents_status=stats.documents.status,
-        visitors_status=stats.visitors_status,
-    )
-    return _stats_response(resource_id, endpoint.id, stats)

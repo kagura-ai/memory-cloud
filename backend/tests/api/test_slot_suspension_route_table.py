@@ -321,6 +321,10 @@ SLOT_SERVICE_GATED: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("POST", f"{_WS_SYNC}/publication-text"): (
         "services.public_mcp_text:update_installation_public_text"
     ),
+    # #3035: the usage statistics, admitted as the domain observation is.
+    ("GET", f"{_WS_SYNC}/publication-usage-stats"): (
+        "services.sync_publication_usage_stats:installation_stats_endpoint"
+    ),
     ("DELETE", _WS_SYNC): "services.sync_installations:unlink_installation",
     ("GET", f"{_WS_SYNC}/management"): "services.sync_management:control_mode",
     ("POST", f"{_WS_SYNC}/management/stop"): "services.sync_management:control_mode",

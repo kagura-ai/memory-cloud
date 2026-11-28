@@ -11,6 +11,8 @@ HUMAN_SCOPES = ("openid", "workspaces:read", "integrations:manage", "sync.record
 DOMAIN_OPERATIONS_CAPABILITY = "public.domains.operations.v1"
 # #2995: the public text of an installation's endpoint (experimental, optional).
 TEXT_OPERATIONS_CAPABILITY = "public.text.operations.v1"
+# #3035: the usage statistics of an installation's endpoint (experimental, optional).
+USAGE_STATS_CAPABILITY = "public.usage.stats.v1"
 REQUIRED_SYNC_CAPABILITIES = frozenset(
     {
         "identity.oidc.v1",
@@ -59,6 +61,7 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
         and settings.mcp_public_domains_enabled
         and settings.sync_publication_domain_operations_enabled,
         TEXT_OPERATIONS_CAPABILITY: controls and settings.sync_publication_text_operations_enabled,
+        USAGE_STATS_CAPABILITY: controls and settings.sync_publication_usage_stats_enabled,
     }
     return SyncConfigurationV1(
         protocol="kmc.sync.v1",

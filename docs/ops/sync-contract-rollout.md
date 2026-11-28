@@ -34,6 +34,7 @@ advertise no enabled capabilities. A release version is never evidence of suppor
 | `public.domains.observation.v1` | Installations, public budget, `MCP_PUBLIC_DOMAINS_ENABLED` |
 | `public.domains.operations.v1` (experimental) | Domain observation, `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` |
 | `public.text.operations.v1` (experimental) | Installations, `SYNC_PUBLICATION_TEXT_OPERATIONS_ENABLED` |
+| `public.usage.stats.v1` (experimental) | Installations, `SYNC_PUBLICATION_USAGE_STATS_ENABLED` |
 
 These profiles conservatively describe support for complete consumer workflows;
 they do not remove diagnostic reads which intentionally survive worker shutdown.

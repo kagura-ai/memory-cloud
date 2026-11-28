@@ -2133,6 +2133,23 @@ class PublicMcpUsageStatsUnavailableError(MemoryCloudException):
         self.response_headers = {"Retry-After": "60"}
 
 
+class PublicationUsageStatsOwnerRequiredError(MemoryCloudException):
+    """The installation-bound statistics are the canonical owner's (403, ``owner_required``).
+
+    For a current member of the workspace who reaches the installation; every
+    other caller gets the uniform 404 (#3035).
+    """
+
+    log_level = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Only the workspace owner can read the usage statistics.",
+            status_code=403,
+            error_code="owner_required",
+        )
+
+
 class UnsupportedSchemaVersionError(BadRequestError):
     """The requested ``schema_version`` is not served (400); ``supported`` lists those that are."""
 

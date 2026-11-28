@@ -33,6 +33,7 @@ FLAGS = (
     "mcp_public_domains_enabled",
     "sync_publication_domain_operations_enabled",
     "sync_publication_text_operations_enabled",
+    "sync_publication_usage_stats_enabled",
 )
 ROLLOUT_DOC = Path(__file__).resolve().parents[3] / "docs" / "ops" / "sync-contract-rollout.md"
 
@@ -221,6 +222,7 @@ def test_without_the_switch_the_capability_list_is_the_previous_one(monkeypatch)
     configured = settings(
         sync_publication_domain_operations_enabled=False,
         sync_publication_text_operations_enabled=False,
+        sync_publication_usage_stats_enabled=False,
     )
     assert sync_configuration(configured).capabilities == [
         "identity.oidc.v1",

@@ -6,13 +6,14 @@ from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes.public_mcp_usage import PublicMcpUsageStatsResponse, usage_stats_response
 from api.routes.sync_feeds import bounded_body, exact_query, json_body
 from api.routes.sync_publication_domains import (
     PublicationDomainObservation,
@@ -37,9 +38,11 @@ from models.sync_publication_domain_schemas import (
 from models.sync_publication_text_schemas import PublicationTextResult, PublicationTextUpdate
 from models.sync_setup_handoff_schemas import SyncSetupHandoffCreate, SyncSetupHandoffView
 from services.public_mcp_text import update_installation_public_text
+from services.public_mcp_usage_stats import USAGE_STATS_DEFAULT_DAYS, USAGE_STATS_MAX_DAYS
 from services.sync_contract import (
     DOMAIN_OPERATIONS_CAPABILITY,
     TEXT_OPERATIONS_CAPABILITY,
+    USAGE_STATS_CAPABILITY,
     sync_configuration,
 )
 from services.sync_installations import (
@@ -54,6 +57,7 @@ from services.sync_publication_domain_commands import (
     remove_publication_domain,
     verify_publication_domain,
 )
+from services.sync_publication_usage_stats import installation_stats_endpoint
 from services.sync_setup_handoff import create_setup_handoff
 from utils.exceptions import (
     AuthorizationError,
@@ -333,3 +337,51 @@ async def set_publication_text_route(
     # connection; the scoped identity is checked again inside the admission.
     principal = await load_sync_identity(db, credential_hash(token), "integrations:manage")
     return await update_installation_public_text(db, workspace_id, installation_id, principal, body)
+
+
+async def publication_usage_stats_enabled() -> None:
+    """#3035: the installation-bound statistics answer 404 before authentication while not advertised."""
+    if USAGE_STATS_CAPABILITY not in sync_configuration(get_settings()).capabilities:
+        raise NotFoundException("Publication usage statistics")
+
+
+@router.get(
+    "/sync-installations/{installation_id}/publication-usage-stats",
+    response_model=PublicMcpUsageStatsResponse,
+    dependencies=[Depends(publication_usage_stats_enabled)],
+)
+async def read_publication_usage_stats(
+    workspace_id: UUID,
+    installation_id: UUID,
+    request: Request,
+    principal: Reader,
+    db: Database,
+    days: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=USAGE_STATS_MAX_DAYS,
+            description="UTC days to cover, ending today (at most the event retention)",
+        ),
+    ] = USAGE_STATS_DEFAULT_DAYS,
+) -> PublicMcpUsageStatsResponse:
+    """Usage statistics of the installation's public endpoint (experimental).
+
+    The workspace's canonical owner with ``workspaces:read`` for the
+    installation's browser client gets the body of
+    ``GET /api/v1/resources/{resource_id}/public-mcp/usage-stats`` for the
+    installation's public endpoint, from the same read: its time budget and
+    the workspace's reads per minute, shared with that route. A current member
+    of the workspace who is not the canonical owner gets ``403``
+    ``owner_required``; any other caller, another workspace or installation,
+    and an installation whose public endpoint is not live the uniform 404.
+    ``429`` when the workspace read its statistics too often this minute;
+    ``503`` when the day counts could not be read (``Retry-After``).
+    """
+    exact_query(request, {"days"})
+    endpoint, resource_id = await installation_stats_endpoint(
+        db, workspace_id, installation_id, principal
+    )
+    return await usage_stats_response(
+        db, endpoint=endpoint, workspace_id=workspace_id, resource_id=resource_id, days=days
+    )

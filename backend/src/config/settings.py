@@ -195,6 +195,9 @@ class Settings(BaseSettings):
     # #2995: a managing application sets the public text of its installation's
     # endpoint through the installation's browser client (experimental).
     sync_publication_text_operations_enabled: bool = False
+    # #3035: the canonical owner reads the public usage statistics of the
+    # installation's endpoint through its browser client (experimental).
+    sync_publication_usage_stats_enabled: bool = False
     sync_authorization_ttl_seconds: int = Field(default=604800, ge=60, le=2592000)
     oidc_issuer: str = ""
     oidc_signing_keys_file: str = ""
