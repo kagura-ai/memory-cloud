@@ -369,6 +369,12 @@ describe("buildBudgetNote (#3019)", () => {
       "budget.phases.importance",
     );
   });
+
+  it("labels the supersede apply phase (#3020)", () => {
+    expect(budgetPhaseLabelKey("supersede_apply")).toBe(
+      "budget.phases.supersedeApply",
+    );
+  });
 });
 
 describe("buildBudgetCutNote (#3019)", () => {

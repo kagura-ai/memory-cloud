@@ -3549,7 +3549,8 @@
           "relatedIndex": "関連インデックス",
           "dedup": "重複排除",
           "importance": "重要度再評価",
-          "consolidation": "統合"
+          "consolidation": "統合",
+          "supersedeApply": "supersede リンク"
         }
       }
     },

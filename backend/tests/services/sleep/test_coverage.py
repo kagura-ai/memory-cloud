@@ -540,3 +540,161 @@ class TestAdvanceJudge:
         # Every row was passed: the round is complete, the position starts over.
         assert entry == LaneEntry()
         assert report == {"judge": {"taken": 2, "advanced": 2}, "skipped_after_stalls": 2}
+
+
+class TestApplyEntry3020:
+    """#3020: the supersede-apply phase keeps one sweep position in the state,
+    written only once the phase moved it, so a deployment that never ran the
+    phase stores exactly the state it stored before."""
+
+    def test_round_trip_with_an_apply_entry(self):
+        from services.sleep.coverage import CoverageState
+
+        state = CoverageState(
+            judge=LaneEntry(at=T0, id=uuid4()),
+            apply=LaneEntry(at=T0 + timedelta(hours=1), id=uuid4(), stalls=1, passes=2),
+        )
+        dumped = dump_state(state)
+        assert dumped["supersede_apply"] == {
+            "sweep": {
+                "at": state.apply.at.isoformat(),
+                "id": str(state.apply.id),
+                "stalls": 1,
+                "passes": 2,
+            }
+        }
+        assert parse_state(dumped) == state
+
+    def test_a_state_without_the_entry_dumps_as_before(self):
+        state = CoverageState(dedup=DedupLanes(sweep=LaneEntry(passes=1)))
+        assert dump_state(state) == {
+            "v": 1,
+            "dedup_merge": {
+                "changed": {"at": None, "id": None, "stalls": 0},
+                "sweep": {"at": None, "id": None, "stalls": 0, "passes": 1},
+                "turn": "changed",
+            },
+            "consolidation": {"judge": {"at": None, "id": None, "stalls": 0}},
+        }
+
+    def test_a_stored_state_of_the_previous_release_parses_with_an_empty_entry(self):
+        judge_id = uuid4()
+        state = parse_state(
+            {
+                "v": 1,
+                "dedup_merge": {"turn": "sweep"},
+                "consolidation": {"judge": {"at": T0.isoformat(), "id": str(judge_id)}},
+            }
+        )
+        assert state is not None
+        assert state.apply == LaneEntry()
+        assert state.judge == LaneEntry(at=T0, id=judge_id)
+
+    def test_an_unreadable_entry_resets_only_itself(self):
+        judge_id = uuid4()
+        state = parse_state(
+            {
+                "v": 1,
+                "consolidation": {"judge": {"at": T0.isoformat(), "id": str(judge_id)}},
+                "supersede_apply": {"sweep": {"at": T0.isoformat(), "id": None}},
+            }
+        )
+        assert state is not None
+        assert state.apply == LaneEntry()
+        assert state.judge == LaneEntry(at=T0, id=judge_id)
+
+
+class TestAdvanceApply3020:
+    def _coverage(self, keys, outcomes, *, exhausted):
+        from services.sleep.coverage import ApplyCoverage
+
+        return ApplyCoverage(
+            keys=keys,
+            exhausted=exhausted,
+            outcomes={key[1]: outcome for key, outcome in zip(keys, outcomes, strict=True)},
+        )
+
+    def test_no_window_carries_the_entry(self):
+        from services.sleep.coverage import advance_apply
+
+        entry = _entry(_keys(1)[0], stalls=1, passes=2)
+        assert advance_apply(entry, None, returned=True) == (entry, None)
+
+    def test_settled_rows_move_the_position(self):
+        from services.sleep.coverage import advance_apply
+
+        keys = _keys(2)
+        entry, report = advance_apply(
+            _entry(), self._coverage(keys, [SETTLED, SETTLED], exhausted=False), returned=True
+        )
+        assert entry.position == keys[1]
+        assert report == {
+            "sweep": {"taken": 2, "advanced": 2, "pass_completed": False, "passes": 0},
+            "skipped_after_stalls": 0,
+        }
+
+    def test_an_exhausted_settled_read_completes_the_pass(self):
+        from services.sleep.coverage import advance_apply
+
+        keys = _keys(2)
+        entry, report = advance_apply(
+            _entry(passes=3),
+            self._coverage(keys, [SETTLED, PASSED], exhausted=True),
+            returned=True,
+        )
+        assert entry == LaneEntry(passes=4)
+        assert report["sweep"] == {
+            "taken": 2,
+            "advanced": 2,
+            "pass_completed": True,
+            "passes": 4,
+        }
+
+    def test_a_failing_pair_among_refusals_stops_the_position_at_it(self):
+        from services.sleep.coverage import advance_apply
+
+        keys = _keys(3)
+        coverage = self._coverage(keys, [SETTLED, FAILURE, SETTLED], exhausted=True)
+        entry, report = advance_apply(_entry(), coverage, returned=True)
+        assert entry.position == keys[0]
+        assert report["sweep"]["advanced"] == 1
+        assert report["sweep"]["pass_completed"] is False
+
+    def test_three_runs_held_by_the_same_failing_head_pass_it(self):
+        from services.sleep.coverage import advance_apply
+
+        keys = _keys(2)
+        entry = _entry(keys[0])
+        head = [keys[1]]
+        for run in range(STALL_LIMIT):
+            entry, report = advance_apply(
+                entry, self._coverage(head, [FAILURE], exhausted=True), returned=True
+            )
+            if run < STALL_LIMIT - 1:
+                assert entry.position == keys[0]
+                assert entry.stalls == run + 1
+        # The third run passes the failing row; the pass then completes.
+        assert entry.position is None
+        assert entry.stalls == 0
+        assert entry.passes == 1
+        assert report["skipped_after_stalls"] == 1
+
+    def test_a_phase_that_did_not_return_moves_nothing(self):
+        from services.sleep.coverage import advance_apply
+
+        keys = _keys(2)
+        start = _entry(keys[0])
+        entry, report = advance_apply(
+            start, self._coverage(keys[1:], [SETTLED], exhausted=True), returned=False
+        )
+        assert entry.position == keys[0]
+        assert entry.stalls == 1
+        assert report["sweep"]["advanced"] == 0
+
+    def test_rows_read_with_every_outcome_a_failure_until_decided(self):
+        from services.sleep.coverage import ApplyCoverage
+
+        keys = _keys(2)
+        coverage = ApplyCoverage(keys=keys, exhausted=False, outcomes={keys[0][1]: SETTLED})
+        assert coverage.rows() == [(keys[0], SETTLED), (keys[1], FAILURE)]
+        assert coverage.rows(returned=False) == [(keys[0], FAILURE), (keys[1], FAILURE)]

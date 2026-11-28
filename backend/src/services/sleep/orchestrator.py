@@ -5,6 +5,7 @@ Issue #101/#103: Coordinates all sleep maintenance phases in order:
   Phase 2: Dedup/Merge
   Phase 3: Importance Re-eval
   Phase 4: Consolidation
+  Phase 4.5: Supersede Apply (#3020, only when the deployment switches it on)
   Phase 5: Reindex
   Phase 6: Report
 
@@ -32,9 +33,11 @@ from services.llm_service import LLMService
 from services.plan_suspension import sleep_suspended
 from services.sleep.consolidation import ConsolidationPhase
 from services.sleep.coverage import (
+    ApplyCoverage,
     CoverageState,
     DedupCoverage,
     JudgeCoverage,
+    advance_apply,
     advance_dedup,
     advance_judge,
     current_state,
@@ -55,6 +58,7 @@ from services.sleep.reporter import (
     SleepBudgetPlan,
     SleepReporter,
 )
+from services.sleep.supersede_apply import SupersedeApplyPhase
 from services.workspace_slot_gate import slot_suspended
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -73,6 +77,8 @@ FULL_PHASES = {
     "importance_reeval",
     "consolidation",
     "related_index",
+    # #3020: listed in a run only when the deployment switch is on.
+    "supersede_apply",
 }
 EDGES_ONLY_PHASES = {"edge_discovery"}
 # #1939: the non-LLM housekeeping (retention / privacy purges) of full mode.
@@ -106,7 +112,7 @@ def phase_calls_model(phase_name: str, config: NeuralMemoryConfig) -> bool:
 _NEVER_GATED_LLM_PHASES = {"consolidation"}
 
 # #3019: the phases that work through the partition from a stored position.
-COVERAGE_PHASES = {"dedup_merge", "consolidation"}
+COVERAGE_PHASES = {"dedup_merge", "consolidation", "supersede_apply"}
 
 
 class SleepOrchestrator:
@@ -224,6 +230,17 @@ class SleepOrchestrator:
             # winner's updated_at (importance re-evaluation no longer stamps
             # it, #3019). Later source edits still fail the fingerprint.
             phases.insert(1, ("related_index", lambda: RelatedIndexPhase(self.db)))
+        if config.sleep_supersede_apply_enabled is True:
+            # #3020: last, after dedup settled tonight's pairs: the phase holds
+            # its pairs' row locks until the run commits, so they are held
+            # through the reindex only, not through the model calls before it.
+            # ``is True``: a config built from MagicMock (the unit tests) is off.
+            phases.append(
+                (
+                    "supersede_apply",
+                    lambda: SupersedeApplyPhase(self.db, coverage=coverage.apply),
+                )
+            )
 
         # #3019: one budget per phase, the LLM calls shared among the phases
         # of this run that call a model.
@@ -320,8 +337,9 @@ class SleepOrchestrator:
         Only a phase that read its window has an outcome (also when it raised
         after the read: every row is then a failure). A phase that was skipped
         or raised before its read carries its entry unchanged. A run in which
-        neither phase produced an outcome leaves the column NULL, and the next
-        run reads the state of the run before. The whole state is written: the
+        no phase (dedup, the consolidation judge, #3020 supersede apply)
+        produced an outcome leaves the column NULL, and the next run reads the
+        state of the run before. The whole state is written: the
         entries this run advanced and the others as they were. Each phase
         with an outcome gets ``details["coverage"]``, saying what moved and how
         many rows the stall rule passed; a phase that raised has no details of
@@ -347,7 +365,10 @@ class SleepOrchestrator:
         judge_window = getattr(instances.get("consolidation"), "coverage_outcome", None)
         if not isinstance(judge_window, JudgeCoverage):
             judge_window = None
-        if dedup_window is None and judge_window is None:
+        apply_window = getattr(instances.get("supersede_apply"), "coverage_outcome", None)
+        if not isinstance(apply_window, ApplyCoverage):
+            apply_window = None
+        if dedup_window is None and judge_window is None and apply_window is None:
             return
         lanes, dedup_report = advance_dedup(
             coverage.dedup, dedup_window, returned=returned("dedup_merge"), now=now
@@ -355,9 +376,15 @@ class SleepOrchestrator:
         judge, judge_report = advance_judge(
             coverage.judge, judge_window, returned=returned("consolidation")
         )
-        report.coverage_state = dump_state(CoverageState(dedup=lanes, judge=judge))
+        apply_entry, apply_report = advance_apply(
+            coverage.apply, apply_window, returned=returned("supersede_apply")
+        )
+        report.coverage_state = dump_state(
+            CoverageState(dedup=lanes, judge=judge, apply=apply_entry)
+        )
         report_on("dedup_merge", dedup_report)
         report_on("consolidation", judge_report)
+        report_on("supersede_apply", apply_report)
 
     async def delete_committed_points(self) -> None:
         """Delete the points this run queued; call only after the caller's commit.

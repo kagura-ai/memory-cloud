@@ -266,8 +266,9 @@ export function buildPhaseNarrative(
 
 /**
  * #3019: the message key of each phase name the API can report in
- * `budget_limited_phases` (the four phases that call a model and the related
- * index). Any other name has no label and is shown as it is.
+ * `budget_limited_phases` (the four phases that call a model, the related
+ * index and, #3020, the supersede apply phase). Any other name has no label
+ * and is shown as it is.
  */
 const BUDGET_PHASE_LABEL_KEYS: Record<string, string> = {
   edge_discovery: "budget.phases.edgeDiscovery",
@@ -275,6 +276,7 @@ const BUDGET_PHASE_LABEL_KEYS: Record<string, string> = {
   dedup_merge: "budget.phases.dedup",
   importance_reeval: "budget.phases.importance",
   consolidation: "budget.phases.consolidation",
+  supersede_apply: "budget.phases.supersedeApply",
 };
 
 /** The label key of a budget-limited phase name, or null to show it raw. */

@@ -1223,3 +1223,163 @@ class TestCoverageState:
             "judge": {"taken": 2, "advanced": 1},
             "skipped_after_stalls": 0,
         }
+
+
+class TestSupersedeApplyPhase3020:
+    """#3020: the supersede-apply phase runs last, before the reindex, only
+    when the deployment switch is exactly True; it keeps one coverage entry."""
+
+    async def _run(
+        self,
+        mock_db,
+        *,
+        switch=True,
+        sleep_mode="full",
+        outcome=None,
+        raises=False,
+    ):
+        events: list[str] = []
+        report = MagicMock()
+        report.id = uuid4()
+        report.coverage_state = None
+        config = _make_config()
+        config.sleep_supersede_apply_enabled = switch
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
+            patch("services.sleep.orchestrator.EdgeDiscoveryPhase") as MockED,
+            patch("services.sleep.orchestrator.DedupMergePhase") as MockDM,
+            patch("services.sleep.orchestrator.MergeRetentionPhase") as MockMR,
+            patch("services.sleep.orchestrator.ForgetRetentionPhase") as MockFR,
+            patch("services.sleep.orchestrator.MeasurementRetentionPhase") as MockMS,
+            patch("services.sleep.orchestrator.ImportanceReevalPhase") as MockIR,
+            patch("services.sleep.orchestrator.ConsolidationPhase") as MockCP,
+            patch("services.sleep.orchestrator.SupersedeApplyPhase") as MockSA,
+            patch("services.sleep.orchestrator.ReindexPhase") as MockRI,
+        ):
+            reporter = AsyncMock()
+            reporter.create_report = AsyncMock(return_value=report)
+            MockReporter.return_value = reporter
+            for mock, name in (
+                (MockED, "edge_discovery"),
+                (MockDM, "dedup_merge"),
+                (MockMR, "merge_retention"),
+                (MockFR, "forget_retention"),
+                (MockMS, "measurement_retention"),
+                (MockIR, "importance_reeval"),
+                (MockCP, "consolidation"),
+            ):
+
+                async def execute(*args, n=name, **kwargs):
+                    events.append(n)
+                    return PhaseResult(phase_name=n)
+
+                mock.return_value = MagicMock(pending_point_deletes=[], coverage_outcome=None)
+                mock.return_value.execute = execute
+
+            apply = MagicMock(pending_point_deletes=[], coverage_outcome=outcome)
+
+            async def apply_execute(*args, **kwargs):
+                events.append("supersede_apply")
+                if raises:
+                    raise RuntimeError("apply crashed")
+                return PhaseResult(phase_name="supersede_apply", details={"applied": 0})
+
+            apply.execute = apply_execute
+            MockSA.return_value = apply
+
+            async def reindex_execute(*args, **kwargs):
+                events.append("reindex")
+                return PhaseResult(phase_name="reindex")
+
+            MockRI.return_value.execute = reindex_execute
+
+            orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value=sleep_mode)
+            orchestrator._get_context_embedding_info = AsyncMock(return_value=(None, "c"))
+            await orchestrator.run("user-1", "ws-1", str(uuid4()), config=config)
+        results = reporter.complete_report.call_args.args[1]
+        return report, MockSA, events, results
+
+    @pytest.mark.asyncio
+    async def test_switched_on_it_runs_last_before_the_reindex(self, mock_db):
+        _, MockSA, events, results = await self._run(mock_db)
+        assert events[-3:] == ["consolidation", "supersede_apply", "reindex"]
+        assert [r.phase_name for r in results][-2:] == ["supersede_apply", "reindex"]
+        MockSA.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("switch", [False, None, "true", 1, MagicMock()])
+    async def test_anything_but_true_leaves_it_out(self, mock_db, switch):
+        """``MagicMock()`` is what every other orchestrator test's config
+        holds (truthy attributes): those keep today's phase list."""
+        _, MockSA, events, results = await self._run(mock_db, switch=switch)
+        MockSA.assert_not_called()
+        assert "supersede_apply" not in events
+        assert "supersede_apply" not in [r.phase_name for r in results]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["edges_only", "suspended"])
+    async def test_outside_full_mode_it_is_listed_as_skipped(self, mock_db, mode):
+        _, MockSA, events, results = await self._run(mock_db, sleep_mode=mode)
+        MockSA.assert_not_called()
+        skipped = next(r for r in results if r.phase_name == "supersede_apply")
+        assert skipped.skipped is True
+        assert skipped.skip_reason == f"sleep_mode_{mode}"
+
+    @pytest.mark.asyncio
+    async def test_it_gets_its_stored_entry(self, mock_db, coverage_lookup):
+        from services.sleep.coverage import CoverageState, LaneEntry
+
+        entry = LaneEntry(passes=4)
+        coverage_lookup.return_value = CoverageState(apply=entry)
+        _, MockSA, _, _ = await self._run(mock_db)
+        assert MockSA.call_args.kwargs["coverage"] == entry
+
+    @pytest.mark.asyncio
+    async def test_its_outcome_alone_writes_the_next_state(self, mock_db):
+        from datetime import timedelta
+
+        from services.sleep.coverage import SETTLED, ApplyCoverage, parse_state
+        from utils.datetime import utcnow
+
+        rows = [(utcnow() - timedelta(days=d), uuid4()) for d in (3, 2)]
+        outcome = ApplyCoverage(
+            keys=rows, exhausted=False, outcomes={rows[0][1]: SETTLED, rows[1][1]: SETTLED}
+        )
+        report, _, _, results = await self._run(mock_db, outcome=outcome)
+
+        state = parse_state(report.coverage_state)
+        assert state is not None
+        assert state.apply.position == rows[1]
+        assert report.coverage_state["supersede_apply"]["sweep"]["id"] == str(rows[1][1])
+        apply = next(r for r in results if r.phase_name == "supersede_apply")
+        assert apply.details["coverage"] == {
+            "sweep": {"taken": 2, "advanced": 2, "pass_completed": False, "passes": 0},
+            "skipped_after_stalls": 0,
+        }
+        assert apply.details["applied"] == 0
+
+    @pytest.mark.asyncio
+    async def test_a_raised_phase_stalls(self, mock_db):
+        from datetime import timedelta
+
+        from services.sleep.coverage import ApplyCoverage, parse_state
+        from utils.datetime import utcnow
+
+        row = (utcnow() - timedelta(days=3), uuid4())
+        outcome = ApplyCoverage(keys=[row], exhausted=True)
+        report, _, _, results = await self._run(mock_db, outcome=outcome, raises=True)
+
+        state = parse_state(report.coverage_state)
+        assert state.apply.position is None
+        assert state.apply.stalls == 1
+        apply = next(r for r in results if r.phase_name == "supersede_apply")
+        assert apply.error == "apply crashed"
+        assert set(apply.details) == {"coverage"}
+        assert apply.details["coverage"]["sweep"]["advanced"] == 0
+
+    @pytest.mark.asyncio
+    async def test_switched_on_without_an_outcome_the_column_stays_null(self, mock_db):
+        report, _, _, _ = await self._run(mock_db)
+        assert report.coverage_state is None

@@ -55,8 +55,9 @@ BudgetLimit = Literal["skipped", "cut"]
 
 # #3019: every phase result a report stores, in run order: (phase, column,
 # key inside that column's blob or None for the blob itself). The related
-# index is stored inside edge_discovery_result and the forget and measurement
-# retention results inside merge_retention_result.
+# index is stored inside edge_discovery_result, the forget and measurement
+# retention results inside merge_retention_result and (#3020) the supersede
+# apply result inside dedup_result.
 _PHASE_RESULT_BLOBS: tuple[tuple[str, str, str | None], ...] = (
     ("edge_discovery", "edge_discovery_result", None),
     ("related_index", "edge_discovery_result", "related_index"),
@@ -66,6 +67,7 @@ _PHASE_RESULT_BLOBS: tuple[tuple[str, str, str | None], ...] = (
     ("measurement_retention", "merge_retention_result", "measurement_retention"),
     ("importance_reeval", "importance_result", None),
     ("consolidation", "consolidation_result", None),
+    ("supersede_apply", "dedup_result", "supersede_apply"),
     ("reindex", "reindex_result", None),
 )
 
@@ -120,7 +122,8 @@ class SleepReport(Base):
             (#1183: 'degraded' = finished with partial judge-LLM failures;
             total judge failure is graded 'failed')
         edge_discovery_result: Phase 1 results (JSON)
-        dedup_result: Phase 2 results (JSON)
+        dedup_result: Phase 2 results (JSON); #3020: the supersede-apply
+            phase's result under the key ``supersede_apply``
         merge_retention_result: Phase 2.5 results (JSON, #1209)
         importance_result: Phase 3 results (JSON)
         consolidation_result: Phase 4 results (JSON)
@@ -179,9 +182,10 @@ class SleepReport(Base):
     consolidation_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
     reindex_result: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
     # #3019: the positions of the phases that work through the partition in a
-    # stable order (dedup's two lanes, the consolidation judge), as this run
-    # left them (``services.sleep.coverage``). NULL when the run produced no
-    # outcome for either phase; the current state of a partition is that of
+    # stable order (dedup's two lanes, the consolidation judge and, #3020, the
+    # supersede-apply sweep), as this run left them
+    # (``services.sleep.coverage``). NULL when the run produced no outcome for
+    # any of them; the current state of a partition is that of
     # its latest report (by ``started_at``) that has one. Memory ids and
     # timestamps only, no text; not returned by any route or tool.
     coverage_state: Mapped[dict[str, Any] | None] = mapped_column(NullableJSON, nullable=True)
@@ -346,8 +350,9 @@ class SleepAction(Base):
     Attributes:
         id: Auto-increment primary key
         report_id: Parent sleep report
-        phase: Phase name (edge_discovery, dedup_merge, etc.)
-        action_type: Action taken (merge, create_edge, promote, flag, etc.)
+        phase: Phase name (edge_discovery, dedup_merge, supersede_apply, etc.)
+        action_type: Action taken (merge, create_edge, promote, flag,
+            apply_supersede, etc.)
         memory_id: Primary memory affected
         target_id: Secondary memory (e.g., merge target)
         details: Additional action details (JSON)

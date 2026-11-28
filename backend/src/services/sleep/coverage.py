@@ -1,9 +1,10 @@
 """Coverage positions of the Sleep phases that work through a partition (#3019).
 
 A partition is the rows of one user in one context, what a Sleep run works
-on. Dedup takes its window from two lanes and the consolidation judge reads
-its borderline rows from one position, so every row is reached in a bounded
-number of runs whatever the per-run allowance:
+on. Dedup takes its window from two lanes, the consolidation judge reads its
+borderline rows from one position and the supersede-apply phase (#3020) its
+verified suggestions from one sweep position, so every row is reached in a
+bounded number of runs whatever the per-run allowance:
 
 * **changed lane** — rows written or edited since the lane's position, newest
   first when more changed than fit (what does not fit is left to the sweep);
@@ -107,10 +108,16 @@ class DedupLanes:
 
 @dataclass(frozen=True)
 class CoverageState:
-    """The coverage state of one partition, version 1."""
+    """The coverage state of one partition, version 1.
+
+    ``apply`` (#3020) is the supersede-apply phase's sweep; it is stored only
+    once that phase moved it, so a deployment that never ran the phase stores
+    the state it stored before.
+    """
 
     dedup: DedupLanes = field(default_factory=DedupLanes)
     judge: LaneEntry = field(default_factory=LaneEntry)
+    apply: LaneEntry = field(default_factory=LaneEntry)
 
 
 # ---------------------------------------------------------------- state I/O
@@ -185,6 +192,7 @@ def parse_state(value: Any) -> CoverageState | None:
             turn=turn if turn in _TURNS else LANE_CHANGED,
         ),
         judge=entry(value.get("consolidation"), "judge", "consolidation.judge"),
+        apply=entry(value.get("supersede_apply"), LANE_SWEEP, "supersede_apply.sweep"),
     )
     if unreadable:
         logger.warning("sleep_coverage_state_entries_reset", entries=unreadable)
@@ -203,8 +211,13 @@ def _dump_entry(entry: LaneEntry, *, passes: bool) -> dict[str, Any]:
 
 
 def dump_state(state: CoverageState) -> dict[str, Any]:
-    """The JSON form of ``state`` (version 1)."""
-    return {
+    """The JSON form of ``state`` (version 1).
+
+    The supersede-apply entry is left out while it is the empty entry: a
+    release before #3020 ignores the key, and its next run of the phase starts
+    from the beginning.
+    """
+    dumped: dict[str, Any] = {
         "v": STATE_VERSION,
         "dedup_merge": {
             LANE_CHANGED: _dump_entry(state.dedup.changed, passes=False),
@@ -213,6 +226,9 @@ def dump_state(state: CoverageState) -> dict[str, Any]:
         },
         "consolidation": {"judge": _dump_entry(state.judge, passes=False)},
     }
+    if state.apply != LaneEntry():
+        dumped["supersede_apply"] = {LANE_SWEEP: _dump_entry(state.apply, passes=True)}
+    return dumped
 
 
 async def current_state(
@@ -286,6 +302,15 @@ def _key_literal(key: Key) -> Any:
     return tuple_(literal(key[0], type_=DateTime()), literal(key[1], type_=PG_UUID(as_uuid=True)))
 
 
+def after_sweep_position(position: Key) -> ColumnElement[bool]:
+    """Rows after ``position`` in ``(created_at, id)`` order (#3020).
+
+    A row-value comparison with bound literals typed like the columns, so rows
+    with equal timestamps neither repeat nor skip.
+    """
+    return tuple_(Memory.created_at, Memory.id) > _key_literal(position)
+
+
 @dataclass
 class DedupCoverage:
     """The dedup window of one run and each window row's outcome.
@@ -318,6 +343,25 @@ class JudgeCoverage:
     and each row's outcome (``failure`` until the pass finished)."""
 
     keys: list[Key]
+    outcomes: dict[UUID, str] = field(default_factory=dict)
+
+    def rows(self, *, returned: bool = True) -> list[tuple[Key, str]]:
+        if not returned:
+            return [(key, FAILURE) for key in self.keys]
+        return [(key, self.outcomes.get(key[1], FAILURE)) for key in self.keys]
+
+
+@dataclass
+class ApplyCoverage:
+    """The supersede-apply phase's rows of one run (#3020).
+
+    ``keys`` are the carriers it read, in ``(created_at, id)`` order;
+    ``exhausted`` that no carrier was left after them. Every outcome starts as
+    ``failure``: a phase that raises after the read moves nothing.
+    """
+
+    keys: list[Key]
+    exhausted: bool
     outcomes: dict[UUID, str] = field(default_factory=dict)
 
     def rows(self, *, returned: bool = True) -> list[tuple[Key, str]]:
@@ -648,5 +692,40 @@ def advance_judge(
         )
     return plan.entry, {
         "judge": {"taken": plan.taken, "advanced": plan.advanced},
+        "skipped_after_stalls": plan.skipped_after_stalls,
+    }
+
+
+def advance_apply(
+    entry: LaneEntry,
+    coverage: ApplyCoverage | None,
+    *,
+    returned: bool,
+) -> tuple[LaneEntry, dict[str, Any] | None]:
+    """The supersede-apply phase's next position and its ``details["coverage"]`` (#3020).
+
+    A sweep in ``(created_at, id)`` order that counts its passes: the position
+    moves to the last settled-or-passed row, and back to the start (one more
+    pass) when the read was exhausted and every row it took moved. No rows
+    read (the phase was skipped, or raised before its read): the entry is
+    carried. A phase that did not return moves nothing; the stall rule passes
+    a failing head after ``STALL_LIMIT`` runs.
+    """
+    if coverage is None:
+        return entry, None
+    plan = plan_sweep(entry, coverage.rows(returned=returned), exhausted=coverage.exhausted)
+    if plan.skipped_after_stalls:
+        logger.info(
+            "sleep_coverage_passed_after_stalls",
+            phase="supersede_apply",
+            rows=plan.skipped_after_stalls,
+        )
+    return plan.entry, {
+        LANE_SWEEP: {
+            "taken": plan.taken,
+            "advanced": plan.advanced,
+            "pass_completed": plan.pass_completed,
+            "passes": plan.entry.passes,
+        },
         "skipped_after_stalls": plan.skipped_after_stalls,
     }

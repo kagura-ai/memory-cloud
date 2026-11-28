@@ -3549,7 +3549,8 @@
           "relatedIndex": "Related index",
           "dedup": "Deduplication",
           "importance": "Importance Re-evaluation",
-          "consolidation": "Consolidation"
+          "consolidation": "Consolidation",
+          "supersedeApply": "Supersede links"
         }
       }
     },

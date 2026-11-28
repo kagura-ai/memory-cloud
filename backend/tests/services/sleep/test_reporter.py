@@ -484,3 +484,94 @@ class TestPartialPhaseFailureGrading:
         await reporter.complete_report(report, results)
 
         assert report.status == "failed"
+
+
+class TestSupersedeApplyBlob3020:
+    """#3020: the supersede-apply phase has no column of its own; its blob is
+    stored inside ``dedup_result`` whatever the order of the results."""
+
+    @pytest.fixture
+    def reporter(self):
+        db = AsyncMock()
+        db.add = MagicMock()
+        return SleepReporter(db)
+
+    @staticmethod
+    def _report():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            id=uuid4(),
+            error_message=None,
+            embedding_provider=None,
+            source="analysis",
+            context_id=None,
+            edge_discovery_result=None,
+            dedup_result=None,
+            merge_retention_result=None,
+            importance_result=None,
+            consolidation_result=None,
+            reindex_result=None,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("apply_first", [False, True])
+    async def test_the_blob_nests_in_dedup_result(self, reporter, apply_first):
+        report = self._report()
+        dedup = PhaseResult(phase_name="dedup_merge", details={"merged": 2})
+        apply = PhaseResult(
+            phase_name="supersede_apply",
+            memories_processed=3,
+            details={"applied": 1, "budget_cut": False},
+        )
+        results = [apply, dedup] if apply_first else [dedup, apply]
+
+        await reporter.complete_report(report, results)
+
+        assert report.dedup_result["details"] == {"merged": 2}
+        assert report.dedup_result["supersede_apply"]["details"] == {
+            "applied": 1,
+            "budget_cut": False,
+        }
+        assert report.dedup_result["supersede_apply"]["memories_processed"] == 3
+        assert report.memories_merged == 2
+
+    @pytest.mark.asyncio
+    async def test_without_the_phase_dedup_result_is_unchanged(self, reporter):
+        report = self._report()
+        await reporter.complete_report(
+            report, [PhaseResult(phase_name="dedup_merge", details={"merged": 0})]
+        )
+        assert "supersede_apply" not in report.dedup_result
+
+    @pytest.mark.asyncio
+    async def test_a_run_without_dedup_still_stores_the_blob(self, reporter):
+        report = self._report()
+        await reporter.complete_report(report, [PhaseResult(phase_name="supersede_apply")])
+        assert set(report.dedup_result) == {"supersede_apply"}
+
+    @pytest.mark.asyncio
+    async def test_a_cut_phase_is_budget_limited(self, reporter):
+        from models.sleep import budget_limited_phases
+
+        report = self._report()
+        await reporter.complete_report(
+            report,
+            [
+                PhaseResult(phase_name="consolidation", details={"budget_cut": False}),
+                PhaseResult(phase_name="supersede_apply", details={"budget_cut": True}),
+            ],
+        )
+        assert budget_limited_phases(report) == {"supersede_apply": "cut"}
+
+    @pytest.mark.asyncio
+    async def test_failed_writes_grade_the_run_degraded_with_the_count(self, reporter):
+        report = self._report()
+        await reporter.complete_report(
+            report,
+            [PhaseResult(phase_name="supersede_apply", operation_failures=1, memories_processed=3)],
+        )
+        assert report.status == "degraded"
+        assert report.error_message == (
+            "supersede_apply_partial_failure: 1 of 3 supersede_apply operations failed"
+        )

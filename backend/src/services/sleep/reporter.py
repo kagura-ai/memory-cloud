@@ -510,6 +510,9 @@ class SleepReporter:
         # the loop so the result does not depend on the order of the phases.
         merge_retention_data: dict[str, Any] | None = None
         nested_retention: dict[str, dict[str, Any]] = {}
+        # #3020: the supersede-apply phase has no column either; its blob is
+        # stored inside dedup_result, assigned after the loop for the same reason.
+        supersede_apply_data: dict[str, Any] | None = None
 
         for result in phase_results:
             for breakdown in result.llm_breakdown:
@@ -608,9 +611,16 @@ class SleepReporter:
                     **(report.edge_discovery_result or {}),
                     "related_index": phase_data,
                 }
+            elif result.phase_name == "supersede_apply":
+                supersede_apply_data = phase_data
 
         if merge_retention_data is not None or nested_retention:
             report.merge_retention_result = {**(merge_retention_data or {}), **nested_retention}
+        if supersede_apply_data is not None:
+            report.dedup_result = {
+                **(report.dedup_result or {}),
+                "supersede_apply": supersede_apply_data,
+            }
 
         report.embedding_tokens = embedding_tokens_total
         report.llm_calls_made = total_llm_calls
