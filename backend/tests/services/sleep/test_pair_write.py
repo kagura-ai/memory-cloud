@@ -352,3 +352,39 @@ class TestTextRecency:
         assert kwargs["loser_text_edited_at"] is None
         assert kwargs["loser_unread"] is False
         assert kwargs["log_began"] == phase._revision_log_began
+
+
+class TestDedupMergeDropsAppliedLinks:
+    """#3020: a delete-mode merge deletes the loser's Sleep-applied links
+    before it moves the loser's other edges onto the winner."""
+
+    @pytest.mark.asyncio
+    async def test_the_applied_links_go_before_the_transfer(self) -> None:
+        phase = DedupMergePhase.__new__(DedupMergePhase)
+        phase.db = AsyncMock()
+        phase.collection_name = "kagura_memories"
+        phase.pending_point_deletes = []
+        calls = MagicMock()
+        phase.edge_repo = calls
+        calls.delete_sleep_applied_edges = AsyncMock(return_value=1)
+        calls.transfer_edges = AsyncMock(return_value=0)
+        winner, loser = SimpleNamespace(id=uuid4(), tags=[]), SimpleNamespace(id=uuid4(), tags=[])
+        with (
+            patch.object(phase, "_pinned_or_gone_since_fetch", AsyncMock(return_value=False)),
+            patch("services.sleep.dedup_merge.unshared_point_id", AsyncMock(return_value=None)),
+        ):
+            assert await phase._execute_merge(winner, loser, "u", "w", "c") is True
+        assert [name for name, *_ in calls.mock_calls] == [
+            "delete_sleep_applied_edges",
+            "transfer_edges",
+        ]
+        assert calls.delete_sleep_applied_edges.await_args.args == (loser.id, "u")
+
+    def test_the_marker_predicate(self) -> None:
+        from repositories.neural_edge import sleep_applied_supersedes
+
+        sql = sleep_applied_supersedes().compile(dialect=postgresql.dialect())
+        assert "neural_memory_edges.edge_type = " in str(sql)
+        assert "neural_memory_edges.origin = " in str(sql)
+        assert "CAST(neural_memory_edges.metadata AS JSONB) ->> " in str(sql)
+        assert set(sql.params.values()) >= {"supersedes", "semantic", "sleep_supersede_apply"}

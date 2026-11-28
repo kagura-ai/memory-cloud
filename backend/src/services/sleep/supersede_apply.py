@@ -54,7 +54,7 @@ from models.memory import (
     Memory,
     NeuralMemoryEdge,
 )
-from repositories.neural_edge import NeuralEdgeRepository
+from repositories.neural_edge import NeuralEdgeRepository, sleep_applied_supersedes
 from services.exempt_tags import carries_exempt_tag, exempt_tags, not_exempt_tagged_predicate
 from services.memory_versions import (
     TextEditEvent,
@@ -651,9 +651,7 @@ def _applied_link(user_id: str, action: Any) -> Any:
         NeuralMemoryEdge.user_id == user_id,
         NeuralMemoryEdge.src_id == action.memory_id,
         NeuralMemoryEdge.dst_id == action.target_id,
-        NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
-        NeuralMemoryEdge.origin == EDGE_ORIGIN_SEMANTIC,
-        metadata["source"].astext == EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY,
+        sleep_applied_supersedes(),
         metadata["report_id"].astext == str(action.report_id),
     )
 

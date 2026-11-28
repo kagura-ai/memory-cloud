@@ -33,6 +33,7 @@ from tests.integration._supersede_apply_support import (
     candidate_column,
     committed_cleanup,
     edge_row,
+    memory,
     new_report,
     run_phase,
     run_sleep,
@@ -454,6 +455,105 @@ async def test_a_change_committed_after_the_read_refuses_under_the_lock(db_sessi
     assert result.details["no_action_reasons"] == {"changed_since_read": 1}
     assert await apply_actions(db, report.id) == []
     assert await edge_row(db, s.owner, newer_id, older_id) is None
+
+
+# ------------------------------------------------- a later dedup merge
+
+
+async def _fresh(db, memory_id):
+    return (
+        await db.execute(
+            select(Memory).where(Memory.id == memory_id).execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+async def _dedup_merge(db, s, winner_id, loser_id) -> None:
+    """Dedup's delete-mode merge of ``loser_id`` into ``winner_id``, on Postgres."""
+    from services.sleep.dedup_merge import DedupMergePhase
+
+    with patch("services.sleep.dedup_merge.EmbeddingService"):
+        phase = DedupMergePhase(db, AsyncMock())
+    winner, loser = await _fresh(db, winner_id), await _fresh(db, loser_id)
+    with patch("services.sleep.dedup_merge.unshared_point_id", AsyncMock(return_value=None)):
+        assert await phase._execute_merge(winner, loser, s.owner, s.ws_id, s.ctx_id) is True
+    await db.flush()
+
+
+async def _edges_of(db, user_id, *ids) -> set[tuple]:
+    from models.memory import NeuralMemoryEdge
+
+    rows = await db.execute(
+        select(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id, NeuralMemoryEdge.edge_type).where(
+            NeuralMemoryEdge.user_id == user_id,
+            NeuralMemoryEdge.src_id.in_(ids) | NeuralMemoryEdge.dst_id.in_(ids),
+        )
+    )
+    return {tuple(row) for row in rows.all()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("loser", ["older", "newer"])
+async def test_a_merge_deletes_an_applied_link_on_its_loser(db_session, loser):
+    """A link decided for one pair is not moved onto the winner of a later
+    merge, at either end; another edge of the loser still moves."""
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    newer_id, older_id = newer.id, older.id
+    winner = memory(s, created_at=_base() + timedelta(hours=3))
+    bystander = memory(s, created_at=_base() + timedelta(hours=4))
+    db.add_all([winner, bystander])
+    await db.flush()
+    winner_id, bystander_id = winner.id, bystander.id
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+    _, result = await run_phase(db, s, report)
+    assert result.details["applied"] == 1
+    loser_id, other_id = (older_id, newer_id) if loser == "older" else (newer_id, older_id)
+    await add_edge(
+        db,
+        s,
+        await _fresh(db, bystander_id),
+        await _fresh(db, loser_id),
+        "related_to",
+        origin="declared",
+    )
+
+    await _dedup_merge(db, s, winner_id, loser_id)
+
+    edges = await _edges_of(db, s.owner, newer_id, older_id, winner_id, bystander_id)
+    assert edges == {(bystander_id, winner_id, "related_to")}
+    assert (other_id, winner_id, "supersedes") not in edges
+    assert (winner_id, other_id, "supersedes") not in edges
+
+
+@pytest.mark.asyncio
+async def test_a_merge_leaves_no_two_memories_hiding_each_other(db_session):
+    """oldest <- middle <- newest, both links applied; dedup then merges the
+    oldest into the newest. Moving middle -> oldest onto the winner would make
+    middle and newest each supersede the other."""
+    db = db_session
+    s = await scope(db)
+    middle, oldest = await verified_pair(db, s, created_at=_base())
+    newest = memory(
+        s,
+        summary="the office moved to floor 6",
+        content="floor 6 since winter",
+        created_at=_base() + timedelta(hours=2),
+    )
+    newest.supersede_candidate = verified_candidate(
+        middle, newer_summary=newest.summary, newer_content=newest.content
+    )
+    db.add(newest)
+    await db.flush()
+    ids = (oldest.id, middle.id, newest.id)
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+    _, result = await run_phase(db, s, report)
+    assert result.details["applied"] == 2
+
+    await _dedup_merge(db, s, ids[2], ids[0])
+
+    assert await _edges_of(db, s.owner, *ids) == {(ids[2], ids[1], "supersedes")}
 
 
 # ------------------------------------------------------------ over the runs

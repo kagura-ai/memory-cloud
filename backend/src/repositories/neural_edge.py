@@ -27,6 +27,7 @@ from models.memory import (
     EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
+    EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_SUPERSEDES,
     Memory,
@@ -158,6 +159,18 @@ def _hebbian_leaves_alone() -> ColumnElement[bool]:
                 NeuralMemoryEdge.edge_type != EDGE_TYPE_NEURAL_ASSOCIATION,
             ),
         ),
+    )
+
+
+def sleep_applied_supersedes(edge: Any = NeuralMemoryEdge) -> ColumnElement[bool]:
+    """A ``supersedes`` edge Sleep's supersede-apply phase wrote, still as it
+    wrote it (#3020): origin ``semantic`` and ``metadata.source`` naming the
+    phase. A row a person re-declared since (origin ``declared``) or a writer
+    rewrote without the marker does not match. Works on an ``aliased`` edge."""
+    return and_(
+        edge.edge_type == EDGE_TYPE_SUPERSEDES,
+        edge.origin == EDGE_ORIGIN_SEMANTIC,
+        sa_cast(edge.edge_metadata, JSONB)["source"].astext == EDGE_SOURCE_SLEEP_SUPERSEDE_APPLY,
     )
 
 
@@ -1565,6 +1578,33 @@ class NeuralEdgeRepository:
             context_id=context_id,
         )
         return deleted_count
+
+    async def delete_sleep_applied_edges(self, node_id: UUID, user_id: str) -> int:
+        """Delete ``user_id``'s Sleep-applied ``supersedes`` edges at ``node_id`` (#3020).
+
+        Dedup's merge calls it for the loser before :meth:`transfer_edges`. Such
+        a link was decided for its own pair (a judge's verdict on both texts);
+        moved onto the winner it would link a pair nobody judged, could make
+        two memories supersede each other, and its run's rollback would no
+        longer find it. Deleting it leaves both remaining memories visible.
+        Every scope: the edge is the user's and the node is going away.
+
+        Returns:
+            The number of edges deleted.
+        """
+        result = await self.db.execute(
+            delete(NeuralMemoryEdge)
+            .where(
+                NeuralMemoryEdge.user_id == user_id,
+                or_(NeuralMemoryEdge.src_id == node_id, NeuralMemoryEdge.dst_id == node_id),
+                sleep_applied_supersedes(),
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+        deleted = cast(CursorResult[Any], result).rowcount or 0
+        if deleted:
+            logger.info("sleep_applied_edges_deleted", node=str(node_id), count=deleted)
+        return deleted
 
     async def transfer_edges(
         self,

@@ -2201,6 +2201,11 @@ class DedupMergePhase(EmbeddingSpendTracker):
             await queue_point_deletes(self.db, [entry])
             self.pending_point_deletes.append(entry)
 
+        # #3020: a supersedes link Sleep's supersede-apply phase wrote at the
+        # loser was decided for that pair only; it is deleted, not moved onto
+        # the winner (which would link a pair nobody judged).
+        await self.edge_repo.delete_sleep_applied_edges(loser.id, user_id)
+
         # Transfer edges from loser to winner
         await self.edge_repo.transfer_edges(
             from_node_id=loser.id,
