@@ -97,7 +97,7 @@ class _Rig:
         self.search = MagicMock()
         self.search.return_value.hybrid_search = AsyncMock(return_value=[])
         self.log_usage = AsyncMock()
-        # What the route's one read of the returned rows answers (#3035, K4a).
+        # What the route's one read of the returned rows answers (#3035).
         self.filter_rows: list[Any] = []
 
     async def _incr(self, key: str, amount: int = 1, ttl: int = 60) -> int:
@@ -201,7 +201,7 @@ def test_a_session_does_not_skip_the_per_minute_bucket(user_id: str) -> None:
 def test_a_resource_point_hit_answers_the_row_memory_id() -> None:
     """#2953: the point id of a resource document is not the row's id.
 
-    #3035 (K4a): the row is answered once, at its first position, when the
+    #3035: the row is answered once, at its first position, when the
     read of the returned rows finds it live in the context.
     """
     rig = _Rig(None)

@@ -8,15 +8,15 @@ session that records the order of its calls:
 - a bound key's use is committed right after the context check, before the
   workspace is loaded; a key refused at attribution or by the context check
   commits nothing, and the anonymous path gains no commit;
-- each row is answered once, and only the context's live rows (K4a): the
+- each row is answered once, and only the context's live rows: the
   search fetches twice ``limit``, repeats are dropped, one read in a
   savepoint keeps the rows of the context that are not deleted, the list is
   cut to ``limit``; when that read fails the de-duplicated results are
   served unfiltered;
-- the four rate-limit refusals say which limit refused (K9b), and a search
-  the workspace cannot run for now answers 503 without a reason (K10a);
+- the four rate-limit refusals say which limit refused, and a search the
+  workspace cannot run for now answers 503 without a reason;
 - the completed and failed lines carry the stage timings, the embedding
-  cache hit and the fusion (K8).
+  cache hit and the fusion.
 """
 
 from __future__ import annotations
@@ -257,7 +257,7 @@ async def test_a_missing_workspace_after_the_commit_is_still_the_500() -> None:
 
 
 # ---------------------------------------------------------------------------
-# K4a: each row once, only the context's live rows
+# Each row once, only the context's live rows
 # ---------------------------------------------------------------------------
 
 
@@ -421,7 +421,7 @@ async def test_a_failed_read_serves_the_de_duplicated_results_unfiltered(bound: 
 
 
 # ---------------------------------------------------------------------------
-# K9b: which limit refused
+# Which limit refused
 # ---------------------------------------------------------------------------
 
 
@@ -510,7 +510,7 @@ async def test_the_reason_reaches_the_client_body() -> None:
 
 
 # ---------------------------------------------------------------------------
-# K10a: a search the workspace cannot run for now is a 503, without a reason
+# A search the workspace cannot run for now is a 503, without a reason
 # ---------------------------------------------------------------------------
 
 
@@ -584,7 +584,7 @@ async def test_other_failures_keep_the_500(error: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# K8: stage timings and the embedding-cache hit on both lines
+# Stage timings and the embedding-cache hit on both lines
 # ---------------------------------------------------------------------------
 
 

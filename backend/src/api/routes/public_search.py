@@ -435,7 +435,7 @@ async def _resolve_public_attribution(
 
 
 # ============================================================================
-# Results: each row once, only the context's live rows (#3035, K4a)
+# Results: each row once, only the context's live rows (#3035)
 # ============================================================================
 
 
@@ -454,7 +454,7 @@ async def _filter_results(
     limit: int,
     publication: ServingEndpoint | None = None,
 ) -> tuple[list[PublicSearchResult], tuple[str, ...] | None, int]:
-    """Answer each row once, and only the context's live rows (#3035, K4a).
+    """Answer each row once, and only the context's live rows (#3035).
 
     De-duplicates by ``memory_id`` (the first position wins; always, also when
     the read below fails), then reads the remaining rows once by primary key,
@@ -626,7 +626,7 @@ async def public_search(
     start_time = utcnow()
     # #3035: the clock of a recorded search's duration (the whole route).
     started = time.perf_counter()
-    # #3035 (K8): the stage clock behind both result lines (no query text).
+    # #3035: the stage clock behind both result lines (no query text).
     timings = RecallTimings()
 
     # 1a. Pre-auth rate limit when an Authorization header is supplied.
@@ -789,7 +789,7 @@ async def public_search(
                 user_id=search_user_id,
                 workspace_id=str(context.workspace_id),
                 context_id=str(context_id),
-                # #3035 (K4a): twice the limit, as public MCP fetches, so serving
+                # #3035: twice the limit, as public MCP fetches, so serving
                 # each row once still fills ``limit`` in the common case.
                 k=2 * request.limit,
                 use_rerank=False,
@@ -818,7 +818,7 @@ async def public_search(
                 )
                 for result in results
             ]
-            # #3035 (K4a): each row once, only the context's live rows, at most
+            # #3035: each row once, only the context's live rows, at most
             # ``limit``; ``count`` follows, so it can be below ``limit``.
             formatted_results, doc_ids, results_dropped = await _filter_results(
                 db,
@@ -882,7 +882,7 @@ async def public_search(
             )
 
         except Exception as e:
-            # #3035 (K10a): the workspace cannot run searches for now. The answer
+            # #3035: the workspace cannot run searches for now. The answer
             # is the bare 503 with no reason or figure; the operator line names
             # the cause (its message carries the figure, so it is not logged).
             cannot_run = isinstance(e, EmbeddingSpendCapExceeded)

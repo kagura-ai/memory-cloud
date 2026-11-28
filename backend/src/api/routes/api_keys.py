@@ -117,8 +117,11 @@ async def _bound_context_locked(db: AsyncSession, key: APIKey) -> bool:
     Lock order: the bound context before the key, the order user deletion
     takes (the doomed contexts, then the keys bound to them). ``FOR KEY
     SHARE`` is the lock the replacement's foreign key takes anyway: it waits
-    on a deletion of the context, not on an edit of it. False when the
-    context is gone or soft-deleted by the time the lock is granted.
+    on a hard delete of the context, not on an edit of it, and a soft delete
+    is such an edit. False when the context is gone after that wait, or was
+    already soft-deleted when the statement started: ``deleted_at`` is read
+    as committed at statement start, so a soft delete still in flight is not
+    seen.
     """
     if key.bound_context_id is None:
         return True
