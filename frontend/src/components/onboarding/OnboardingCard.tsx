@@ -250,6 +250,18 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
     }
   };
 
+  // #3022: the workspace memory limit gets its own text (the remedies the
+  // server names), not the generic "couldn't save".
+  const memoryLimitMessage = (error: unknown): string | null => {
+    if (!(error instanceof ApiError) || error.gate?.state !== "quota" || error.gate.quotaType !== "memories") return null;
+    const { current, limit } = error.gate;
+    const base = current !== undefined && limit !== undefined ? t("errors.memoryLimit", { current, limit }) : t("errors.memoryLimitNoCounts");
+    const remedies = Array.isArray(error.details?.remedies) ? (error.details.remedies as unknown[]) : [];
+    if (remedies.includes("upgrade")) return `${base} ${t("errors.memoryLimitUpgrade")}`;
+    if (remedies.includes("admin")) return `${base} ${t("errors.memoryLimitAdmin")}`;
+    return base;
+  };
+
   const handleSaveMemory = async () => {
     if (!contextId || !currentWorkspaceId || writing.current) return;
     writing.current = true;
@@ -277,7 +289,7 @@ function PracticeCard({ scope, userId, replay, onClose, onCreated }: PracticeOpt
       } else {
         if (error instanceof ApiError && error.status >= 400 && error.status < 500) await advancePractice(scope, claimed, { step: "memory", contextId });
         else setStep("recovery");
-        setActionError(t("errors.saveFailed"));
+        setActionError(memoryLimitMessage(error) ?? t("errors.saveFailed"));
       }
     } finally {
       writing.current = false;

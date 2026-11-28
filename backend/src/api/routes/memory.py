@@ -44,12 +44,18 @@ from models.schemas import (
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import owned_by
+from services.memory_cap_refusal import is_memory_cap, memory_cap_fields, refusal_message
 from services.memory_listing import listing_scope
 from services.memory_service import MemoryService
 from services.never_delivered import never_delivered_predicates
 from services.permission_service import PermissionService, reachable_memory_filter
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
+from utils.exceptions import (
+    MemoryCloudException,
+    NotFoundException,
+    QuotaExceededError,
+    ValidationError,
+)
 from utils.logger import get_logger
 from utils.observed_at import observed_at_from_details
 from utils.query_log import query_log_fields
@@ -170,6 +176,19 @@ async def remember(
             key_workspace_id=user.get("api_key_workspace_id"),
             private_workspace_id=request.private_workspace_id,
         )
+    except QuotaExceededError as e:
+        if is_memory_cap(e):
+            # #3022: the total cap names the caller's never-delivered memories
+            # in the target context (``details.never_delivered_count``, with
+            # a sentence in the message when above 0). Read after the refused
+            # transaction is rolled back, so the workspace row lock is free.
+            db = memory_service.db
+            await db.rollback()
+            fields = await memory_cap_fields(db, e, user_id=user["user_id"])
+            e.details.update(fields)
+            e.message = refusal_message(e.message, fields.get("never_delivered_count"))
+            e.args = (e.message,)
+        raise
     except ValueError as e:
         # MemoryService raises ValueError as its "bad request" signal (e.g. an
         # invalid type="time" details.trigger). Map it to 422 rather than

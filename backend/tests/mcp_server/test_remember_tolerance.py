@@ -302,3 +302,17 @@ async def test_a_batch_item_reports_its_own_summary_cut(live):
     assert all(h["code"] != "summary_long" for h in first.get("lint", []))
     assert first["summary_original_length"] == len(long_item["summary"])
     assert "summary_truncated" not in second
+
+
+def test_the_size_refusal_through_the_dispatcher_mapper_is_payload_too_large():
+    """#3022: a size refusal that reaches ``describe_tool_exception`` (the
+    dispatcher, ``update_memory``) used to fail on the missing help entry."""
+    from mcp_server.tools._errors import describe_tool_exception
+
+    failure = describe_tool_exception(
+        "update_memory", ContentSizeExceededError(actual=1_000_001, limit=1_000_000)
+    )
+    payload = json.loads(failure.response()[0].text)
+    assert payload["error"] == "payload_too_large"
+    assert (payload["limit"], payload["actual"]) == (1_000_000, 1_000_001)
+    assert payload["help"] == PAYLOAD_HELP

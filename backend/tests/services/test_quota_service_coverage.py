@@ -267,6 +267,55 @@ class TestCheckMemoryQuota:
             await service.check_memory_quota(ws.id, raise_on_exceeded=True)
 
         assert "Memory quota exceeded" in str(exc.value)
+        # #3022: typed like the other caps.
+        details = exc.value.details
+        assert (details["gate"], details["quota_type"]) == ("quota", "memories")
+        assert (details["current"], details["limit"]) == (1, 1)
+        assert details["remedies"][0] == "cleanup"
+
+    async def test_a_replacement_at_the_limit_is_allowed(self, db_session, monkeypatch):
+        """#3022: the rows a write replaces are left out of the count, so an
+        external_id upsert at the limit is not refused."""
+        ws = await _make_workspace(db_session, "free")
+        user_id = f"member-{uuid4().hex[:8]}"
+        await _add_member(db_session, ws.id, user_id)
+        replaced = await _add_memory(db_session, user_id, ws.id)
+        await _add_memory(db_session, user_id, ws.id)
+
+        async def _limit_two(self, workspace_id):
+            return {"memory_limit": 2}
+
+        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit_two)
+
+        allowed = await QuotaService(db_session).check_memory_quota(
+            ws.id, raise_on_exceeded=True, replacing=[replaced.id]
+        )
+
+        assert allowed == (True, None)
+
+    async def test_only_live_rows_of_this_workspace_make_room(self, db_session, monkeypatch):
+        """A replaced row that is soft-deleted, in another workspace or unknown
+        is no room: the write counts as a creation and is refused at the limit."""
+        ws = await _make_workspace(db_session, "free")
+        other = await _make_workspace(db_session, "free")
+        user_id = f"member-{uuid4().hex[:8]}"
+        await _add_member(db_session, ws.id, user_id)
+        await _add_memory(db_session, user_id, ws.id)
+        await _add_memory(db_session, user_id, ws.id)
+        gone = await _add_memory(db_session, user_id, ws.id, deleted_at=utcnow())
+        elsewhere = await _add_memory(db_session, user_id, other.id)
+
+        async def _limit_two(self, workspace_id):
+            return {"memory_limit": 2}
+
+        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit_two)
+
+        can_create, error = await QuotaService(db_session).check_memory_quota(
+            ws.id, replacing=[gone.id, elsewhere.id, uuid4()]
+        )
+
+        assert can_create is False
+        assert error is not None and "Current: 2, Limit: 2" in error
 
     async def test_workspace_not_found_returns_false(self, db_session):
         """Missing workspace → (False, 'not found')."""

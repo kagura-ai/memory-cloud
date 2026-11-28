@@ -15,7 +15,10 @@
    stripped, judged by that memory's log alone and counting edits an earlier
    erasure already stripped (#2235).
 5. ``f03_2043_memory_versions`` round trip: existing rows read ``version = 1``;
-   the downgrade drops the table and the column.
+   the downgrade drops the table and the column. It rebuilds the schema
+   through the migrations, so it puts back the schema and the rows it found
+   (``_schema_restore``): the seed rows of the migrations would otherwise reach
+   every later file of the process.
 6. One clock (#2135): remember / update_memory / forget stamp the row and the
    event from the server clock, so a window over server-clock times finds the
    created events even with the database clock an hour ahead.
@@ -1115,6 +1118,7 @@ async def test_subject_memory_ids_by_raw_id_and_by_pseudonym_agree(
 
 
 def test_f03_round_trip_reads_existing_rows_at_version_one() -> None:
+    from tests.integration._schema_restore import restored_schema
     from tests.integration.test_alembic_migrations import (
         _downgrade_to,
         _reset_alembic_state,
@@ -1124,76 +1128,72 @@ def test_f03_round_trip_reads_existing_rows_at_version_one() -> None:
 
     f03, prior_head = "f03_2043_memory_versions", "f02_2103_chunks_enabled_at"
     user = f"f03-migration-{uuid.uuid4().hex[:8]}"
-    _reset_alembic_state()
     engine = _sync_engine()
+    # The round trip rebuilds the schema through the migrations, seed rows
+    # included; the later tests of this process get the one they had.
     try:
-        _upgrade_to(prior_head)
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO memories (id, user_id, workspace_id, summary, content, type, "
-                    "embedding_status, importance, confidence, scope, long_term, access_count, "
-                    "client, source, created_at) VALUES (gen_random_uuid(), :u, "
-                    "gen_random_uuid(), 'seed', 'body', 'note', 'success', 0.5, 1.0, 'working', "
-                    "false, 0, 'test', 'mcp_remember', now())"
-                ),
-                {"u": user},
-            )
-
-        _upgrade_to(f03)
-        with engine.begin() as conn:
-            version = conn.execute(
-                text("SELECT version FROM memories WHERE user_id = :u"), {"u": user}
-            ).scalar_one()
-            assert version == 1
-            memory_id = conn.execute(
-                text("SELECT id FROM memories WHERE user_id = :u"), {"u": user}
-            ).scalar_one()
-            conn.execute(
-                text(
-                    "INSERT INTO memory_revisions (memory_id, context_id, version, kind, "
-                    "writer, actor_user_id) VALUES (:m, gen_random_uuid(), 1, 'created', "
-                    "'api', :u)"
-                ),
-                {"m": memory_id, "u": user},
-            )
-            stored = conn.execute(
-                text(
-                    "SELECT prior::text, at IS NOT NULL FROM memory_revisions WHERE memory_id = :m"
-                ),
-                {"m": memory_id},
-            ).one()
-            assert tuple(stored) == ("{}", True)
-            with pytest.raises(Exception, match="valid_revision_kind"):
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            "INSERT INTO memory_revisions (memory_id, context_id, version, "
-                            "kind, writer, actor_user_id) VALUES (:m, gen_random_uuid(), 1, "
-                            "'edited', 'api', :u)"
-                        ),
-                        {"m": memory_id, "u": user},
-                    )
-
-        _downgrade_to(prior_head)
-        with engine.connect() as conn:
-            assert conn.execute(text("SELECT to_regclass('memory_revisions')")).scalar() is None
-            columns = conn.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'memories' AND column_name = 'version'"
+        with restored_schema(engine):
+            _reset_alembic_state()
+            _upgrade_to(prior_head)
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO memories (id, user_id, workspace_id, summary, content, type, "
+                        "embedding_status, importance, confidence, scope, long_term, access_count, "
+                        "client, source, created_at) VALUES (gen_random_uuid(), :u, "
+                        "gen_random_uuid(), 'seed', 'body', 'note', 'success', 0.5, 1.0, 'working', "
+                        "false, 0, 'test', 'mcp_remember', now())"
+                    ),
+                    {"u": user},
                 )
-            ).all()
-            assert columns == []
+
+            _upgrade_to(f03)
+            with engine.begin() as conn:
+                version = conn.execute(
+                    text("SELECT version FROM memories WHERE user_id = :u"), {"u": user}
+                ).scalar_one()
+                assert version == 1
+                memory_id = conn.execute(
+                    text("SELECT id FROM memories WHERE user_id = :u"), {"u": user}
+                ).scalar_one()
+                conn.execute(
+                    text(
+                        "INSERT INTO memory_revisions (memory_id, context_id, version, kind, "
+                        "writer, actor_user_id) VALUES (:m, gen_random_uuid(), 1, 'created', "
+                        "'api', :u)"
+                    ),
+                    {"m": memory_id, "u": user},
+                )
+                stored = conn.execute(
+                    text(
+                        "SELECT prior::text, at IS NOT NULL FROM memory_revisions WHERE memory_id = :m"
+                    ),
+                    {"m": memory_id},
+                ).one()
+                assert tuple(stored) == ("{}", True)
+                with pytest.raises(Exception, match="valid_revision_kind"):
+                    with conn.begin_nested():
+                        conn.execute(
+                            text(
+                                "INSERT INTO memory_revisions (memory_id, context_id, version, "
+                                "kind, writer, actor_user_id) VALUES (:m, gen_random_uuid(), 1, "
+                                "'edited', 'api', :u)"
+                            ),
+                            {"m": memory_id, "u": user},
+                        )
+
+            _downgrade_to(prior_head)
+            with engine.connect() as conn:
+                assert conn.execute(text("SELECT to_regclass('memory_revisions')")).scalar() is None
+                columns = conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'memories' AND column_name = 'version'"
+                    )
+                ).all()
+                assert columns == []
     finally:
-        try:
-            _upgrade_to("head")
-        finally:
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text("DELETE FROM memories WHERE user_id = :u"), {"u": user})
-            finally:
-                engine.dispose()
+        engine.dispose()
 
 
 # ---------------------------------------------------------------------------

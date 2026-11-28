@@ -630,6 +630,19 @@ def _neutral_headroom(payload: dict[str, Any]) -> bool:
     return changed
 
 
+def _neutral_memory_cap(payload: dict[str, Any]) -> bool:
+    """A total memory cap refusal's ``help`` in its tool-free wording (#3022)."""
+    from services.plan_headroom import memory_cap_neutral_help
+
+    if "help" not in payload:
+        return False
+    neutral = memory_cap_neutral_help(payload)
+    if neutral is None or neutral == payload["help"]:
+        return False
+    payload["help"] = neutral
+    return True
+
+
 def _error_content_class() -> type:
     from mcp_server.tools._helpers import ToolErrorContent
 
@@ -641,8 +654,9 @@ def scrub_google_reply(tool_name: str, result: list[TextContent]) -> list[TextCo
 
     Only the reply's own top-level ``help`` / ``hint`` / ``message`` /
     ``example`` fields, the server text of write replies (``lint``,
-    ``persistence``, ``plan_headroom``; a ``remember_batch`` item's ``lint``
-    and ``persistence``) and the static quick reference are touched; other
+    ``persistence``, ``plan_headroom``, a memory cap refusal's ``help``; a
+    ``remember_batch`` item's ``lint`` and ``persistence``) and the static
+    quick reference are touched; other
     nested values (memories, context notes, guardrail memories) pass through
     as they are. The reply keeps its class (``ToolErrorContent`` stays an
     error); a success reply never gets the failure fallback message.
@@ -666,6 +680,7 @@ def scrub_google_reply(tool_name: str, result: list[TextContent]) -> list[TextCo
     is_error = type(result) is not list
     changed = _scrub_write_blocks(payload, pattern)
     changed = _neutral_headroom(payload) or changed
+    changed = _neutral_memory_cap(payload) or changed
     if tool_name == "remember_batch" and isinstance(payload.get("results"), list):
         for item in payload["results"]:
             changed = _scrub_write_blocks(item, pattern) or changed
