@@ -157,6 +157,17 @@ key; never exported. The rows age out with the usage events
 (`MCP_PUBLIC_TELEMETRY_RETENTION_DAYS`); account erasure has nothing to remove
 from them, and on a workspace's hard delete they age out the same way.
 
+The per-day counts of public usage events (`public_mcp_usage_day_counts`,
+#3053) and the closed-day marks (`public_mcp_usage_closed_days`) are
+operational usage state as well: one row per endpoint, UTC day, workspace,
+tool, outcome, route (`mcp` or `rest`) and caller kind (`anonymous` or
+`bound_key`) with the number of calls, and one row per UTC day whose counts
+are complete. No person, content, document, API-key or visitor column and no
+foreign key; never exported. The 04:50 UTC usage purge deletes the counts and
+marks of the days past `MCP_PUBLIC_TELEMETRY_RETENTION_DAYS` with the events;
+account erasure has nothing to remove from them, and on a workspace's hard
+delete they age out the same way.
+
 Derived signal is *supposed* to act on every query — that is its value. The
 ban is on **bulk portability**, not on serving:
 
