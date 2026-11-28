@@ -1237,6 +1237,8 @@ class TestSupersedeApplyPhase3020:
         sleep_mode="full",
         outcome=None,
         raises=False,
+        consolidation=None,
+        judge_window=None,
     ):
         events: list[str] = []
         report = MagicMock()
@@ -1272,10 +1274,13 @@ class TestSupersedeApplyPhase3020:
 
                 async def execute(*args, n=name, **kwargs):
                     events.append(n)
+                    if n == "consolidation" and consolidation is not None:
+                        return consolidation
                     return PhaseResult(phase_name=n)
 
                 mock.return_value = MagicMock(pending_point_deletes=[], coverage_outcome=None)
                 mock.return_value.execute = execute
+            MockCP.return_value.coverage_outcome = judge_window
 
             apply = MagicMock(pending_point_deletes=[], coverage_outcome=outcome)
 
@@ -1383,3 +1388,70 @@ class TestSupersedeApplyPhase3020:
     async def test_switched_on_without_an_outcome_the_column_stays_null(self, mock_db):
         report, _, _, _ = await self._run(mock_db)
         assert report.coverage_state is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_already_graded_failed_skips_it_and_carries_its_entry(
+        self, mock_db, coverage_lookup
+    ):
+        """Every judge call of the run raised: the run grades ``failed``, which
+        ``rollback_sleep_run`` does not take, so no link is written under it."""
+        from datetime import timedelta
+
+        from services.sleep.coverage import (
+            SETTLED,
+            CoverageState,
+            JudgeCoverage,
+            LaneEntry,
+            parse_state,
+        )
+        from utils.datetime import utcnow
+
+        entry = LaneEntry(passes=4)
+        coverage_lookup.return_value = CoverageState(apply=entry)
+        row = (utcnow() - timedelta(days=2), uuid4())
+        failed = PhaseResult(phase_name="consolidation", llm_call_failures=3)
+        report, MockSA, events, results = await self._run(
+            mock_db,
+            consolidation=failed,
+            judge_window=JudgeCoverage(keys=[row], outcomes={row[1]: SETTLED}),
+        )
+
+        MockSA.assert_not_called()
+        assert "supersede_apply" not in events
+        skipped = next(r for r in results if r.phase_name == "supersede_apply")
+        assert (skipped.skipped, skipped.skip_reason) == (True, "run_failed")
+        assert skipped.details is None
+        # The judge's outcome wrote the state; the apply entry is carried.
+        assert parse_state(report.coverage_state).apply == entry
+
+    @pytest.mark.asyncio
+    async def test_a_degraded_run_still_runs_it(self, mock_db):
+        from services.sleep.reporter import LLMCallBreakdown
+
+        degraded = PhaseResult(
+            phase_name="consolidation",
+            llm_call_failures=1,
+            llm_breakdown=[LLMCallBreakdown(provider="p", model="m", calls=2)],
+        )
+        _, MockSA, events, _ = await self._run(mock_db, consolidation=degraded)
+        MockSA.assert_called_once()
+        assert events[-2:] == ["supersede_apply", "reindex"]
+
+
+class TestJudgeTotalFailure3020:
+    """#3020: the condition that grades a run ``failed``, shared by the report
+    and the orchestrator (which skips the supersede-apply phase under it)."""
+
+    @pytest.mark.parametrize(
+        ("failures", "calls", "expected"),
+        [(0, 0, False), (2, 0, True), (2, 1, False), (0, 3, False)],
+    )
+    def test_every_judge_call_raised(self, failures, calls, expected):
+        from services.sleep.reporter import LLMCallBreakdown, judge_total_failure
+
+        breakdown = [LLMCallBreakdown(provider="p", model="m", calls=calls)] if calls else []
+        results = [
+            PhaseResult(phase_name="dedup_merge", llm_call_failures=failures),
+            PhaseResult(phase_name="consolidation", llm_breakdown=breakdown),
+        ]
+        assert judge_total_failure(results) is expected

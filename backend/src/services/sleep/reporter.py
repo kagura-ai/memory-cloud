@@ -8,7 +8,7 @@ Issue #471: Per-(provider, model) cost-grade breakdown via the
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -140,6 +140,20 @@ def accumulate_llm_response(
         count_call=count_call,
     )
     return breakdown
+
+
+def judge_total_failure(phase_results: Iterable[PhaseResult]) -> bool:
+    """Judge calls were attempted in the run and every one of them raised (#1183).
+
+    The condition that grades a run ``failed`` (``complete_report``), which
+    ``rollback_sleep_run`` does not take. The tallies are run-wide. The
+    orchestrator reads it before the supersede-apply phase (#3020): that phase
+    makes no model call and runs last, so the grade is already decided.
+    """
+    results = list(phase_results)
+    failures = sum(r.llm_call_failures for r in results)
+    successes = sum(b.calls for r in results for b in r.llm_breakdown)
+    return failures > 0 and successes == 0
 
 
 def phase_outcome(
@@ -456,7 +470,6 @@ class SleepReporter:
         # 'degraded' here; per-phase counts stay visible in each phase blob's
         # details.llm_call_failures.
         judge_failures = sum(r.llm_call_failures for r in phase_results)
-        judge_successes = sum(b.calls for r in phase_results for b in r.llm_breakdown)
         # #1229: a phase that raised (success=False) must never hide behind
         # a green run — the dedup phase once died on its first merge with 0
         # judge failures and the run still graded 'completed', letting the
@@ -466,7 +479,7 @@ class SleepReporter:
         # #3036: a phase that succeeded with some failed items (the reindex's
         # memories) is 'degraded' too, its count in the message.
         partial_phases = [r for r in phase_results if r.success and r.operation_failures > 0]
-        if judge_failures > 0 and judge_successes == 0:
+        if judge_total_failure(phase_results):
             report.status = "failed"
             report.error_message = (
                 f"llm_judge_total_failure: {judge_failures} judge call(s) attempted, 0 succeeded"

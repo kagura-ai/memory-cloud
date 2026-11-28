@@ -57,8 +57,9 @@ from services.sleep.reporter import (
     SleepBudget,
     SleepBudgetPlan,
     SleepReporter,
+    judge_total_failure,
 )
-from services.sleep.supersede_apply import SupersedeApplyPhase
+from services.sleep.supersede_apply import SKIP_RUN_FAILED, SupersedeApplyPhase
 from services.workspace_slot_gate import slot_suspended
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -265,6 +266,18 @@ class SleepOrchestrator:
                             phase_name=phase_name,
                             skipped=True,
                             skip_reason=f"sleep_mode_{sleep_mode}",
+                        )
+                    )
+                    continue
+                if phase_name == "supersede_apply" and judge_total_failure(phase_results):
+                    # #3020: every judge call of the run raised, so the run
+                    # grades ``failed`` and ``rollback_sleep_run`` would not
+                    # take it: no link is written under such a report. The
+                    # phase runs last and makes no model call, so the grade is
+                    # already decided. Never constructed: its entry is carried.
+                    phase_results.append(
+                        PhaseResult(
+                            phase_name=phase_name, skipped=True, skip_reason=SKIP_RUN_FAILED
                         )
                     )
                     continue

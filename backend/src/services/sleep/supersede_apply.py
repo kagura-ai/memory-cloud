@@ -98,6 +98,9 @@ logger = get_logger(__name__)
 
 PHASE_NAME = "supersede_apply"
 ACTION_APPLY_SUPERSEDE = "apply_supersede"
+# The orchestrator's skip when the run already grades ``failed`` (every judge
+# call raised): ``rollback_sleep_run`` does not take such a run.
+SKIP_RUN_FAILED = "run_failed"
 
 # The key a rollback adds to the suggestion it restores (value: the rolled
 # back run's report id). The carrier read skips a suggestion carrying it, so a
