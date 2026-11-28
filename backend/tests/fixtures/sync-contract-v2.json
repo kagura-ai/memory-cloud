@@ -1,0 +1,17 @@
+{
+  "configuration": {
+    "protocol": "kmc.sync.v1",
+    "schema_version": 2,
+    "schema_hash": "8ddfbbbde388dd0ac44899e10be2a6c26d0a4521098a9bd59f74784a59bb3834",
+    "capabilities": ["identity.oidc.v1", "workspace.access.v1", "sync.installations.v1", "sync.credentials.v1", "sync.feeds.v1", "sync.managed.v1", "sync.activity.v1", "public.mcp.v1", "public.budget.v1", "public.domains.v1", "public.domains.observation.v1", "public.domains.operations.v1", "public.text.operations.v1", "public.usage.stats.v1", "sync.schema.v2"],
+    "human_scopes": ["openid", "workspaces:read", "integrations:manage", "sync.records:read"],
+    "service_scope": "resource.sync",
+    "assertion_audience": "issuer"
+  },
+  "records": {
+    "product": {"external_id": "sample-product", "fields": {"title": "Synthetic product", "url": "https://brand.example.test/products/sample", "price": "12.50", "currency": "JPY", "availability": "in_stock", "availability_note": "Ships in two days", "product_highlights": "Lightweight\nWater resistant", "product_types": "Shoes > Trail", "product_details": "Weight: 300 g", "color": "Blue", "size": "42", "material": "Mesh", "sale_price": "9.90", "sale_price_effective_date": "2026-12-01T00:00:00+09:00/2026-12-31T23:59:59+09:00", "attributes": "{\"fit\":[\"regular\"],\"pattern\":[\"solid\",\"striped\"]}"}},
+    "faq": {"external_id": "sample-faq", "fields": {"question": "Is this synthetic?", "answer": "Yes. This fixture contains no customer data.", "url": "https://brand.example.test/faq"}},
+    "page": {"external_id": "sample-page", "fields": {"title": "About the synthetic brand", "url": "https://brand.example.test/about", "heading": "History", "body": "This fixture contains no customer data.\nIt has two lines."}},
+    "review": {"external_id": "sample-review", "fields": {"title": "Comfortable", "body": "A synthetic review.", "rating": "4", "rating_min": "1", "rating_max": "5", "reviewed_at": "2026-11-28T09:00:00Z", "product_name": "Synthetic product", "product_url": "https://brand.example.test/products/sample", "verified_purchase": "true", "incentivized": "false"}}
+  }
+}

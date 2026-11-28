@@ -348,6 +348,7 @@ SLOT_SERVICE_GATED: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("GET", f"{_WS_SYNC}/records"): "services.sync_feed_human:project_records",
     ("GET", f"{_WS_SYNC}/runs/{{run_id}}/diff"): "services.sync_feed_human:human_diff",
     ("POST", f"{_WS_SYNC}/runs/{{run_id}}/approvals"): "services.sync_feed_human:approve_diff",
+    ("POST", f"{_WS_SYNC}/schema/upgrade"): "services.sync_schema_upgrade:upgrade_schema",
 }
 _MCP_TRANSPORT = "mcp_server.tools:_execute_tool_call"
 

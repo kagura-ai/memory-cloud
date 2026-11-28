@@ -12877,6 +12877,30 @@
         ],
         "type": "object"
       },
+      "SchemaUpgradeResult": {
+        "properties": {
+          "changed": {
+            "type": "boolean"
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "schema_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "changed",
+          "generation",
+          "schema_hash",
+          "schema_version"
+        ],
+        "type": "object"
+      },
       "SearchObservation": {
         "properties": {
           "reason": {},
@@ -14174,7 +14198,7 @@
             "type": "string"
           },
           "schema_version": {
-            "maximum": 1.0,
+            "maximum": 2.0,
             "minimum": 1.0,
             "type": "integer"
           },
@@ -45112,6 +45136,168 @@
                 "schema": {
                   "additionalProperties": true,
                   "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncControlError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OIDCIdentity": []
+          }
+        ],
+        "tags": [
+          "workspace-sync"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/schema/upgrade": {
+      "post": {
+        "operationId": "upgrade_sync_schema_api_v1_workspaces__workspace_id__sync_installations__installation_id__schema_upgrade_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "expected": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "generation": {
+                        "maximum": 2147483647,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "schema_hash": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "generation",
+                      "schema_hash",
+                      "schema_version"
+                    ],
+                    "type": "object"
+                  },
+                  "target_schema_version": {
+                    "maximum": 2,
+                    "minimum": 2,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "expected",
+                  "target_schema_version"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SchemaUpgradeResult"
                 }
               }
             }

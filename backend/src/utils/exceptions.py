@@ -5,8 +5,8 @@ Exception hierarchy with error codes and HTTP status codes for API responses.
 Based on: kagura-ai/src/kagura/exceptions.py
 """
 
-from datetime import datetime
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, ClassVar, Literal
 
 from config.constants import (
@@ -2210,6 +2210,22 @@ class SyncProtocolError(MemoryCloudException):
         # Keys the worker route adds after ``error`` (#3055: a refused chunk's
         # record, field and reason). Never a value from the request.
         self.wire_detail: dict[str, int | str] = dict(detail or {})
+
+
+class SyncSchemaUpgradeRunsActive(MemoryCloudException):
+    """An installation with an active run keeps its record schema (409, #3055).
+
+    The sender aborts its open runs (or lets them end) and asks again.
+    """
+
+    log_level: ClassVar[Literal["error", "warning"]] = "warning"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Synchronization runs are active",
+            status_code=409,
+            error_code="sync_schema_upgrade_runs_active",
+        )
 
 
 class TemporarilyUnavailableError(MemoryCloudException):

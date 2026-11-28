@@ -219,6 +219,30 @@ class FeedConfig(StrictBody):
         return value
 
 
+class SchemaUpgradeExpected(StrictBody):
+    """The stored schema pair and installation generation the caller last read."""
+
+    schema_version: Annotated[StrictInt, Field(ge=1)]
+    schema_hash: Hash
+    generation: Annotated[StrictInt, Field(ge=1, le=MAX_INT32)]
+
+
+class SchemaUpgrade(StrictBody):
+    """Upgrade one installation's record schema (#3055); only version 2 is a target."""
+
+    target_schema_version: Annotated[StrictInt, Field(ge=2, le=2)]
+    expected: SchemaUpgradeExpected
+
+
+class SchemaUpgradeResult(BaseModel):
+    """The installation's stored schema after the call; ``changed`` is false on a repeat."""
+
+    schema_hash: Hash
+    schema_version: int
+    generation: int
+    changed: bool
+
+
 class RunManifest(StrictBody):
     """The operation identity binds every declared source and snapshot property."""
 

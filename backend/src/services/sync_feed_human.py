@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.sync_identity import SyncPrincipal
+from config.settings import get_settings
 from models.management_schemas import digest
 from models.resource import ResourceSchema
 from models.sync_credential import SyncCredentialClient
@@ -21,6 +22,7 @@ from models.sync_feed_schemas import (
     stored_schema,
 )
 from models.sync_installation import SyncInstallation, SyncService
+from services.sync_contract import new_installation_schema
 from services.sync_feed_authority import current_schema, human_feed_boundary, locked
 from services.sync_feed_runs import run_view
 from utils.datetime import to_utc_iso, utcnow
@@ -51,8 +53,8 @@ async def configure_feed(
     ):
         schema = await current_schema(db, installation)
         entry = stored_schema(schema)
-        # The schema a first configuration stores.
-        target = SCHEMA_V1
+        # The schema a first configuration stores: the advertised pair (#3055).
+        target = new_installation_schema(get_settings())
         # A kind outside the installation's schema version gets the answer of an
         # unknown kind, before any comparison or write (#3055). An unregistered
         # stored schema keeps version 1's kinds; its answer is the 409 below.

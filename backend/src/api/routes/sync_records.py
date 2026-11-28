@@ -8,9 +8,19 @@ from fastapi import APIRouter, Depends, Query, Request
 from api.routes.sync_feeds import Database, bounded_body, exact_query, json_body
 from api.routes.sync_installations import SYNC_RESPONSES, Manager, SyncControlRoute
 from auth.sync_identity import SyncPrincipal, sync_records_reader
-from models.sync_feed_schemas import MAX_RECORDS, ConfirmDiff, FeedConfig
+from config.settings import get_settings
+from models.sync_feed_schemas import (
+    MAX_RECORDS,
+    ConfirmDiff,
+    FeedConfig,
+    SchemaUpgrade,
+    SchemaUpgradeResult,
+)
+from services.sync_contract import SCHEMA_V2_CAPABILITY, sync_configuration
 from services.sync_feed_authority import runs_enabled
 from services.sync_feed_human import approve_diff, configure_feed, human_diff, project_records
+from services.sync_schema_upgrade import upgrade_schema
+from utils.exceptions import NotFoundException
 
 router = APIRouter(
     prefix="/workspaces/{workspace_id}/sync-installations/{installation_id}",
@@ -35,6 +45,40 @@ async def configure_sync_feed(
     exact_query(request)
     body, _size = await bounded_body(request, FeedConfig)
     return await configure_feed(db, workspace_id, installation_id, feed_id, principal, body)
+
+
+async def schema_upgrade_enabled() -> None:
+    """#3055: the upgrade answers 404 before authentication while version 2 is not advertised."""
+    if SCHEMA_V2_CAPABILITY not in sync_configuration(get_settings()).capabilities:
+        raise NotFoundException("Synchronization schema upgrade")
+
+
+@router.post(
+    "/schema/upgrade",
+    response_model=SchemaUpgradeResult,
+    dependencies=[Depends(schema_upgrade_enabled)],
+    openapi_extra=json_body(SchemaUpgrade),
+)
+async def upgrade_sync_schema(
+    workspace_id: UUID,
+    installation_id: UUID,
+    request: Request,
+    principal: Manager,
+    db: Database,
+) -> dict:
+    """Upgrade the installation's record schema to version 2 (one-way).
+
+    A current Context Editor with ``integrations:manage``. The body names the
+    target version (2) and the stored pair and generation last read. Already
+    on version 2: ``changed`` is false. An active run of the installation is
+    ``409 sync_schema_upgrade_runs_active``; a changed snapshot, no stored
+    schema or an unregistered one is ``409 RES-002``. The installation's resume
+    candidates and preview are cleared; the generation, feeds and records are
+    not changed.
+    """
+    exact_query(request)
+    body, _size = await bounded_body(request, SchemaUpgrade)
+    return await upgrade_schema(db, workspace_id, installation_id, principal, body)
 
 
 @router.get("/records")

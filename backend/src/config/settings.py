@@ -198,6 +198,11 @@ class Settings(BaseSettings):
     # #3035: the canonical owner reads the public usage statistics of the
     # installation's endpoint through its browser client (experimental).
     sync_publication_usage_stats_enabled: bool = False
+    # #3055: record schema version 2 (page and review kinds, more product
+    # fields). On: new installations store version 2, discovery advertises it
+    # (``sync.schema.v2``) and the upgrade operation is served. Off: none of
+    # that; installations already on version 2 keep working.
+    sync_schema_v2_enabled: bool = False
     sync_authorization_ttl_seconds: int = Field(default=604800, ge=60, le=2592000)
     oidc_issuer: str = ""
     oidc_signing_keys_file: str = ""

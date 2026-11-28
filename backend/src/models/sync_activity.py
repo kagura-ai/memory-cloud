@@ -99,5 +99,6 @@ SyncActivityAction = Literal[
     "sync.run.accepted",
     "sync.run.committed",
     "sync.run.prepared",
+    "sync.schema.upgraded",
     "sync.token.issued",
 ]

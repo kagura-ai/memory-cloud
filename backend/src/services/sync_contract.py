@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from config.settings import Settings
 from models.sync_contract import SyncConfigurationV1
-from models.sync_feed_schemas import SCHEMA_V1
+from models.sync_feed_schemas import SCHEMA_V1, SCHEMA_V2, SyncSchema
 
 HUMAN_SCOPES = ("openid", "workspaces:read", "integrations:manage", "sync.records:read")
 # #2921: the owner's claim, verify and remove for an installation (experimental, optional).
@@ -13,6 +13,9 @@ DOMAIN_OPERATIONS_CAPABILITY = "public.domains.operations.v1"
 TEXT_OPERATIONS_CAPABILITY = "public.text.operations.v1"
 # #3035: the usage statistics of an installation's endpoint (experimental, optional).
 USAGE_STATS_CAPABILITY = "public.usage.stats.v1"
+# #3055: this deployment stores record schema version 2, gives it to new
+# installations and serves the upgrade operation. Advertised last.
+SCHEMA_V2_CAPABILITY = "sync.schema.v2"
 REQUIRED_SYNC_CAPABILITIES = frozenset(
     {
         "identity.oidc.v1",
@@ -62,11 +65,14 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
         and settings.sync_publication_domain_operations_enabled,
         TEXT_OPERATIONS_CAPABILITY: controls and settings.sync_publication_text_operations_enabled,
         USAGE_STATS_CAPABILITY: controls and settings.sync_publication_usage_stats_enabled,
+        SCHEMA_V2_CAPABILITY: feeds and settings.sync_schema_v2_enabled,
     }
+    # The pair a new installation gets: version 2's exactly while it is advertised.
+    schema = SCHEMA_V2 if enabled[SCHEMA_V2_CAPABILITY] else SCHEMA_V1
     return SyncConfigurationV1(
         protocol="kmc.sync.v1",
-        schema_version=1,
-        schema_hash=SCHEMA_V1.schema_hash,
+        schema_version=schema.version,
+        schema_hash=schema.schema_hash,
         capabilities=[name for name, active in enabled.items() if active],
         human_scopes=list(HUMAN_SCOPES),
         service_scope="resource.sync",
@@ -74,8 +80,26 @@ def sync_configuration(settings: Settings) -> SyncConfigurationV1:
     )
 
 
-def require_sync_contract(payload: object, *, custom_domain: bool = False) -> SyncConfigurationV1:
+def new_installation_schema(settings: Settings) -> SyncSchema:
+    """The record schema a first feed configuration stores (the advertised pair)."""
+    return (
+        SCHEMA_V2
+        if SCHEMA_V2_CAPABILITY in sync_configuration(settings).capabilities
+        else SCHEMA_V1
+    )
+
+
+def require_sync_contract(
+    payload: object,
+    *,
+    custom_domain: bool = False,
+    accepted: tuple[SyncSchema, ...] = (SCHEMA_V1,),
+) -> SyncConfigurationV1:
     """Reject unsupported/disabled targets before a consumer queues new work.
+
+    ``accepted`` names the record schema versions the consumer handles; the
+    advertised pair must be one of them, and ``sync.schema.v2`` is advertised
+    exactly with version 2's pair.
 
     The caller fetches fresh metadata from its explicitly trusted HTTPS KMC
     origin, with bounded size/time, no redirects or stale-cache fallback. This
@@ -87,8 +111,11 @@ def require_sync_contract(payload: object, *, custom_domain: bool = False) -> Sy
     except ValidationError:
         raise SyncContractUnsupported("unsupported_sync_contract") from None
     required = REQUIRED_SYNC_CAPABILITIES | ({"public.domains.v1"} if custom_domain else set())
+    pair = (contract.schema_version, contract.schema_hash)
     if (
-        contract.schema_hash != SCHEMA_V1.schema_hash
+        pair not in {(schema.version, schema.schema_hash) for schema in accepted}
+        or (pair == (SCHEMA_V2.version, SCHEMA_V2.schema_hash))
+        != (SCHEMA_V2_CAPABILITY in contract.capabilities)
         or not required.issubset(contract.capabilities)
         or not set(HUMAN_SCOPES).issubset(contract.human_scopes)
     ):

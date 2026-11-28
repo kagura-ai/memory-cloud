@@ -195,6 +195,11 @@ ROUTES: dict[tuple[str, str], str] = {
         "POST",
         "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/runs/{run_id}/approvals",
     ): BLOCKED,
+    # #3055: the record schema upgrade, under the same human feed boundary.
+    (
+        "POST",
+        "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/schema/upgrade",
+    ): BLOCKED,
     ("GET", "/api/v1/me/workspaces"): ALLOWED,
     ("GET", "/api/v1/me/workspaces/{workspace_id}/access"): ALLOWED,
     # Authorized mutation metadata remains available while capacity is locked.
@@ -449,6 +454,10 @@ SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         (
             "POST",
             "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/runs/{run_id}/approvals",
+        ),
+        (
+            "POST",
+            "/api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/schema/upgrade",
         ),
         ("POST", "/api/v1/memory/recall"),
         ("POST", "/api/v1/memory/reference"),

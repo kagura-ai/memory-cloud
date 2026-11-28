@@ -12,9 +12,16 @@ trusted HTTPS KMC origin. The public response is `Cache-Control: no-store` and
 origin, target URL, database state or grant. Do not derive its origin from an
 untrusted feed, Host header, redirect or metadata document.
 
-`protocol=kmc.sync.v1`, `schema_version=1`, the approved `schema_hash`,
-`human_scopes`, `service_scope=resource.sync` and `assertion_audience=issuer`
-identify the supported wire profile. `capabilities` lists dependency-aware
+`protocol=kmc.sync.v1`, the advertised record schema pair (`schema_version`,
+`schema_hash`), `human_scopes`, `service_scope=resource.sync` and
+`assertion_audience=issuer` identify the supported wire profile. The advertised
+pair is one of the published pairs: version 1
+(`bdb55d3bdbbbb72a92a33fb96e6a2dc60ccbaf5b09638dcc1f1619d016dfec0d`) or, while
+`sync.schema.v2` is advertised, version 2
+(`8ddfbbbde388dd0ac44899e10be2a6c26d0a4521098a9bd59f74784a59bb3834`). It is the
+version a **new** installation gets; a consumer names the pairs it accepts and
+compares `capabilities` as a set. What one installation holds is read from its
+own `/schema` and `/activity/feeds`. `capabilities` lists dependency-aware
 enabled profiles. It is not a health/readiness certificate: migrations, signing
 configuration, browser/service registration and current authorization are
 separate checks. Disabled deployments still describe the compiled profile but
@@ -35,6 +42,7 @@ advertise no enabled capabilities. A release version is never evidence of suppor
 | `public.domains.operations.v1` (experimental) | Domain observation, `SYNC_PUBLICATION_DOMAIN_OPERATIONS_ENABLED` |
 | `public.text.operations.v1` (experimental) | Installations, `SYNC_PUBLICATION_TEXT_OPERATIONS_ENABLED` |
 | `public.usage.stats.v1` (experimental) | Installations, `SYNC_PUBLICATION_USAGE_STATS_ENABLED` |
+| `sync.schema.v2` | Feeds, `SYNC_SCHEMA_V2_ENABLED` |
 
 These profiles conservatively describe support for complete consumer workflows;
 they do not remove diagnostic reads which intentionally survive worker shutdown.
@@ -51,12 +59,18 @@ through the installation's browser client needs `public.text.operations.v1`
 of the installation's endpoint through the installation's browser client needs
 `public.usage.stats.v1` (experimental, optional for a consumer, #3035). A
 client that does not see a capability keeps to the paths it already supports.
+`sync.schema.v2` (#3055) means this deployment stores record schema version 2,
+gives it to new installations and serves the schema upgrade; it is always the
+last element of `capabilities`, and the advertised pair is version 2's exactly
+while it is present.
 
 The producer model is `models.sync_contract.SyncConfigurationV1`. The pure
 `services.sync_contract.require_sync_contract` helper is an executable consumer
 reference; it performs no network I/O and grants no authority. It rejects a
-missing/malformed document, changed protocol/schema/hash/auth profile, missing
-human scopes or required capabilities with fixed `unsupported_sync_contract`.
+missing/malformed document, a changed protocol or auth profile, a schema pair
+the consumer did not name (`accepted`, version 1 only by default) or one that
+disagrees with `sync.schema.v2`, missing human scopes or required capabilities
+with fixed `unsupported_sync_contract`.
 Unknown capability names do not satisfy a required name. Version1 document
 fields are fixed; new fields or incompatible semantics require an explicitly
 negotiated contract version. No validation error should be shown with the raw
@@ -87,6 +101,7 @@ operate feeds; only the current brand owner controls consent/contracts.
 | `POST /workspaces/{wid}/sync-installations/{iid}/publication-domains/claim`, `/verify`, `/remove` (experimental) | `integrations:manage`, current canonical owner, the confirmed binding | [Domains](../public-mcp-domains.md) |
 | `POST /workspaces/{wid}/sync-installations/{iid}/publication-text` (experimental) | `integrations:manage`, current canonical owner, the confirmed binding, installation not unlinked | [Installations](workspace-sync-installations.md) |
 | `/sync/installations/{iid}`, `/schema`, `/runs/*` | Installation-bound worker token; `schema:read`, `records:write`, `results:read` | [Credentials](sync-service-credentials.md), [feed protocol](staged-feed-sync.md) |
+| `POST /workspaces/{wid}/sync-installations/{iid}/schema/upgrade` | `integrations:manage`, current Context Editor; served while `sync.schema.v2` is advertised | [Feed protocol](staged-feed-sync.md#record-schema-versions) |
 | Human `/workspaces/{wid}/sync-installations/{iid}/records` and diff | `sync.records:read`, current Context read rights | [Feed protocol](staged-feed-sync.md) |
 | Human feed config/approval and `/management/*` | `integrations:manage`, current Editor; ownership where required | [Managed data](feed-managed-sync.md) |
 | Human `/activity`, `/activity/feeds`, `/activity/runs`, `/activity/events` | `workspaces:read`; manual requests additionally `integrations:manage` and current Editor | [Activity and audit](sync-activity.md) |
@@ -97,9 +112,13 @@ configured **issuer** as `aud`, and five-minute installation-bound tokens. It
 does not turn OIDC human credentials into memory REST/MCP credentials.
 
 `backend/tests/fixtures/sync-contract-v1.json` is synthetic consumer material:
-the full enabled document plus strict product and FAQ uploads. The schema hash
-is frozen against `models.sync_feed_schemas.SCHEMA_HASH`; changes to the public
-field contract require an intentional consumer compatibility update. This
+the full enabled document plus strict product and FAQ uploads.
+`sync-contract-v2.json` is the same with `SYNC_SCHEMA_V2_ENABLED` on, plus
+version-2 product, page and review records. `sync-schema-v1.json` and
+`sync-schema-v2.json` hold the exact bytes of the worker `/schema` answer of an
+installation on each version; tests compare the answers byte for byte. Each
+schema hash is frozen in `models.sync_feed_schemas` (the registry); changes to
+the public field contract require an intentional consumer compatibility update. This
 document's schema version identifies the wire profile; each run still uses
 the current installation schema/configuration revisions returned by its own
 schema and feed endpoints. Metadata never overrides those live revisions. Existing
@@ -107,7 +126,8 @@ full-snapshot, exact diff/approval, bounded body, idempotency and asynchronous
 indexing contracts are unchanged. A successful canonical commit does not mean
 search reflection has completed; poll the documented state rather than replaying.
 
-Sync HTTP failures are fixed `{"error":"..."}` envelopes with no-store:
+Sync HTTP failures are fixed `{"error":"..."}` envelopes with no-store (a
+refused chunk also names `record`, `field` and `reason`; see the feed protocol):
 400 for invalid requests/manifests/records/cursors, 413 for body/run bounds,
 401 for invalid credentials, 403 for forbidden authority, 404 for foreign/hidden
 targets or a disabled surface, 409 for changing authority/baselines/approval or
@@ -120,7 +140,9 @@ route, `sync-authorizations` included, counts in one `sync-human` bucket, except
 installation-bound domain operations also answer 429 `RATE-001` with
 `Retry-After` for the workspace's domain verification limits, and 409
 `public_mcp_domain_command_stale` when the binding or the named domain is no
-longer as the command sent it (read the observation again). See the
+longer as the command sent it (read the observation again). The schema upgrade
+answers 409 `sync_schema_upgrade_runs_active` while the installation has an
+active run. See the
 linked contracts/OpenAPI for each route's exact code (including established
 KMC error codes). Public MCP budget refusals are MCP protocol results, not this
 control envelope. Do not retry semantic refusals blindly, reflect internal
@@ -151,6 +173,37 @@ exceptions, or use another credential namespace to bypass a refusal.
    allowing new consumers. Custom domains have their own later DNS/TLS/license
    gate. Check issuer/configuration on each instance and monitor actual refusals,
    lag, audit and budget—not just the release string.
+
+### Record schema version 2 (`SYNC_SCHEMA_V2_ENABLED`, #3055)
+
+Shipped off. With it off, discovery, every version-1 `/schema` answer and
+every version-1 decision are byte-for-byte the previous release's; what a
+client can see change is the optional `record` / `field` / `reason` keys of a
+refused chunk and the OpenAPI document. No installation can reach version 2
+and no `sync.schema.upgraded` event can appear.
+
+Turn it on only when all of these hold:
+
+1. every sync consumer of the deployment accepts both pairs and both `/schema`
+   answers, and that consumer release can no longer be rolled back;
+2. every API, maintenance, indexer and worker instance runs this release and
+   has been restarted with the switch on (settings are read per process; during
+   a rolling restart discovery alternates between the pairs and the upgrade
+   route between 404 and its answer);
+3. migration `f68_3055_sync_schema_v2` is applied.
+
+Switch-on is one-way in practice: once an installation holds version 2, a
+version-1-only consumer of it cannot sync again, and there is no downgrade
+operation. Turning the switch off later is supported: installations already
+on version 2 keep working in full, new installations get version 1 again and
+the upgrade route answers 404. A code rollback to a release without version 2
+is supported only while no installation has ever held version 2; after that,
+forward fix only (an older binary answers 409 for an upgraded installation and
+the f68 downgrade stops while a page or review feed exists). Version 1 has no
+end date; an end would be announced at least one release ahead.
+
+Each installation is upgraded once, by a human with `integrations:manage`,
+after its sender has stopped scheduling and aborted or finished its open runs.
 
 ## Stop and rollback
 
