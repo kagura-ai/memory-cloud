@@ -122,6 +122,8 @@ A page envelope: `{schema_version, deployment_id, as_of, events, next_cursor, ha
 
 Statistics exist for the live endpoint only: publishing again creates a new endpoint that starts at zero.
 
+The canonical owner can read the same body for a synchronization installation's endpoint through the installation's registered browser client (`GET /api/v1/workspaces/{workspace_id}/sync-installations/{installation_id}/publication-usage-stats`, experimental, `public.usage.stats.v1`; [Workspace sync installations](ops/workspace-sync-installations.md)). Its reads count in the same 30 reads per minute of the workspace.
+
 ## Daily visitors
 
 A server that calls the REST public search with a key bound to the context may send `Kagura-Visitor: <value>` with each search ([#3035](https://github.com/kagura-ai/memory-cloud/issues/3035); format and examples in [API Reference › Public Read API](api-reference.md#visitors-kagura-visitor)). The owner's statistics then count distinct visitors per UTC day.

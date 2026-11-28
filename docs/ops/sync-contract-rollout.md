@@ -47,8 +47,10 @@ verifying and removing it through the installation's browser client needs
 `public.domains.operations.v1` (experimental, optional for a consumer).
 Setting the public description and usage guide of the installation's endpoint
 through the installation's browser client needs `public.text.operations.v1`
-(experimental, optional for a consumer, #2995). A client that does not see a
-capability keeps to the paths it already supports.
+(experimental, optional for a consumer, #2995). Reading the usage statistics
+of the installation's endpoint through the installation's browser client needs
+`public.usage.stats.v1` (experimental, optional for a consumer, #3035). A
+client that does not see a capability keeps to the paths it already supports.
 
 The producer model is `models.sync_contract.SyncConfigurationV1`. The pure
 `services.sync_contract.require_sync_contract` helper is an executable consumer
