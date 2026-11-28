@@ -14,7 +14,9 @@ session that records the order of its calls:
   cut to ``limit``; when that read fails the de-duplicated results are
   served unfiltered;
 - the four rate-limit refusals say which limit refused (K9b), and a search
-  the workspace cannot run for now answers 503 without a reason (K10a).
+  the workspace cannot run for now answers 503 without a reason (K10a);
+- the completed and failed lines carry the stage timings, the embedding
+  cache hit and the fusion (K8).
 """
 
 from __future__ import annotations
@@ -579,3 +581,96 @@ async def test_other_failures_keep_the_500(error: str) -> None:
     assert exc.value.__cause__ is raised
     assert rig.log_usage.await_args.kwargs["status_code"] == 500
     assert "reason" not in _event(logs, "public_search_failed")
+
+
+# ---------------------------------------------------------------------------
+# K8: stage timings and the embedding-cache hit on both lines
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _timed_search(clock: _Clock, seen: list[Any], *, fail: Exception | None = None):
+    async def _search(**kwargs: Any) -> list[dict[str, Any]]:
+        timings = kwargs["timings"]
+        seen.append(timings)
+        timings.fusion = "rrf"
+        with timings.stage("embed"):
+            clock.now += 0.012
+        timings.embed_cache_hit = True
+        with timings.stage("qdrant"):
+            clock.now += 0.030
+        clock.now += 0.005
+        if fail is not None:
+            raise fail
+        return []
+
+    return _search
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+async def test_the_completed_line_carries_the_stage_timings(bound: bool) -> None:
+    from services.recall_timings import RecallTimings
+
+    rig = _Rig()
+    _caller(rig, bound)
+    clock, seen = _Clock(), []
+    rig.search.return_value.hybrid_search = AsyncMock(side_effect=_timed_search(clock, seen))
+    with (
+        patch.object(route, "RecallTimings", lambda: RecallTimings(clock=clock)),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await rig.run()
+    assert len(seen) == 1 and rig.search_kwargs["timings"] is seen[0]
+    line = _event(logs, "public_search_completed")
+    assert line["duration_ms"] == 47
+    assert line["embed_ms"] == 12
+    assert line["qdrant_ms"] == 30
+    assert line["other_ms"] == 5
+    assert "rerank_ms" not in line
+    assert line["embed_cache_hit"] is True
+    assert line["fusion"] == "rrf"
+    assert "query" not in line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cannot_run", [False, True])
+async def test_the_failed_line_carries_the_stage_timings(cannot_run: bool) -> None:
+    from services.recall_timings import RecallTimings
+
+    rig = _Rig()
+    clock, seen = _Clock(), []
+    failure = _spend_cap() if cannot_run else RuntimeError("boom")
+    rig.search.return_value.hybrid_search = AsyncMock(
+        side_effect=_timed_search(clock, seen, fail=failure)
+    )
+    with (
+        patch.object(route, "RecallTimings", lambda: RecallTimings(clock=clock)),
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(Exception),  # noqa: B017 - the 500 or the 503, both pinned above
+    ):
+        await rig.run()
+    line = _event(logs, "public_search_failed")
+    assert line["duration_ms"] == 47
+    assert line["embed_ms"] == 12
+    assert line["qdrant_ms"] == 30
+    assert line["embed_cache_hit"] is True
+    assert line["fusion"] == "rrf"
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_never_ran_logs_no_fusion() -> None:
+    rig = _Rig()
+    with structlog.testing.capture_logs() as logs:
+        await rig.run()
+    line = _event(logs, "public_search_completed")
+    assert line["fusion"] is None
+    assert "duration_ms" in line and "other_ms" in line
+    assert "embed_cache_hit" not in line

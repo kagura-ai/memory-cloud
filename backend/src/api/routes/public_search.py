@@ -34,6 +34,7 @@ from services.public_usage_budget import (
     charge_public_usage,
     public_usage_budget_limit,
 )
+from services.recall_timings import RecallTimings
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
 from services.workspace_slot_gate import ensure_slot_active
@@ -584,6 +585,8 @@ async def public_search(
                given)
     """
     start_time = utcnow()
+    # #3035 (K8): the stage clock behind both result lines (no query text).
+    timings = RecallTimings()
 
     # 1a. Pre-auth rate limit when an Authorization header is supplied.
     # Without this, an attacker could bypass the anonymous 50/min bucket
@@ -727,6 +730,7 @@ async def public_search(
             use_rerank=False,
             search_mode=request.search_mode,
             degradation=degradation,
+            timings=timings,
         )
 
         schema = (
@@ -773,6 +777,8 @@ async def public_search(
             results_dropped=results_dropped,
             has_schema=schema is not None,
             response_time_ms=response_time_ms,
+            fusion=timings.fusion,
+            **timings.log_fields(),
         )
 
         # Extract values for type safety (SQLAlchemy Column types need explicit handling)
@@ -814,12 +820,16 @@ async def public_search(
                 context_id=context_id,
                 error_type=type(e).__name__,
                 reason="embedding_spend_cap",
+                fusion=timings.fusion,
+                **timings.log_fields(),
             )
             raise TemporarilyUnavailableError() from None
         logger.error(
             "public_search_failed",
             context_id=context_id,
             error=str(e),
+            fusion=timings.fusion,
+            **timings.log_fields(),
         )
         # Do not leak the raw exception message to the (potentially
         # anonymous) client — DB / provider / library errors can carry
