@@ -3,7 +3,9 @@
 A feed (``models.sync_feed_schemas``) is indexed as one row per record whose
 ``content`` is the record's JSON and whose ``summary`` is a mechanical label.
 For such a row the public projection shows the record's label (``_LABELS``:
-the title of a product, the question of an FAQ), its URL and its kind instead.
+the title of a product, the question of an FAQ, the title and heading of a
+page section, the title or product name of a review), its URL and its kind
+instead.
 
 One definition, used by every public surface that shows a row: the row is the
 indexer's (``source``), never edited (``version == 1``; the indexer writes a
@@ -44,10 +46,29 @@ _URL_MAX_CHARS = 2_048
 # Keys every record carries besides its kind's fields.
 _RECORD_KEYS = frozenset({"record_type", "external_id"})
 
+
+def _page_label(data: dict[str, str]) -> str | None:
+    """A page section: ``title \u2014 heading``, or the title alone."""
+    title = flatten_summary(data["title"])
+    heading = flatten_summary(data.get("heading", ""))
+    return f"{title} \u2014 {heading}" if title and heading else title
+
+
+def _review_label(data: dict[str, str]) -> str | None:
+    """A review: its title, else ``Review of <product name>``, else none (never its body)."""
+    title = flatten_summary(data.get("title", ""))
+    if title:
+        return title
+    product = flatten_summary(data.get("product_name", ""))
+    return f"Review of {product}" if product else None
+
+
 # kind -> the label of a record of that kind (its fields are strings), or None.
 _LABELS: dict[str, Callable[[dict[str, str]], str | None]] = {
     "product": lambda data: data["title"],
     "faq": lambda data: data["question"],
+    "page": _page_label,
+    "review": _review_label,
 }
 # kind -> (allowed fields, required fields, label). A registered kind without a
 # label function fails at import.

@@ -5324,7 +5324,9 @@
           "kind": {
             "enum": [
               "product",
-              "faq"
+              "faq",
+              "page",
+              "review"
             ],
             "type": "string"
           },
@@ -5455,7 +5457,9 @@
           "kind": {
             "enum": [
               "product",
-              "faq"
+              "faq",
+              "page",
+              "review"
             ],
             "type": "string"
           },
@@ -14591,6 +14595,56 @@
         "properties": {
           "error": {
             "type": "string"
+          },
+          "field": {
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "unknown_field",
+              "missing_field",
+              "too_long",
+              "control_character",
+              "blank",
+              "invalid_url",
+              "invalid_price",
+              "invalid_currency",
+              "invalid_enum",
+              "invalid_date_time",
+              "invalid_interval",
+              "interval_order",
+              "invalid_rating",
+              "empty_line",
+              "line_whitespace",
+              "attributes_too_large",
+              "attributes_invalid_json",
+              "attributes_duplicate_key",
+              "attributes_not_object",
+              "attributes_empty",
+              "attributes_too_many_keys",
+              "attributes_invalid_key",
+              "attributes_reserved_key",
+              "attributes_value_not_list",
+              "attributes_value_count",
+              "attributes_value_not_string",
+              "attributes_value_too_long",
+              "attributes_value_control",
+              "attributes_value_blank",
+              "attributes_value_untrimmed",
+              "attributes_value_not_nfc",
+              "attributes_duplicate_value",
+              "attributes_not_canonical",
+              "requires_field",
+              "invalid_rating_range",
+              "rating_out_of_range",
+              "record_too_large"
+            ],
+            "type": "string"
+          },
+          "record": {
+            "maximum": 99.0,
+            "minimum": 0.0,
+            "type": "integer"
           }
         },
         "required": [
@@ -42250,7 +42304,9 @@
                   "kind": {
                     "enum": [
                       "product",
-                      "faq"
+                      "faq",
+                      "page",
+                      "review"
                     ],
                     "type": "string"
                   }

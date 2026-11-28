@@ -17,15 +17,11 @@ from models.sync_feed_schemas import (
     ConfirmDiff,
     FeedConfig,
     FeedRecord,
+    SyncSchema,
     stored_schema,
 )
-from models.sync_installation import SyncService
-from services.sync_feed_authority import (
-    approved_schema,
-    current_schema,
-    human_feed_boundary,
-    locked,
-)
+from models.sync_installation import SyncInstallation, SyncService
+from services.sync_feed_authority import current_schema, human_feed_boundary, locked
 from services.sync_feed_runs import run_view
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
@@ -36,10 +32,18 @@ from utils.exceptions import (
 from utils.query_bounds import MAX_INT32
 
 
+async def approved_schema(db: AsyncSession, installation: SyncInstallation) -> SyncSchema:
+    """The registered schema the installation stores, read once; 409 for none or an unknown pair."""
+    entry = stored_schema(await current_schema(db, installation))
+    if entry is None:
+        raise ConflictError("Approved synchronization schema changed")
+    return entry
+
+
 async def configure_feed(
     db: AsyncSession, wid: UUID, iid: UUID, fid: UUID, principal: SyncPrincipal, body: FeedConfig
 ) -> dict:
-    """A current editor explicitly approves the fixed public schema and source hash."""
+    """A current editor explicitly approves the installation's record schema and source hash."""
     async with human_feed_boundary(db, wid, iid, principal, write=True) as (
         installation,
         _workspace,
@@ -49,6 +53,11 @@ async def configure_feed(
         entry = stored_schema(schema)
         # The schema a first configuration stores.
         target = SCHEMA_V1
+        # A kind outside the installation's schema version gets the answer of an
+        # unknown kind, before any comparison or write (#3055). An unregistered
+        # stored schema keeps version 1's kinds; its answer is the 409 below.
+        if body.kind not in (target if schema is None else entry or SCHEMA_V1).kinds:
+            raise SyncProtocolError("invalid_request")
         row = await locked(db, SyncFeed, SyncFeed.id == fid, write=True)
         if row is not None and row.installation_id != iid:
             raise NotFoundException("Synchronization feed")

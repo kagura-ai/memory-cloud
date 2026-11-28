@@ -9,7 +9,7 @@ from pydantic import ConfigDict, Field
 from models.api_base import TZAwareBaseModel
 from models.public_usage_budget import PublicUsageBudgetStatus
 from models.sync_activity import SyncActivityAction
-from models.sync_feed_schemas import Hash, StrictBody
+from models.sync_feed_schemas import FeedKind, Hash, StrictBody
 from utils.query_bounds import MAX_INT32
 
 
@@ -58,7 +58,7 @@ class FeedObservation(TZAwareBaseModel):
     model_config = ConfigDict(json_schema_mode_override="validation")
 
     feed_id: UUID
-    kind: Literal["product", "faq"]
+    kind: FeedKind
     config_hash: Hash
     config_version: int = Field(ge=1, le=MAX_INT32)
     revision: int = Field(ge=0, le=MAX_INT32)

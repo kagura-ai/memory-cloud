@@ -165,7 +165,7 @@ def test_non_string_content_is_not_a_record() -> None:
 @pytest.mark.parametrize(
     "record",
     [
-        _product(color="red"),  # one key outside the closed set
+        _product(colour="red"),  # one key outside the closed set (any version)
         _faq(title="A product field on a FAQ"),
         {k: v for k, v in _product().items() if k != "external_id"},
         {k: v for k, v in _product().items() if k != "url"},  # product requires url
@@ -310,3 +310,71 @@ def test_feed_content_column_gates_source_version_and_size() -> None:
     assert "memories.version = 1" in sql
     assert "octet_length(memories.content) <= 32768" in sql
     assert "THEN memories.content" in sql
+
+
+# ----------------------------------------------------------------------------
+# Schema version 2 kinds (#3055)
+# ----------------------------------------------------------------------------
+
+_V2_PRODUCT = {
+    "title": "Trail shoe",
+    "url": "https://example.com/p/1",
+    "price": "20",
+    "currency": "EUR",
+    "availability_note": "Ships in 2 days",
+    "product_highlights": "Light\nWaterproof",
+    "product_types": "Shoes > Trail",
+    "product_details": "Weight: 300 g",
+    "color": "Blue",
+    "size": "42",
+    "material": "Mesh",
+    "sale_price": "15",
+    "sale_price_effective_date": "2026-12-01T00:00:00Z/2026-12-31T23:59:59Z",
+    "attributes": '{"fit":["slim"]}',
+}
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "label"),
+    [
+        ("product", _V2_PRODUCT, "Trail shoe"),
+        (
+            "page",
+            {
+                "title": "About",
+                "url": "https://example.com/about",
+                "body": "B",
+                "heading": "History",
+            },
+            "About \u2014 History",
+        ),
+        ("page", {"title": "About", "url": "https://example.com/about", "body": "B"}, "About"),
+        ("review", {"body": "Great.", "title": "Comfortable"}, "Comfortable"),
+        ("review", {"body": "Great.", "product_name": "Trail\nshoe"}, "Review of Trail shoe"),
+        ("review", {"body": "Great.", "title": " ", "product_name": "Shoe"}, "Review of Shoe"),
+    ],
+)
+def test_a_version_two_record_parses(kind, fields, label) -> None:
+    if fields.get("title") != " ":
+        payload = contract.FeedRecord(external_id="id-1", fields=fields).public_payload(
+            kind, contract.SCHEMA_V2
+        )
+    else:
+        payload = {"record_type": kind, "external_id": "id-1", **fields}
+    parsed = parse_feed_record(json.dumps(payload, ensure_ascii=False))
+    assert parsed is not None
+    assert (parsed.kind, parsed.label, parsed.url) == (kind, label, fields.get("url"))
+
+
+def test_a_review_without_title_or_product_name_keeps_its_stored_values() -> None:
+    payload = {"record_type": "review", "external_id": "r-1", "body": "Great."}
+    assert parse_feed_record(json.dumps(payload)) is None
+    assert parse_feed_record(json.dumps({**payload, "product_name": " "})) is None
+    row = _row(json.dumps(payload))
+    assert feed_record_of(row) is None
+
+
+def test_a_page_without_body_or_with_a_review_field_is_not_a_record() -> None:
+    page = {"record_type": "page", "external_id": "p-1", "title": "T", "url": "https://e.com/a"}
+    assert parse_feed_record(json.dumps(page)) is None
+    assert parse_feed_record(json.dumps({**page, "body": "B", "rating": "5"})) is None

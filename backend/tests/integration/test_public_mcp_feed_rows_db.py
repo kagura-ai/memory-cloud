@@ -88,7 +88,7 @@ ROWS: dict[str, tuple[str, str, int, FeedRecord | None]] = {
     "edited": (_json(_product("p2")), FEED_RECORD_SOURCE, 2, None),
     "hand": (_json(_product("p3")), "mcp_remember", 1, None),
     "oversize": (_sized("p4", FEED_RECORD_MAX_BYTES + 5_000), FEED_RECORD_SOURCE, 1, None),
-    "extra_key": (_json(_product("p5", color="red")), FEED_RECORD_SOURCE, 1, None),
+    "extra_key": (_json(_product("p5", colour="red")), FEED_RECORD_SOURCE, 1, None),
     "plain": ("A plain resource text.", FEED_RECORD_SOURCE, 1, None),
     "exact": (
         _sized("p6", FEED_RECORD_MAX_BYTES),
@@ -108,6 +108,40 @@ ROWS: dict[str, tuple[str, str, int, FeedRecord | None]] = {
         FEED_RECORD_SOURCE,
         1,
         FeedRecord("product", "Trail shoe p9", None),
+    ),
+    # #3055: the kinds and product fields of record schema version 2.
+    "v2_product": (
+        _json(_product("p10", color="Blue", attributes='{"fit":["slim"]}', size="42")),
+        FEED_RECORD_SOURCE,
+        1,
+        FeedRecord("product", "Trail shoe p10", "https://example.com/p/p10"),
+    ),
+    "page": (
+        _json(
+            {
+                "record_type": "page",
+                "external_id": "about-1",
+                "title": "About",
+                "heading": "History",
+                "body": "Since 1990.",
+                "url": "https://example.com/about",
+            }
+        ),
+        FEED_RECORD_SOURCE,
+        1,
+        FeedRecord("page", "About \u2014 History", "https://example.com/about"),
+    ),
+    "review_titled": (
+        _json({"record_type": "review", "external_id": "r-1", "body": "Great.", "title": "Comfy"}),
+        FEED_RECORD_SOURCE,
+        1,
+        FeedRecord("review", "Comfy", None),
+    ),
+    "review_untitled": (
+        _json({"record_type": "review", "external_id": "r-2", "body": "Great."}),
+        FEED_RECORD_SOURCE,
+        1,
+        None,  # no title and no product name: the row keeps its stored values
     ),
 }
 

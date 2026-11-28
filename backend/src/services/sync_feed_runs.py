@@ -10,6 +10,7 @@ from models.management_schemas import digest
 from models.oidc import OIDCClient, OIDCGrant, OIDCToken
 from models.sync_activity import SyncManualRequest, SyncManualRun
 from models.sync_feed import SyncChunk, SyncFeed, SyncRecord, SyncRun
+from models.sync_feed_rules import RecordRefusal
 from models.sync_feed_schemas import (
     MAX_RUN_BYTES,
     REGISTERED_HASHES,
@@ -25,6 +26,15 @@ from services.sync_credentials import CredentialAuthority
 from services.sync_feed_authority import FeedFence, approved_schema, current_schema, locked
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import ConflictError, NotFoundException, SyncProtocolError
+
+
+def refusal_detail(position: int, refusal: RecordRefusal) -> dict[str, int | str]:
+    """The keys a refused chunk adds after ``error``: record, field (if any), reason."""
+    detail: dict[str, int | str] = {"record": position}
+    if refusal.field is not None:
+        detail["field"] = refusal.field
+    detail["reason"] = refusal.reason
+    return detail
 
 
 def generations(authority: CredentialAuthority) -> list[int]:
@@ -305,11 +315,15 @@ async def stage_chunk(
     schema = await editable(db, authority, row, feed, fence)
     if row.state != "uploading" or not 0 <= index < row.manifest["chunks"]:
         raise ConflictError("Chunk is outside the declared upload")
-    try:
-        for record in body.records:
+    for position, record in enumerate(body.records):
+        try:
             record.public_payload(feed.kind, schema)
-    except ValueError:
-        raise SyncProtocolError("invalid_record") from None
+        except RecordRefusal as refusal:
+            raise SyncProtocolError(
+                "invalid_record", detail=refusal_detail(position, refusal)
+            ) from None
+        except ValueError:
+            raise SyncProtocolError("invalid_record") from None
     total = (
         await db.scalar(
             select(func.coalesce(func.sum(SyncChunk.byte_count), 0)).where(SyncChunk.run_id == rid)

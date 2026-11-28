@@ -29,8 +29,7 @@ OIDC_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "workspaces:read": "Read your workspace memberships and permissions",
             "integrations:manage": "Manage integrations within your current KMC permissions",
             "sync.records:read": (
-                "Read approved synchronized product and FAQ records within your "
-                "current KMC permissions"
+                "Read approved synchronized records within your current KMC permissions"
             ),
         },
     },
@@ -49,9 +48,7 @@ OIDC_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "profile": "表示名とプロフィール画像の読み取り",
             "workspaces:read": "ワークスペースのメンバーシップと権限の読み取り",
             "integrations:manage": "連携の管理 (現在の KMC 権限の範囲内)",
-            "sync.records:read": (
-                "同期された承認済みの商品・FAQ レコードの読み取り (現在の KMC 権限の範囲内)"
-            ),
+            "sync.records:read": ("同期された承認済みレコードの読み取り (現在の KMC 権限の範囲内)"),
         },
     },
 }

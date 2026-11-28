@@ -132,8 +132,8 @@ async def test_manual_candidate_deadline_is_held_through_resume_final_commit(
         await db.commit()
     original = sync_resume.publish_resumed_feed
 
-    async def expire(db, installation, feed, candidate):
-        await original(db, installation, feed, candidate)
+    async def expire(db, installation, feed, candidate, schema):
+        await original(db, installation, feed, candidate, schema)
         activity.store.clock.now += timedelta(seconds=3)
 
     monkeypatch.setattr(sync_resume, "publish_resumed_feed", expire)

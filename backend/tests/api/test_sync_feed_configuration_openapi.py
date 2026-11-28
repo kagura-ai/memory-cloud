@@ -25,7 +25,8 @@ def test_registered_feed_observation_schemas_keep_types_bounds_and_nested_items(
         }
     for properties in (item, detail):
         assert properties["feed_id"]["format"] == "uuid"
-        assert properties["kind"]["enum"] == ["product", "faq"]
+        # #3055: every registered kind; each installation accepts its own version's.
+        assert properties["kind"]["enum"] == ["product", "faq", "page", "review"]
         assert properties["config_hash"]["pattern"] == "^[0-9a-f]{64}$"
         assert properties["config_version"]["minimum"] == 1
         assert properties["config_version"]["maximum"] == 2**31 - 1

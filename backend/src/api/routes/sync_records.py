@@ -48,7 +48,7 @@ async def read_sync_records(
     cursor: Annotated[str | None, Query(max_length=512)] = None,
     feed_id: UUID | None = None,
 ) -> dict:
-    """Read only approved product/FAQ fields under current KMC data permissions."""
+    """Read only approved feed record fields under current KMC data permissions."""
     exact_query(request, {"limit", "cursor", "feed_id"})
     return await project_records(
         db, workspace_id, installation_id, principal, limit=limit, cursor=cursor, feed_id=feed_id

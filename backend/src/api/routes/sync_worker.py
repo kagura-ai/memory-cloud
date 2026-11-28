@@ -8,14 +8,16 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.sync_bearer import sync_service_token
 from db.base import get_db
+from models.sync_feed_rules import RefusalReason
 from services.sync_credentials import SyncCredentialError, sync_token_boundary
 from services.workspace_slot_gate import ensure_slot_active
-from utils.exceptions import MemoryCloudException
+from utils.exceptions import MemoryCloudException, SyncProtocolError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -23,9 +25,20 @@ NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 
 
 class SyncWorkerError(BaseModel):
-    """Fixed protocol error without reflected credential or tenant details."""
+    """Fixed protocol error without reflected credential or tenant details.
+
+    A refused chunk (``invalid_record``) also names the 0-based index of the
+    first refused record, the field (when the rule concerns one that the
+    installation's schema defines) and the reason (#3055). No value is ever
+    reflected; clients treat the three keys as optional.
+    """
 
     error: str
+    record: Annotated[int, Field(ge=0, le=99)] | SkipJsonSchema[None] = Field(
+        default_factory=lambda: None
+    )
+    field: str | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+    reason: RefusalReason | SkipJsonSchema[None] = Field(default_factory=lambda: None)
 
 
 class SyncWorkerRoute(APIRoute):
@@ -46,7 +59,10 @@ class SyncWorkerRoute(APIRoute):
             except SyncCredentialError as exc:
                 response = JSONResponse({"error": exc.error}, status_code=exc.status)
             except MemoryCloudException as exc:
-                response = JSONResponse({"error": exc.error_code}, status_code=exc.status_code)
+                detail = exc.wire_detail if isinstance(exc, SyncProtocolError) else {}
+                response = JSONResponse(
+                    {"error": exc.error_code, **detail}, status_code=exc.status_code
+                )
             except Exception as exc:
                 logger.warning("sync_service_unavailable", failure_type=type(exc).__name__)
                 response = JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
@@ -59,7 +75,7 @@ class SyncWorkerRoute(APIRoute):
 
 
 class SyncWorkerInstallationView(BaseModel):
-    """Operational target identity only; no product/FAQ content or new authority."""
+    """Operational target identity only; no feed record content or new authority."""
 
     installation_id: UUID
     workspace_id: UUID

@@ -40,7 +40,7 @@ RAW_EXPORTABLE_TABLES: frozenset[str] = frozenset(
         "resources",  # connected source-of-truth resources
         "resource_events",  # ingested raw source events
         "resource_schemas",  # user-registered resource schemas
-        "sync_records",  # approved canonical product/FAQ fields
+        "sync_records",  # approved canonical feed record fields
         # Raw staging: the records are cleared on commit, abort and expiry; the
         # receipt rows (digest, sizes) stay with their run and are deleted with
         # a run that never committed, 30 days after its upload window (#2916).

@@ -8,57 +8,62 @@ refused (409) wherever it is read, and nothing repairs it.
 """
 
 import copy
-import json
-import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Protocol, Self
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from models.management_schemas import digest
+from models.sync_feed_rules import (
+    ATTRIBUTES_LIMITS,
+    FAQ,
+    FAQ_REQUIRED,
+    FIELDS,
+    FIELDS_V2,
+    INDEXED,
+    INDEXED_V2,
+    MAX_RECORD_BYTES,
+    PAGE_V2,
+    PAGE_V2_REQUIRED,
+    PRODUCT,
+    PRODUCT_REQUIRED,
+    PRODUCT_V2,
+    REVIEW_V2,
+    REVIEW_V2_REQUIRED,
+    RULES_V1,
+    RULES_V2,
+    FieldRule,
+    check_record,
+)
 from utils.query_bounds import MAX_INT32
 
 Hash = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 MAX_RECORDS = 10_000
 MAX_CHUNK_BYTES = 524_288
 MAX_RUN_BYTES = 20 * 1024 * 1024
-PRODUCT = {
-    "title",
-    "url",
-    "description",
-    "image_url",
-    "price",
-    "currency",
-    "availability",
-    "brand",
-    "sku",
-    "gtin",
-    "mpn",
-    "condition",
-}
-FAQ = {"question", "answer", "url"}
-PRODUCT_REQUIRED = {"title", "url"}
-FAQ_REQUIRED = {"question", "answer"}
-# A record's JSON (``public_payload``) is at most this many UTF-8 bytes.
-MAX_RECORD_BYTES = 32_768
-FIELDS = PRODUCT | FAQ | {"record_type", "external_id"}
-DEFINITIONS = [
-    {
-        "name": name,
-        "type": "text",
-        "classification": "public",
-        "required": name in {"record_type", "external_id"},
-        "index_hint": "fulltext,vector"
-        if name in {"title", "description", "question", "answer", "brand", "sku"}
-        else "",
-    }
-    for name in sorted(FIELDS)
-]
+# Every kind of any registered version; an installation accepts its own version's.
+FeedKind = Literal["product", "faq", "page", "review"]
+
+
+def definitions(names: frozenset[str], indexed: frozenset[str]) -> list[dict[str, Any]]:
+    """The stored definitions of a version: five keys each, in code-point order of the names."""
+    return [
+        {
+            "name": name,
+            "type": "text",
+            "classification": "public",
+            "required": name in {"record_type", "external_id"},
+            "index_hint": "fulltext,vector" if name in indexed else "",
+        }
+        for name in sorted(names)
+    ]
+
+
+DEFINITIONS = definitions(FIELDS, INDEXED)
 SCHEMA_HASH = digest(DEFINITIONS)
 # The ``limits`` of every ``/schema`` answer, in wire order.
 BASE_LIMITS: dict[str, int] = {
@@ -85,6 +90,7 @@ class SyncSchema:
     version: int
     definitions: list[dict[str, Any]]
     kinds: Mapping[str, tuple[frozenset[str], frozenset[str]]]
+    rules: Mapping[str, FieldRule]
     extra_limits: Mapping[str, Any] = field(default_factory=dict)
     schema_hash: str = field(init=False)
     names: frozenset[str] = field(init=False)
@@ -115,10 +121,29 @@ SCHEMA_V1 = SyncSchema(
         "product": (frozenset(PRODUCT), frozenset(PRODUCT_REQUIRED)),
         "faq": (frozenset(FAQ), frozenset(FAQ_REQUIRED)),
     },
+    rules=RULES_V1,
+)
+# Version 2 (#3055): pages and reviews, ten more product fields. Its /schema
+# answer also publishes the record and field limits (version 1's never does).
+SCHEMA_V2 = SyncSchema(
+    version=2,
+    definitions=definitions(FIELDS_V2, INDEXED_V2),
+    kinds={
+        "product": (PRODUCT_V2, frozenset(PRODUCT_REQUIRED)),
+        "faq": (frozenset(FAQ), frozenset(FAQ_REQUIRED)),
+        "page": (PAGE_V2, PAGE_V2_REQUIRED),
+        "review": (REVIEW_V2, REVIEW_V2_REQUIRED),
+    },
+    rules=RULES_V2,
+    extra_limits={
+        "record_bytes": MAX_RECORD_BYTES,
+        "field_chars": {name: rule.limit for name, rule in sorted(RULES_V2.items())},
+        "attributes": dict(ATTRIBUTES_LIMITS),
+    },
 )
 # (schema_version, schema_hash) -> the registered schema.
 REGISTRY: dict[tuple[int, str], SyncSchema] = {
-    (entry.version, entry.schema_hash): entry for entry in (SCHEMA_V1,)
+    (entry.version, entry.schema_hash): entry for entry in (SCHEMA_V1, SCHEMA_V2)
 }
 
 
@@ -173,9 +198,13 @@ class FeedConfigExpected(StrictBody):
 
 
 class FeedConfig(StrictBody):
-    """Opaque hash of the source configuration; KMC never retrieves feed URLs."""
+    """Opaque hash of the source configuration; KMC never retrieves feed URLs.
 
-    kind: Literal["product", "faq"]
+    ``kind`` names any registered kind; the installation's stored schema (or
+    the schema a first configuration stores) decides whether it is accepted.
+    """
+
+    kind: FeedKind
     config_hash: Hash
     # Omission alone preserves the legacy unguarded protocol. SkipJsonSchema
     # describes the accepted optional object, not the internal omission sentinel.
@@ -226,48 +255,24 @@ class FeedRecord(StrictBody):
         return value
 
     def public_payload(self, kind: str, schema: SyncSchema) -> dict[str, str]:
-        """Validate kind-specific fields and values under the installation's stored schema."""
+        """Validate kind-specific fields and values under the installation's stored schema.
+
+        Raises :class:`models.sync_feed_rules.RecordRefusal` (a ``ValueError``)
+        with the first failing rule; a kind outside the schema is a plain
+        ``ValueError``.
+        """
         if kind not in schema.kinds:
             raise ValueError("invalid_fields")
         allowed, required = schema.kinds[kind]
-        if not required.issubset(self.fields) or not set(self.fields).issubset(allowed):
-            raise ValueError("invalid_fields")
-        for name, value in self.fields.items():
-            limit = 16_000 if name in {"description", "answer"} else 2048
-            if (
-                not value.strip()
-                or len(value) > limit
-                or any(ord(c) < 32 and c not in "\n\r\t" for c in value)
-            ):
-                raise ValueError("invalid_field_value")
-            if name in {"url", "image_url"}:
-                parsed = urlsplit(value)
-                if (
-                    parsed.scheme != "https"
-                    or not parsed.hostname
-                    or parsed.username
-                    or parsed.password
-                    or any(c.isspace() for c in value)
-                ):
-                    raise ValueError("invalid_url")
-        if ("price" in self.fields) != ("currency" in self.fields):
-            raise ValueError("price_currency_pair_required")
-        if "price" in self.fields and not re.fullmatch(
-            r"(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,4})?", self.fields["price"]
-        ):
-            raise ValueError("invalid_price")
-        if "currency" in self.fields and not re.fullmatch(r"[A-Z]{3}", self.fields["currency"]):
-            raise ValueError("invalid_currency")
-        for name, choices in {
-            "availability": {"in_stock", "out_of_stock", "preorder", "backorder"},
-            "condition": {"new", "used", "refurbished"},
-        }.items():
-            if name in self.fields and self.fields[name] not in choices:
-                raise ValueError("invalid_enum")
-        payload = {"record_type": kind, "external_id": self.external_id, **self.fields}
-        if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_RECORD_BYTES:
-            raise ValueError("record_too_large")
-        return payload
+        return check_record(
+            kind,
+            self.external_id,
+            self.fields,
+            allowed=allowed,
+            required=required,
+            rules=schema.rules,
+            names=schema.names,
+        )
 
 
 class ChunkBody(StrictBody):

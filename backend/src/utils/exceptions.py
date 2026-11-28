@@ -6,6 +6,7 @@ Based on: kagura-ai/src/kagura/exceptions.py
 """
 
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Any, ClassVar, Literal
 
 from config.constants import (
@@ -2200,10 +2201,15 @@ class SyncProtocolError(MemoryCloudException):
             "human_approval_required",
         ],
         status_code: Literal[400, 409, 413] = 400,
+        *,
+        detail: Mapping[str, int | str] | None = None,
     ) -> None:
         super().__init__(
             "Synchronization request refused", status_code=status_code, error_code=error
         )
+        # Keys the worker route adds after ``error`` (#3055: a refused chunk's
+        # record, field and reason). Never a value from the request.
+        self.wire_detail: dict[str, int | str] = dict(detail or {})
 
 
 class TemporarilyUnavailableError(MemoryCloudException):
