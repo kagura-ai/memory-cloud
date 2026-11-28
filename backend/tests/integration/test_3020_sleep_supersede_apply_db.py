@@ -383,3 +383,61 @@ async def test_changes_since_lists_the_applied_link(db_session):
     assert [(c.memory_id, c.superseded_by, c.at) for c in superseded] == [
         (older.id, newer.id, edge.created_at)
     ]
+
+
+# ------------------------------------------------- shadow-merge undo guard
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior", [False, True], ids=["delete", "restore"])
+async def test_a_shadow_merge_undo_leaves_an_applied_link_standing(db_session, prior):
+    """An older dedup shadow merge recorded the pair; its edge was deleted and
+    the pair applied since. Undoing that shadow merge must leave the applied
+    link as it is; a NULL-metadata shadow edge is still reverted."""
+    from services.sleep.undo import ShadowEdgeRevert, revert_shadow_merge_edge
+
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+    await run_phase(db, s, report)
+    applied = await edge_row(db, s.owner, newer.id, older.id)
+    prior_edge = (
+        {
+            "edge_type": "neural_association",
+            "origin": "hebbian",
+            "weight": 0.2,
+            "confidence": 1.0,
+            "edge_metadata": None,
+        }
+        if prior
+        else None
+    )
+
+    outcome = await revert_shadow_merge_edge(
+        db, user_id=s.owner, winner_id=newer.id, loser_id=older.id, prior_edge=prior_edge
+    )
+
+    assert outcome is ShadowEdgeRevert.BLOCKED_BY_NEWER_STATE
+    assert await edge_row(db, s.owner, newer.id, older.id) == applied
+
+    # A dedup shadow edge (NULL metadata) on another pair is still reverted.
+    shadow_newer, shadow_older = await verified_pair(db, s, created_at=_base())
+    await add_edge(db, s, shadow_newer, shadow_older, "supersedes", origin="semantic")
+    outcome = await revert_shadow_merge_edge(
+        db,
+        user_id=s.owner,
+        winner_id=shadow_newer.id,
+        loser_id=shadow_older.id,
+        prior_edge=prior_edge,
+    )
+    assert outcome is ShadowEdgeRevert.RESTORED
+    after = await edge_row(db, s.owner, shadow_newer.id, shadow_older.id)
+    if prior:
+        assert (after.edge_type, after.origin, after.weight) == (
+            "neural_association",
+            "hebbian",
+            0.2,
+        )
+    else:
+        assert after is None

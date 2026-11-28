@@ -90,6 +90,12 @@ async def revert_shadow_merge_edge(
       on (user, src, dst) regardless of edge_type, so a blind delete could
       remove an unrelated association written since.
 
+    Both statements also require the row's metadata to be NULL (SQL NULL, or
+    the JSON ``null`` of a row written before #2026): the shadow merge never
+    writes metadata, so a ``supersedes`` row that carries some was written by
+    someone else since — #3020's supersede-apply phase after the shadow edge
+    was deleted, for one — and is newer state the undo leaves standing.
+
     When the guarded statement matches no row, the current edge is read back to
     tell the two zero-row causes apart (#1450). ``unique_edge`` is keyed on
     (user, src, dst), so there is at most one row to inspect.
@@ -99,10 +105,17 @@ async def revert_shadow_merge_edge(
         ``BLOCKED_BY_NEWER_STATE`` as a failure to reverse — the recorded action
         could not be undone without discarding newer edge state.
     """
+    from sqlalchemy import Text, or_
+    from sqlalchemy import cast as sql_cast
     from sqlalchemy import delete as sa_delete
 
     from models.memory import EDGE_TYPE_SUPERSEDES, NeuralMemoryEdge
 
+    # #3020: only the row the shadow merge wrote, which carries no metadata.
+    shadow_written = or_(
+        NeuralMemoryEdge.edge_metadata.is_(None),
+        sql_cast(NeuralMemoryEdge.edge_metadata, Text) == "null",
+    )
     if prior_edge:
         result = await db.execute(
             sa_update(NeuralMemoryEdge)
@@ -111,6 +124,7 @@ async def revert_shadow_merge_edge(
                 NeuralMemoryEdge.src_id == winner_id,
                 NeuralMemoryEdge.dst_id == loser_id,
                 NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+                shadow_written,
             )
             .values(
                 edge_type=prior_edge.get("edge_type") or "neural_association",
@@ -128,6 +142,7 @@ async def revert_shadow_merge_edge(
                 NeuralMemoryEdge.src_id == winner_id,
                 NeuralMemoryEdge.dst_id == loser_id,
                 NeuralMemoryEdge.edge_type == EDGE_TYPE_SUPERSEDES,
+                shadow_written,
             )
         )
     # DML through AsyncSession.execute() is typed Result[Any] but is a
