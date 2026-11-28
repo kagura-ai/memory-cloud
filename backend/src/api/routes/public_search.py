@@ -64,7 +64,11 @@ class PublicSearchRequest(BaseModel):
 
     query: str = Field(..., min_length=1, max_length=500, description="Search query")
     limit: int = Field(10, ge=1, le=100, description="Maximum results (default: 10, max: 100)")
-    use_rerank: bool = Field(False, description="Enable reranking for better results")
+    # #3035: the public search never reranks, whoever calls it. The field stays
+    # so that clients which still send it keep working.
+    use_rerank: bool = Field(
+        False, deprecated=True, description="Ignored: the public search never reranks."
+    )
     search_mode: str = Field(
         "hybrid",
         pattern="^(hybrid|semantic|keyword)$",
@@ -440,6 +444,12 @@ async def public_search(
         - Anonymous access, session cookie or not (rate limited to 50
           req/min per context, shared)
 
+    No caller is reranked (#3035): ``use_rerank`` is accepted and ignored.
+
+    A bound key's last-used time is committed once the key passes the context
+    check (404 / 403 above), before the search runs, also when its own
+    per-minute bucket or its plan then refuses the search.
+
     Rate Limits:
         - Anonymous access: 50 requests/minute per context (shared bucket)
         - Public-bound key: per-key bucket from workspace plan tier
@@ -458,8 +468,7 @@ async def public_search(
         Body:
         {
             "query": "商品名 価格",
-            "limit": 10,
-            "use_rerank": false
+            "limit": 10
         }
 
     Response:
@@ -531,6 +540,15 @@ async def public_search(
         # the binding row stays so the owner can re-enable, but access is
         # blocked while the public flag is off.
         raise AuthorizationError("This context is not public")
+
+    # #3035: ``verify_key`` wrote the bound key's throttled ``last_used_at`` in
+    # this transaction; without a commit here its row lock would be held
+    # through the whole search, and concurrent requests with the same key
+    # would queue behind it. A key refused above (attribution, missing or
+    # non-public context) is rolled back with the request and keeps its row.
+    # ``expire_on_commit=False`` keeps the loaded context usable.
+    if bound_key is not None:
+        await db.commit()
 
     # 3. Rate limit dispatch: a public-bound key, or anonymous (#2823: a
     # session cookie does not change the principal on this route).
@@ -613,9 +631,9 @@ async def public_search(
         owner_id = workspace.owner_user_id
         search_user_id: str = str(owner_id) if owner_id is not None else "system"
 
-        # Reranking is permitted for attributed bound-key callers (#626) only;
-        # anonymous traffic (session cookie or not) stays rerank-disabled to
-        # keep rerank cost off unbounded callers.
+        # #3035: no caller is reranked (bound key, anonymous, session cookie or
+        # not). An explicit False: None would follow the context's search
+        # config and could rerank.
         degradation: dict[str, Any] = {}
         results = await search_service.hybrid_search(
             query=request.query,
@@ -623,7 +641,7 @@ async def public_search(
             workspace_id=str(context.workspace_id),
             context_id=str(context_id),
             k=request.limit,
-            use_rerank=request.use_rerank and bound_key is not None,
+            use_rerank=False,
             search_mode=request.search_mode,
             degradation=degradation,
         )

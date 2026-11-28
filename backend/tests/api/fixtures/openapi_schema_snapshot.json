@@ -10781,6 +10781,7 @@
           },
           "use_rerank": {
             "default": false,
+            "deprecated": true,
             "type": "boolean"
           }
         },

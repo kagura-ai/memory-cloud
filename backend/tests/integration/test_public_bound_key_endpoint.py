@@ -165,9 +165,13 @@ def stub_search_service(monkeypatch):
     a live Qdrant / embedding-service dependency.
     """
 
+    calls: list[dict] = []
+
     async def _stub(self, **kwargs):  # noqa: ARG001 — signature mirrors caller
+        calls.append(kwargs)
         return []
 
+    _stub.calls = calls  # type: ignore[attr-defined]
     monkeypatch.setattr("services.search_service.SearchService.hybrid_search", _stub)
     return _stub
 
@@ -315,12 +319,14 @@ async def test_case4_bound_key_matching_succeeds_with_per_key_bucket_and_attribu
     response = await client.post(
         f"/api/v1/public/{ctx.id}/search",
         headers={"Authorization": f"Bearer {plaintext}"},
-        json={"query": "hello", "limit": 5},
+        json={"query": "hello", "limit": 5, "use_rerank": True},
     )
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["context_id"] == str(ctx.id)
+    # #3035: no caller is reranked, a bound key that asks for it included.
+    assert stub_search_service.calls[-1]["use_rerank"] is False
 
     await _assert_buckets(ctx.id, anon=0, pre_auth=1, key_id=key_id, bound=1)
 
