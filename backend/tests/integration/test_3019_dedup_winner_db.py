@@ -431,12 +431,11 @@ async def test_a_context_merge_copy_loses_to_a_row_created_later_in_the_target(
     db_session, log_began_days_ago, merged
 ):
     """``merge_contexts`` copies a row with its ``created_at`` and a fresh
-    ``updated_at`` at version 1: the copy is as old as the row it copies. When
-    the log began before the later row, the copy loses (the documented limit:
-    an edit made in the source before the merge is not seen); when it began
-    after, the copy's stamp could be an edit and both stay."""
-    from services.context_service import ContextService
-
+    ``updated_at`` at version 1. The source row has no logged text edit, so
+    the copy carries no edit time and is as old as the row it copies (a
+    source edited before the merge is covered by the #3051 tests below). When
+    the log began before the later row, the copy loses; when it began after,
+    the copy's stamp could be an edit and both stay."""
     now = utcnow()
     scope = await _Scope.create(db_session)
     source = await _Scope._context(db_session, scope.owner, scope.ws)
@@ -453,17 +452,7 @@ async def test_a_context_merge_copy_loses_to_a_row_created_later_in_the_target(
     )
     await db_session.commit()
 
-    with (
-        patch(
-            "services.permission_service.PermissionService.check_context_owner",
-            AsyncMock(),
-        ),
-        patch(
-            "db.qdrant.copy_context_points",
-            AsyncMock(side_effect=lambda **kw: set(kw["memory_id_mapping"].values())),
-        ),
-    ):
-        await ContextService(db_session).merge_contexts(scope.owner, source.id, scope.ctx.id)
+    await _merge(scope, source, scope.ctx)
     copy = (
         await db_session.execute(
             select(Memory).where(
