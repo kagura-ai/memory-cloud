@@ -141,6 +141,7 @@ from utils.exceptions import (
     MemoryCloudException,
     MemoryGoneError,
     NotFoundException,
+    QuotaExceededError,
     ValidationError,
 )
 from utils.logger import get_logger
@@ -1592,9 +1593,25 @@ class MemoryService:
 
         # Check memory quota (count-based only) — against the workspace the row
         # lands in; the resolution above is shared with the daily gate.
-        can_create, error = await quota_service.check_memory_quota(
-            target_workspace_id, raise_on_exceeded=True
-        )
+        try:
+            can_create, error = await quota_service.check_memory_quota(
+                target_workspace_id, raise_on_exceeded=True
+            )
+        except QuotaExceededError as e:
+            # #3022: the surface that answers the refusal counts the caller's
+            # never-delivered memories in this context; read the context now,
+            # while the row is loaded (a rollback expires it).
+            from services.memory_cap_refusal import (
+                MemoryCapTarget,
+                is_memory_cap,
+                set_memory_cap_target,
+            )
+
+            if is_memory_cap(e) and context is not None:
+                set_memory_cap_target(
+                    e, MemoryCapTarget(context_id=context.id, is_private=bool(context.is_private))
+                )
+            raise
 
         # Issue #1549: reserve one creation against today's daily quota.
         # This is THE charge point for user-visible memory creation — MCP

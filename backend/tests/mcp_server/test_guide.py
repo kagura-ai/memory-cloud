@@ -284,3 +284,27 @@ def test_list_never_delivered_topic_is_indexed_and_names_the_rule():
     # copied), so a merged newer side can be listed: the topic says so.
     assert "not their supersede links" in text
     assert "never_delivered" in GUIDE_TOPICS["list.filters"]
+
+
+def test_remember_limits_topic_names_both_caps_and_the_refusal_keys():
+    """#3022: the plan-limit refusal is explained in the guide, not in the tool text."""
+    from config.constants import NEVER_DELIVERED_AGE_DAYS
+
+    for tool in ("remember", "remember_batch", "update_memory"):
+        assert "remember.limits" in GUIDE_INDEX[tool]
+    text = GUIDE_TOPICS["remember.limits"]
+    for phrase in (
+        "'memories'",
+        "'memories_per_day'",
+        "resets_at",
+        "remedies",
+        "never_delivered_count",
+        "filters={'never_delivered': true}",
+        f"{NEVER_DELIVERED_AGE_DAYS} days",
+        "approval",
+        "forget(memory_ids=",
+        "delete_context",
+        "get_usage",
+        "'admin'",
+    ):
+        assert phrase in text, phrase

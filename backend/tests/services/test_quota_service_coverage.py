@@ -267,6 +267,11 @@ class TestCheckMemoryQuota:
             await service.check_memory_quota(ws.id, raise_on_exceeded=True)
 
         assert "Memory quota exceeded" in str(exc.value)
+        # #3022: typed like the other caps.
+        details = exc.value.details
+        assert (details["gate"], details["quota_type"]) == ("quota", "memories")
+        assert (details["current"], details["limit"]) == (1, 1)
+        assert details["remedies"][0] == "cleanup"
 
     async def test_workspace_not_found_returns_false(self, db_session):
         """Missing workspace → (False, 'not found')."""

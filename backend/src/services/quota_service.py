@@ -21,11 +21,13 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import (
+    PLAN_ORDER,
     PLAN_TIERS,
     feature_denied_message,
     get_plan_tier,
     has_feature,
     lowest_tier_with_limit,
+    plan_rank,
     quota_gate_details,
 )
 from db.redis import get_cache, incrby_counter
@@ -42,6 +44,7 @@ from services.plan_headroom import (
     MEMORIES,
     MEMORIES_PER_DAY,
     QuotaReading,
+    memory_cap_remedies,
     record_quota_reading,
 )
 from utils.datetime import next_utc_midnight_iso, utcnow
@@ -202,8 +205,7 @@ class QuotaService:
             ),
         )
 
-        # Check against effective limit
-        if current_count >= memory_limit:
+        def _refuse() -> tuple[bool, str | None]:
             error = (
                 f"Memory quota exceeded. "
                 f"Current: {current_count}, Limit: {memory_limit} ({workspace.plan_name} plan + addons)"
@@ -215,10 +217,30 @@ class QuotaService:
                 limit=memory_limit,
                 plan=workspace.plan_name,
             )
-
             if raise_on_exceeded:
-                raise QuotaExceededError(error)
+                # #3022: typed like every other cap. The upgrade path is the
+                # lowest tier whose BASE limit beats this plan's: an add-on or
+                # referral bonus stays on top of the new tier's base. The
+                # remedies are the plan headroom notice's tokens; the review
+                # count is added where the caller is known (after the lock is
+                # released), never here.
+                base = get_plan_tier(PLAN_ORDER[plan_rank(workspace.plan_name)]).memory_limit
+                raise QuotaExceededError(
+                    error,
+                    **quota_gate_details(
+                        workspace.plan_name,
+                        "memories",
+                        current=current_count,
+                        limit=memory_limit,
+                        required_plan=lowest_tier_with_limit("memory_limit", base),
+                    ),
+                    remedies=memory_cap_remedies(workspace.plan_name),
+                )
             return False, error
+
+        # Check against effective limit
+        if current_count >= memory_limit:
+            return _refuse()
 
         return True, None
 
