@@ -219,7 +219,7 @@ Store a new memory with 3-layer architecture (summary, context_summary, details)
 ```json
 {
   "error": "QUOTA-001",
-  "message": "Memory quota exceeded. Current: 1000, Limit: 1000 (free plan + addons) 12 of your memories in this context are over 180 days old and were never delivered.",
+  "message": "Memory quota exceeded. Current: 1000, Limit: 1000 (free plan + addons). 12 of your memories in this context are over 180 days old and were never delivered.",
   "details": {
     "gate": "quota",
     "quota_type": "memories",

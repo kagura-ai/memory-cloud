@@ -430,7 +430,7 @@ is higher; `null` on the top tier). Two keys are its own:
   caller's own memories in the target context are never delivered (the `total` of
   `GET /memory/list?context_id=…&never_delivered=true` for the same caller). Read after the
   refused write is rolled back and left out when it cannot be read in time. When it is above 0
-  the message gains one sentence naming it; the prefix
+  the message gains one sentence naming it, after a full stop; the prefix
   `Memory quota exceeded. Current: N, Limit: M (<plan> plan + addons)` is unchanged.
 
 A client that classifies by `gate` (the SDKs do) now reads this refusal as a quota refusal

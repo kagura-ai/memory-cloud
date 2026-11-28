@@ -117,10 +117,15 @@ async def refusal_never_delivered_count(
 
 
 def refusal_message(message: str, count: int | None) -> str:
-    """``message`` with the count sentence appended when the count is above 0."""
+    """``message`` with the count sentence appended when the count is above 0.
+
+    The quota message ends in the plan parenthesis without a full stop, so
+    one is added before the count sentence (never a second one).
+    """
     if not count:
         return message
-    return f"{message} {never_delivered_sentence(count)}"
+    base = message if message.endswith(".") else f"{message}."
+    return f"{base} {never_delivered_sentence(count)}"
 
 
 async def memory_cap_fields(

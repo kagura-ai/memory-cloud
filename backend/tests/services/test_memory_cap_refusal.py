@@ -279,11 +279,17 @@ class TestRefusalCount:
 
     @pytest.mark.parametrize(
         ("count", "suffix"),
-        [(None, ""), (0, ""), (2, " " + ph.never_delivered_sentence(2))],
+        [(None, ""), (0, ""), (2, ". " + ph.never_delivered_sentence(2))],
     )
     def test_the_message_gains_the_sentence_only_above_zero(self, count, suffix) -> None:
+        # The base ends in the plan parenthesis without a full stop: the count
+        # is its own sentence after one.
         base = "Memory quota exceeded. Current: 5, Limit: 5 (free plan + addons)"
         assert mcr.refusal_message(base, count) == base + suffix
+
+    def test_a_base_that_ends_a_sentence_gets_no_second_full_stop(self) -> None:
+        base = "Memory quota exceeded."
+        assert mcr.refusal_message(base, 1) == f"{base} {ph.never_delivered_sentence(1)}"
 
 
 # ---------------------------------------------------------------- the target

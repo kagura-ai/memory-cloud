@@ -118,7 +118,7 @@ class TestRemember:
         assert payload["required_plan"] == PlanName.BASIC
         assert payload["remedies"] == REMEDIES
         assert payload["never_delivered_count"] == 3
-        assert payload["message"] == f"{MESSAGE} {never_delivered_sentence(3)}"
+        assert payload["message"] == f"{MESSAGE}. {never_delivered_sentence(3)}"
         assert payload["help"] == memory_cap_help(3, REMEDIES)
         assert log_usage.await_args.args[4] == 429
         counter.assert_awaited_once()
@@ -203,7 +203,7 @@ class TestUpdateMemoryCreateHalf:
         assert payload["error"] == "quota_exceeded"
         assert payload["quota_type"] == "memories"
         assert payload["never_delivered_count"] == 2
-        assert payload["message"] == f"{MESSAGE} {never_delivered_sentence(2)}"
+        assert payload["message"] == f"{MESSAGE}. {never_delivered_sentence(2)}"
         assert payload["help"] == memory_cap_help(2, REMEDIES)
         assert log_usage.await_args.args[4] == 429
         counter.assert_awaited_once()
@@ -381,7 +381,7 @@ class TestRest:
 
         assert status == 429
         assert body["error"] == "QUOTA-001"
-        assert body["message"] == f"{MESSAGE} {never_delivered_sentence(5)}"
+        assert body["message"] == f"{MESSAGE}. {never_delivered_sentence(5)}"
         details = body["details"]
         assert details["gate"] == "quota"
         assert details["quota_type"] == "memories"

@@ -35,6 +35,7 @@ from services import memory_cap_refusal as mcr
 from services import quota_service as qs
 from services.memory_listing import count_never_delivered
 from services.memory_service import MemoryService
+from services.plan_headroom import never_delivered_sentence
 from utils.datetime import utcnow
 from utils.exceptions import QuotaExceededError
 
@@ -210,7 +211,7 @@ async def test_mcp_remember_names_the_callers_list_total(db_session, at_the_limi
     assert payload["never_delivered_count"] == expected
     assert payload["remedies"][0] == "cleanup"
     assert payload["message"].endswith(
-        "3 of your memories in this context are over "
+        "plan + addons). 3 of your memories in this context are over "
         f"{NEVER_DELIVERED_AGE_DAYS} days old and were never "
         "delivered."
     )
@@ -305,4 +306,4 @@ async def test_rest_remember_names_the_same_number(db_session, at_the_limit):
     details = raised.value.details
     assert details["quota_type"] == "memories"
     assert details["never_delivered_count"] == expected == 3
-    assert raised.value.message.endswith("were never delivered.")
+    assert raised.value.message.endswith("plan + addons). " + never_delivered_sentence(3))
