@@ -29,7 +29,8 @@ class SyncFeed(Base):
 
     __tablename__ = "sync_feeds"
     __table_args__ = (
-        CheckConstraint("kind IN ('product', 'faq')", name="ck_sync_feed_kind"),
+        # f68 (#3055): the kinds of every registered record schema version.
+        CheckConstraint("kind IN ('product', 'faq', 'page', 'review')", name="ck_sync_feed_kind"),
         CheckConstraint("revision >= 0", name="ck_sync_feed_revision"),
         CheckConstraint("config_version > 0", name="ck_sync_feed_config_version"),
         CheckConstraint("length(config_hash) = 64", name="ck_sync_feed_config_hash"),
