@@ -25,6 +25,7 @@ from models.auth import WorkspaceMember
 from models.memory import Memory, MemoryRevision
 from services.sleep.coverage import LaneEntry, parse_state
 from services.supersede_dismissal import build_tombstone
+from services.supersede_verify import CONTENT_HEAD_CHARS, SUMMARY_CHARS
 from tests.integration._supersede_apply_support import (
     add_edge,
     add_user,
@@ -341,6 +342,39 @@ async def test_an_older_memory_whose_recency_cannot_be_known_is_refused(db_sessi
         assert await edge_row(db, s.owner, newer.id, older.id) is None
 
 
+# ---------------------------------------------------------- judged heads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "chars", "applied"),
+    [
+        ("content", CONTENT_HEAD_CHARS, True),
+        ("content", CONTENT_HEAD_CHARS + 1, False),
+        ("summary", SUMMARY_CHARS + 1, False),
+    ],
+    ids=["content-at-the-head", "content-past-the-head", "summary-past-the-head"],
+)
+async def test_an_older_memory_longer_than_the_judged_heads_is_refused(
+    db_session, field, chars, applied
+):
+    """The verdict is current (its fingerprints cover the heads), but it says
+    nothing about the text past them."""
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base(), older_fields={field: "x" * chars})
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+
+    _, result = await run_phase(db, s, report)
+
+    if applied:
+        assert result.details["applied"] == 1
+    else:
+        assert result.details["no_action_reasons"] == {"older_past_judged_head": 1}
+        assert await apply_actions(db, report.id) == []
+        assert await edge_row(db, s.owner, newer.id, older.id) is None
+
+
 # --------------------------------------------------------------- write access
 
 
@@ -379,7 +413,7 @@ async def test_a_run_user_who_may_not_write_edges_is_skipped(db_session, change)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["dismissed", "older-text"])
+@pytest.mark.parametrize("change", ["dismissed", "older-text", "older-appended"])
 async def test_a_change_committed_after_the_read_refuses_under_the_lock(db_session, change):
     from services.sleep import supersede_apply
 
@@ -399,11 +433,18 @@ async def test_a_change_committed_after_the_read_refuses_under_the_lock(db_sessi
                 .where(Memory.id == newer_id)
                 .values(supersede_candidate=build_tombstone(candidate))
             )
-        else:
+        elif change == "older-text":
             # An edit of the text that does not move the version.
             await session.execute(
                 text("UPDATE memories SET summary = 'rewritten' WHERE id = :id"),
                 {"id": older_id},
+            )
+        else:
+            # Text appended past the judged head, without a version move: the
+            # fingerprints still match, the length does not.
+            await session.execute(
+                text("UPDATE memories SET content = content || :tail WHERE id = :id"),
+                {"id": older_id, "tail": " corrected" * (CONTENT_HEAD_CHARS // 10 + 1)},
             )
         return await real(session, rows)
 

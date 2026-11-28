@@ -170,8 +170,9 @@ async def locked_refusals(
     Returns:
         ``(reasons, locked)``: the reasons (empty when the write may go
         ahead) and the locked rows by id, which also carry ``tags``,
-        ``supersede_candidate``, ``summary`` and ``content_head`` (the first
-        ``CONTENT_HEAD_CHARS`` of the content).
+        ``supersede_candidate``, ``summary``, ``content_head`` (the first
+        ``CONTENT_HEAD_CHARS`` of the content) and ``content_chars`` (the
+        content's length in characters).
     """
     locked = (
         await db.execute(
@@ -193,6 +194,7 @@ async def locked_refusals(
                 Memory.supersede_candidate,
                 Memory.summary,
                 func.substr(Memory.content, 1, CONTENT_HEAD_CHARS).label("content_head"),
+                func.char_length(Memory.content).label("content_chars"),
             )
             .where(Memory.id.in_([obj.id for _label, obj in rows]))
             .with_for_update()

@@ -121,6 +121,8 @@ class TestLockedRefusals:
         assert CONTENT_HEAD_CHARS in compiled.params.values()
         for column in ("tags", "supersede_candidate", "summary", "version"):
             assert f"memories.{column}" in sql
+        # #3020: the content's whole length, for the judged-heads re-check.
+        assert "char_length(memories.content)" in sql
 
 
 class TestDedupWrapperKeepsItsRule:

@@ -22,6 +22,7 @@ from services.sleep.reporter import SleepBudget
 from services.sleep.supersede_apply import SupersedeApplyPhase
 from services.supersede_verify import (
     CONTENT_HEAD_CHARS,
+    SUMMARY_CHARS,
     pair_fingerprint,
     text_fingerprint,
     verification_record,
@@ -181,12 +182,14 @@ def _locked_as_read(pairs):
             supersede_candidate=newer.supersede_candidate,
             summary=newer.summary,
             content_head=newer.content_head,
+            content_chars=len(newer.content_head),
         )
         by_id[older.id] = SimpleNamespace(
             tags=list(older.tags),
             supersede_candidate=None,
             summary=older.summary,
             content_head=older.content_head,
+            content_chars=older.content_chars,
         )
 
     async def locked(db, rows):
@@ -668,6 +671,88 @@ class TestTextRecency:
         older.updated_at = newer.created_at + timedelta(hours=1)
         run = await _run(_db_for([(newer, older)], log_began=None), [(newer, older)])
         assert _reasons(run) == {"newer_target": 1}
+
+
+# ---------------------------------------------------------- judged heads
+
+
+class TestJudgedHeads:
+    """#3020: the verdict covers the heads the judge saw (the summary's first
+    ``SUMMARY_CHARS`` and the content's first ``CONTENT_HEAD_CHARS``). An older
+    memory longer than that is not linked: a correction past the head is
+    invisible to the fingerprint."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("summary_chars", "content_chars", "applied"),
+        [
+            (SUMMARY_CHARS, CONTENT_HEAD_CHARS, True),
+            (SUMMARY_CHARS + 1, 10, False),
+            (10, CONTENT_HEAD_CHARS + 1, False),
+        ],
+        ids=["at-the-heads", "summary-past", "content-past"],
+    )
+    async def test_an_older_memory_past_the_judged_heads_is_refused(
+        self, summary_chars, content_chars, applied
+    ) -> None:
+        newer, older = _pair(0)
+        older.summary = "s" * summary_chars
+        older.content_head = "c" * min(content_chars, CONTENT_HEAD_CHARS)
+        older.content_chars = content_chars
+        # The verdict is current: it was made on the heads the memory still has.
+        newer.supersede_candidate["verification"] = _record(
+            older, newer.summary, newer.content_head
+        )
+        run = await _run(_db_for([(newer, older)]), [(newer, older)])
+        if applied:
+            assert run.result.details["applied"] == 1
+        else:
+            assert _reasons(run) == {"older_past_judged_head": 1}
+            run.writer.assert_not_awaited()
+            assert run.phase.coverage_outcome.outcomes[newer.id] == SETTLED
+
+    @pytest.mark.asyncio
+    async def test_a_long_newer_memory_is_applied(self) -> None:
+        """Only the older memory's text is hidden on the verdict."""
+        newer, older = _pair(0)
+        newer.summary = "n" * (SUMMARY_CHARS + 50)
+        newer.supersede_candidate["verification"] = _record(
+            older, newer.summary, newer.content_head
+        )
+        run = await _run(_db_for([(newer, older)]), [(newer, older)])
+        assert run.result.details["applied"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_stale_verdict_wins_over_a_long_older_memory(self) -> None:
+        newer, older = _pair(0)
+        older.content_chars = CONTENT_HEAD_CHARS + 1
+        older.content_head = "edited older body"
+        run = await _run(_db_for([(newer, older)]), [(newer, older)])
+        assert _reasons(run) == {"verdict_stale": 1}
+
+    @pytest.mark.asyncio
+    async def test_the_length_is_read_with_the_target_and_under_the_lock(self) -> None:
+        pair = _pair(0)
+        db = _db_for([pair])
+        await _run(db, [pair])
+        target_sql = str(db.statements[1].compile(dialect=postgresql.dialect()))
+        assert "char_length(memories.content)" in target_sql
+
+    @pytest.mark.asyncio
+    async def test_content_appended_past_the_head_after_the_read_refuses(self) -> None:
+        newer, older = pair = _pair(0)
+        as_read = _locked_as_read([pair])
+
+        async def locked(db, rows):
+            reasons, state = await as_read(db, rows)
+            state[older.id].content_chars = CONTENT_HEAD_CHARS + 40
+            return reasons, state
+
+        db = _db_for([pair])
+        run = await _run(db, [pair], locked=locked)
+        assert _reasons(run) == {"changed_since_read": 1}
+        run.writer.assert_not_awaited()
+        assert db.savepoints == ["begin", "rollback"]
 
 
 # ------------------------------------------------------------- under the lock

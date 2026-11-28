@@ -270,10 +270,13 @@ async def verified_pair(
     older = memory(
         s,
         user_id=older_user,
-        summary=f"the office is on floor 3 ({tag})",
-        content=f"floor 3 since spring ({tag})",
-        created_at=older_created,
-        **(older_fields or {}),
+        **{
+            "summary": f"the office is on floor 3 ({tag})",
+            "content": f"floor 3 since spring ({tag})",
+            "created_at": older_created,
+            # A field given here wins over the defaults above.
+            **(older_fields or {}),
+        },
     )
     newer_summary = f"the office moved to floor 5 ({tag})"
     newer_content = f"floor 5 since autumn ({tag})"

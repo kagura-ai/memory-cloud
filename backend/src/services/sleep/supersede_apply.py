@@ -9,8 +9,10 @@ suggestion. It makes no model call. It runs only when the deployment switch
 write edges in the context.
 
 What it applies: a stored verdict ``supersedes`` at or above the read path's
-floor (``SUPERSEDE_VERIFY_MIN_CONFIDENCE``), still about both memories'
-current texts, between two of the run user's own memories that dedup may
+floor (``SUPERSEDE_VERIFY_MIN_CONFIDENCE``), still about the texts the judge
+saw (each memory's summary and the head of its content), on an older memory
+no longer than those heads (the verdict says nothing about text past them),
+between two of the run user's own memories that dedup may
 compare (``dedup_eligible``: live, not pinned, not a tool guardrail, not a
 time memory, not owned by the resource indexer), the older one carrying no
 exempt tag and its text not written after the newer one's (dedup's recency:
@@ -80,6 +82,7 @@ from services.sleep.pair_write import (
 from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter, phase_outcome
 from services.supersede_verify import (
     CONTENT_HEAD_CHARS,
+    SUMMARY_CHARS,
     VERDICT_SUPERSEDES,
     is_verified,
     min_confidence_from_env,
@@ -111,6 +114,7 @@ REASON_NEWER_TARGET = "newer_target"
 # dedup's keep-both reason for the same rule (#3019).
 REASON_AMBIGUOUS_RECENCY = "ambiguous_recency"
 REASON_VERDICT_STALE = "verdict_stale"
+REASON_OLDER_PAST_JUDGED_HEAD = "older_past_judged_head"
 REASON_ALREADY_LINKED = "already_linked"
 REASON_CONTRADICTS = "contradicts"
 REASON_DECLARED_EDGE_CONFLICT = "declared_edge_conflict"
@@ -158,6 +162,17 @@ def _target_id(candidate: Any, carrier_id: UUID) -> UUID | None:
     except (ValueError, TypeError):
         return None
     return None if target_id == carrier_id else target_id
+
+
+def _past_judged_head(row: Any) -> bool:
+    """The older memory's text goes beyond what the judge saw.
+
+    The judge is shown a memory's summary up to ``SUMMARY_CHARS`` and its
+    content up to ``CONTENT_HEAD_CHARS``, and the verdict's fingerprints cover
+    the same heads, so a correction appended past them leaves the verdict
+    "current". An older memory that long is not linked on that verdict.
+    """
+    return len(row.summary or "") > SUMMARY_CHARS or (row.content_chars or 0) > CONTENT_HEAD_CHARS
 
 
 def _edge_refusal(
@@ -377,6 +392,7 @@ class SupersedeApplyPhase:
                 Memory.version,
                 Memory.summary,
                 func.substr(Memory.content, 1, CONTENT_HEAD_CHARS).label("content_head"),
+                func.char_length(Memory.content).label("content_chars"),
                 Memory.tags,
             ).where(Memory.id.in_(ids), eligible, not_exempt_tagged_predicate(exempt))
         )
@@ -497,7 +513,7 @@ class SupersedeApplyPhase:
         user_id: str,
         floor: float,
     ) -> str | None:
-        """Rules 1-8 on the values read, in order; None when the pair may be written."""
+        """The rules on the values read, in order; None when the pair may be written."""
         if target_id is None:
             return REASON_MALFORMED
         if not is_verified(candidate, min_confidence=floor):
@@ -515,6 +531,8 @@ class SupersedeApplyPhase:
             new_content_head=carrier.content_head,
         ):
             return REASON_VERDICT_STALE
+        if _past_judged_head(target):
+            return REASON_OLDER_PAST_JUDGED_HEAD
         return _edge_refusal(edges, user_id=user_id, newer_id=carrier.id, older_id=target.id)
 
     async def _apply_pair(
@@ -543,11 +561,13 @@ class SupersedeApplyPhase:
                 raise _PairRefused(REASON_CHANGED_SINCE_READ)
             newer, older = locked[carrier.id], locked[target.id]
             # A dismissal, a re-detection, an accept or a re-judgement since
-            # the read; an exempt tag added since; or a text edited without a
-            # version move (the verdict is checked again on the locked texts).
+            # the read; an exempt tag added since; a text edited without a
+            # version move (the verdict is checked again on the locked texts),
+            # or the older memory grown past the judged heads.
             if (
                 newer.supersede_candidate != candidate
                 or carries_exempt_tag(older.tags, exempt)
+                or _past_judged_head(older)
                 or not verdict_current(
                     newer.supersede_candidate,
                     old_summary=older.summary,
