@@ -14,7 +14,9 @@ and the count (``count_never_delivered`` and its route) select the same rows:
   404, a bearer credential a 403, and the REST list without a context a 422.
 
 Seeds commit (the reference read writes on an isolated session); every test
-works in its own workspace, so rows left behind do not meet.
+works in its own workspace and deletes what it committed, by its own users and
+workspaces: later files in the same CI shard read whole tables and expect them
+empty.
 """
 
 from __future__ import annotations
@@ -27,12 +29,12 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
 from config.constants import NEVER_DELIVERED_AGE_DAYS
-from models.auth import Context, User, Workspace, WorkspaceMember
+from models.auth import AuditLog, Context, IdentityLink, User, Workspace, WorkspaceMember
 from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
 from repositories.memory import MemoryRepository
 from services import exempt_tags as exempt_module
@@ -45,6 +47,33 @@ from utils.datetime import utcnow
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 OLD = timedelta(days=NEVER_DELIVERED_AGE_DAYS + 220)
+
+# Every user and workspace the running test committed.
+_committed: dict[str, list] = {"users": [], "workspaces": []}
+
+
+@pytest.fixture(autouse=True)
+async def _delete_committed_rows(db_session: AsyncSession):
+    """Delete every row the test committed, by its own users and workspaces."""
+    for ids in _committed.values():
+        ids.clear()
+    yield
+    users, workspaces = _committed["users"], _committed["workspaces"]
+    db = db_session
+    await db.rollback()
+    # The link writes an audit row per account.
+    await db.execute(delete(AuditLog).where(AuditLog.user_id.in_(users)))
+    await db.execute(delete(IdentityLink).where(IdentityLink.user_id.in_(users)))
+    await db.execute(delete(NeuralMemoryEdge).where(NeuralMemoryEdge.workspace_id.in_(workspaces)))
+    await db.execute(delete(Memory).where(Memory.workspace_id.in_(workspaces)))
+    await db.execute(delete(Context).where(Context.workspace_id.in_(workspaces)))
+    await db.execute(delete(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(workspaces)))
+    await db.execute(update(User).where(User.user_id.in_(users)).values(current_workspace_id=None))
+    await db.execute(delete(Workspace).where(Workspace.id.in_(workspaces)))
+    await db.execute(delete(User).where(User.user_id.in_(users)))
+    await db.commit()
+    for ids in _committed.values():
+        ids.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +97,7 @@ async def _user(db: AsyncSession, prefix: str) -> str:
         )
     )
     await db.flush()
+    _committed["users"].append(uid)
     return uid
 
 
@@ -75,6 +105,7 @@ async def _workspace(db: AsyncSession, owner: str, *members: str) -> UUID:
     ws = Workspace(id=uuid4(), name=f"nd-{uuid4().hex[:8]}", owner_user_id=owner, plan_name="pro")
     db.add(ws)
     await db.flush()
+    _committed["workspaces"].append(ws.id)
     db.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
     for m in members:
         db.add(WorkspaceMember(workspace_id=ws.id, user_id=m, role=WorkspaceRole.ADMIN))

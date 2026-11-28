@@ -178,6 +178,10 @@
       "workspaceChanged": "The workspace or private context changed. This practice has ended. Continue from the contexts list.",
       "conflict": "The server declined this practice operation. This practice has ended; continue with the read-only guide.",
       "saveFailed": "Couldn't save the memory. Please try again.",
+      "memoryLimit": "This workspace has reached its memory limit ({current, number} of {limit, number}). Delete memories you no longer need; each context's Overview tab shows the ones that were never delivered.",
+      "memoryLimitNoCounts": "This workspace has reached its memory limit. Delete memories you no longer need; each context's Overview tab shows the ones that were never delivered.",
+      "memoryLimitUpgrade": "You can also upgrade the plan.",
+      "memoryLimitAdmin": "You can also ask the administrator to raise the limit.",
       "recallFailed": "Couldn't run recall. Please try again."
     }
   },
@@ -4394,7 +4398,7 @@
         "resource_entity_missing": "Last run was skipped: the resource has no backing entity record.",
         "memories_per_day_exceeded": "Last run was deferred: today's memory-creation limit is reached. Indexing resumes after the daily reset (UTC midnight).",
         "plan_suspended": "Ingestion is paused: the workspace's current plan does not include it. Pending events are kept and resume once you re-subscribe.",
-        "memory_limit_exceeded": "Ingestion is paused: the workspace has reached its memory limit. Pending events are kept; delete memories or upgrade to resume."
+        "memory_limit_exceeded": "Ingestion is paused: the workspace has reached its memory limit. Pending events are kept. Review the never-delivered memories on each context's Overview tab, then delete memories or upgrade to resume."
       },
       "noRecentEvents": "No ingest events in the log yet.",
       "recentEvents": "Recent ingest events",

@@ -474,6 +474,24 @@ GUIDE_TOPICS: dict[str, str] = {
         "embedding call; use "
         "it for the memory you suspect already exists, not for every write."
     ),
+    "remember.limits": (
+        "Two plan limits refuse a new memory with error quota_exceeded. quota_type "
+        "'memories' is the workspace's total of live memories (every member's and the "
+        "rows indexed from connected sources count; deleting frees it). quota_type "
+        "'memories_per_day' counts creations per UTC day and frees itself at resets_at "
+        "(deleting does not help). Both carry gate 'quota', current, limit, current_plan "
+        "and required_plan when a tier lifts the limit; get_usage, outside the core "
+        'profile (describe_tools(["get_usage"]) has its schema), shows the numbers. '
+        "The total limit adds remedies ('cleanup', then 'upgrade' or 'admin'), help and "
+        "never_delivered_count: how many of YOUR memories in the target context are over "
+        f"{NEVER_DELIVERED_AGE_DAYS} days old and were never delivered (the total of "
+        "list(context_id, filters={'never_delivered': true}, limit=1)); absent when it "
+        "could not be read. remember_batch puts these on its envelope, once. Review that "
+        "list with the user and delete only with their approval: forget(memory_ids=[...]) "
+        "takes up to 50; delete_context removes a context the user no longer needs. Or "
+        "upgrade the plan from the web UI (Workspace settings → Plan); on a deployment "
+        "without billing ('admin') its administrator raises the limit."
+    ),
     # ----------------------------------------------------------- remember_batch
     "remember_batch.usage": (
         "remember_batch(context_id, items, atomic=false, tags_normalize=false, "
@@ -964,11 +982,13 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
         "ids",
         "remember.tags_normalize",
         "remember.dedupe",
+        "remember.limits",
     ),
     "remember_batch": (
         "remember_batch.usage",
         "remember.tags_normalize",
         "remember.dedupe",
+        "remember.limits",
         "security",
     ),
     "recall": (
@@ -980,7 +1000,13 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
         "recall.selector",
         "ids",
     ),
-    "update_memory": ("update_memory.modes", "update_memory.returns", "security", "ids"),
+    "update_memory": (
+        "update_memory.modes",
+        "update_memory.returns",
+        "remember.limits",
+        "security",
+        "ids",
+    ),
     "reference": ("reference.returns", "reference.paging", "reference.versions", "ids"),
     "forget": ("forget.modes", "ids"),
     "explore": ("explore.usage", "ids"),

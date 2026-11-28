@@ -228,18 +228,21 @@ class TestRememberQuotaExceededEnvelope:
         assert log_usage.await_args.args[4] == 429
 
     @pytest.mark.asyncio
-    async def test_total_count_refusal_uses_the_same_envelope_without_null_keys(self):
-        """``check_memory_quota`` raises with no details — same envelope, and
+    async def test_an_untyped_refusal_uses_the_same_envelope_without_null_keys(self):
+        """An untyped ``QuotaExceededError`` (``check_memory_quota``'s
+        workspace-not-found anomaly; the total cap is typed since #3022, see
+        ``test_memory_cap_refusal_envelopes.py``) — same envelope, and
         ``quota_type: null`` must not leak into the payload."""
         from utils.exceptions import QuotaExceededError
 
         payload, _db, log_usage = await self._remember_raising(
-            QuotaExceededError("Memory quota exceeded. Current: 1000, Limit: 1000")
+            QuotaExceededError("Workspace 00000000-0000-0000-0000-000000000000 not found")
         )
 
         assert payload["error"] == "quota_exceeded"
         assert "quota_type" not in payload
-        assert payload["message"].startswith("Memory quota exceeded")
+        assert "never_delivered_count" not in payload
+        assert payload["message"].startswith("Workspace ")
         assert log_usage.await_args.args[4] == 429
 
 

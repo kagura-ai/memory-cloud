@@ -44,6 +44,7 @@ from mcp_server.tools._helpers import (
 )
 from mcp_server.tools._profiles import is_google_view, not_listed_reason
 from mcp_server.tools._reference_adoption import mark_first_read, unmark_read
+from services.memory_cap_refusal import is_memory_cap, memory_cap_fields, refusal_message
 from services.memory_service import (
     DEDUPE_MODES,
     DEDUPE_SUGGEST,
@@ -52,7 +53,7 @@ from services.memory_service import (
     DuplicateCandidateError,
 )
 from services.permission_service import VIEWER_READ_ONLY_REASON
-from services.plan_headroom import MEMORIES, drop_quota_reading
+from services.plan_headroom import MEMORIES, drop_quota_reading, memory_cap_help
 from utils.datetime import to_utc_iso, utcnow
 from utils.event_dates import event_fields, event_write_fields
 from utils.exceptions import (
@@ -289,6 +290,30 @@ def parse_write_options(args: dict[str, Any]) -> tuple[bool, str]:
     return tags_normalize, dedupe
 
 
+async def memory_cap_response(
+    db: Any, exc: QuotaExceededError, *, user_id: str
+) -> list[TextContent]:
+    """The ``quota_exceeded`` envelope of the total memory cap (#3022).
+
+    The refusal's details (the gate block and ``remedies``), the caller's
+    ``never_delivered_count`` in the target context when it could be read,
+    the message with the count sentence when the count is above 0, and a
+    ``help`` that says how to review, delete or upgrade. Call after the
+    refused transaction was rolled back.
+    """
+    fields = await memory_cap_fields(db, exc, user_id=user_id)
+    count = fields.get("never_delivered_count")
+    return _error_response(
+        "quota_exceeded",
+        refusal_message(exc.message, count),
+        **{
+            **{k: v for k, v in exc.details.items() if v is not None},
+            **fields,
+            "help": memory_cap_help(count, fields.get("remedies", [])),
+        },
+    )
+
+
 async def handle_remember(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -447,6 +472,8 @@ async def handle_remember(
             await _log_tool_usage(
                 db, user_id, "remember", start_time, 429, args.get("context_id"), workspace_id
             )
+            if is_memory_cap(e):
+                return await memory_cap_response(db, e, user_id=user_id)
             return _error_response(
                 "quota_exceeded",
                 e.message,
@@ -720,6 +747,26 @@ async def handle_update_memory(
                 # the final edge owner check's uniform refusal, not a guardrail hint.
                 return _error_response("permission_denied", e.message)
             return _guardrail_author_denied("change a tool guardrail")
+        except QuotaExceededError as e:
+            # The create half of an external_id upsert is a remember: a quota
+            # refusal is a 429 and the 1 MB size guard a 413 (both used to be
+            # logged as a 500 on their way to the dispatcher). The total cap
+            # answers like remember's (#3022); the others keep the envelope the
+            # dispatcher gave them.
+            await db.rollback()
+            status_code = 413 if isinstance(e, ContentSizeExceededError) else 429
+            await _log_tool_usage(
+                db,
+                user_id,
+                "update_memory",
+                start_time,
+                status_code,
+                args.get("context_id"),
+                workspace_id,
+            )
+            if is_memory_cap(e):
+                return await memory_cap_response(db, e, user_id=user_id)
+            return _tool_exception_response("update_memory", e)
         except Exception:
             await db.rollback()
             await _log_tool_usage(

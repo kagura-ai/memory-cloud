@@ -51,6 +51,7 @@ from mcp_server.tools.memory import (
     parse_write_options,
     remember_request_from_args,
 )
+from services.memory_cap_refusal import is_memory_cap, memory_cap_fields
 from services.memory_service import (
     DEDUPE_MODES,
     MAX_BATCH_ITEMS,
@@ -60,7 +61,7 @@ from services.memory_service import (
     DuplicateCandidateError,
 )
 from services.permission_service import VIEWER_READ_ONLY_REASON
-from services.plan_headroom import MEMORIES, drop_quota_reading
+from services.plan_headroom import MEMORIES, drop_quota_reading, memory_cap_help
 from utils.event_dates import event_write_fields
 from utils.exceptions import (
     AuthorizationError,
@@ -278,6 +279,21 @@ def item_error(exc: BaseException) -> dict[str, Any]:
     return {"error": "internal_error", "message": "memory write failed"}
 
 
+async def _memory_cap_envelope_fields(
+    db: Any, cap: QuotaExceededError | None, *, user_id: str
+) -> dict[str, Any]:
+    """#3022: ``remedies``, ``never_delivered_count`` and ``help`` for a batch
+    in which the total memory cap refused an item; read once per call, never
+    per item (the items keep their ``{error, message}``)."""
+    if cap is None:
+        return {}
+    fields = await memory_cap_fields(db, cap, user_id=user_id)
+    return {
+        **fields,
+        "help": memory_cap_help(fields.get("never_delivered_count"), fields.get("remedies", [])),
+    }
+
+
 def _success_item(
     result: Any, *, verbose: bool, fitted: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -446,6 +462,8 @@ async def handle_remember_batch(
             }
             results: list[dict[str, Any]] = []
             note: dict[str, Any] = {}
+            # #3022: the first item the total memory cap refused, if any.
+            cap: QuotaExceededError | None = None
             if atomic:
                 # Every item is valid here: an invalid one refused the batch above.
                 valid = [p for p in parsed if isinstance(p, ParsedItem)]
@@ -507,6 +525,8 @@ async def handle_remember_batch(
                     )
                 except BatchItemError as e:
                     rolled_back = True
+                    if isinstance(e.cause, QuotaExceededError) and is_memory_cap(e.cause):
+                        cap = e.cause
                     results = [
                         _finish(i, item_error(e.cause))
                         if i == e.index
@@ -546,6 +566,12 @@ async def handle_remember_batch(
                         rolled_back = True
                         # #2615: its quota check recorded a row that was rolled back.
                         drop_quota_reading(MEMORIES)
+                        if (
+                            cap is None
+                            and isinstance(exc, QuotaExceededError)
+                            and is_memory_cap(exc)
+                        ):
+                            cap = exc
                         results.append(_finish(i, item_error(exc)))
                     else:
                         results.append(
@@ -571,7 +597,10 @@ async def handle_remember_batch(
                 await db.commit()
                 # #2615: one notice set per call, from the last item's counts.
                 headroom = await _plan_headroom_field(db, context, workspace_id)
-            return _envelope(results, context_fields, **note, **headroom, **lint_field)
+            cap_fields = await _memory_cap_envelope_fields(db, cap, user_id=user_id)
+            return _envelope(
+                results, context_fields, **note, **headroom, **lint_field, **cap_fields
+            )
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
