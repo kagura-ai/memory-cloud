@@ -11,9 +11,19 @@ workspace), primary key ``(endpoint_id, day, visitor_key)``, the key-shape
 CHECK ``pmdv_visitor_key_shape`` and the purge index ``ix_pmdv_day``. No
 foreign key.
 
+Then, for the owner's day counts: the extended statistics
+``pmue_day_counts_stats`` on ``((occurred_at)::date), tool, outcome`` give the
+planner the real number of (day, tool, outcome) groups, so it hashes them
+instead of sorting every row of the window; the table's
+``autovacuum_vacuum_insert_scale_factor`` becomes 0.01 (the default 0.2 waits
+for a fifth of the table in new rows), so the pages of recent rows are
+vacuumed and marked all-visible soon after they fill; and one ``ANALYZE``
+fills the new statistics (a bounded sample, whatever the table's size).
+
 Last, builds ``ix_pmue_endpoint_counts`` ``CONCURRENTLY``: the owner's day
-counts read every column they name from it. An index left INVALID by an
-interrupted build is dropped and built again on the next run.
+counts read every column they name from it, without the table once its pages
+are all-visible. An index left INVALID by an interrupted build is dropped and
+built again on the next run.
 
 No backfill: every existing row reads NULL (metadata-only on PostgreSQL).
 
@@ -21,9 +31,11 @@ Locks: the two ``ADD COLUMN`` (nullable, no default: catalog only) and the
 ``DROP / ADD CONSTRAINT ... NOT VALID`` take a brief ``ACCESS EXCLUSIVE`` lock
 on ``public_mcp_usage_events`` under the migration ``lock_timeout``; the
 first commit point releases it. Each VALIDATE scan then holds ``SHARE UPDATE
-EXCLUSIVE`` (inserts continue). The concurrent index build holds ``SHARE
-UPDATE EXCLUSIVE`` and waits for older transactions without blocking reads
-or inserts; it runs outside the migration ``lock_timeout`` on purpose, and
+EXCLUSIVE`` (inserts continue), as do ``CREATE STATISTICS``, the storage
+parameter and the ``ANALYZE`` (a brief hold under the migration
+``lock_timeout``; reads and inserts continue). The concurrent index build
+holds ``SHARE UPDATE EXCLUSIVE`` and waits for older transactions without
+blocking reads or inserts; it runs outside the migration ``lock_timeout`` on purpose, and
 its time grows with the events table. The new table has no foreign key. No
 lock is taken on ``users``, ``workspaces``, ``contexts`` or any other table.
 
@@ -36,8 +48,8 @@ Re-runnable (``IF NOT EXISTS`` / ``DROP CONSTRAINT IF EXISTS``).
 Downgrade drops the index concurrently, deletes the REST rows (the previous
 schema cannot tell them from public MCP calls) in batches of 5,000 by id, each
 batch committed on its own (a primary-key range walk, linear in the table;
-inserts continue), then drops the visitor table, both CHECKs and both
-columns.
+inserts continue), then drops the visitor table, the statistics, the storage
+parameter, both CHECKs and both columns.
 
 Revision ID: f67_3035_public_visitors
 Revises: f66_3019_sleep_coverage
@@ -66,6 +78,13 @@ _CREATE_COUNTS_INDEX = (
     "WHERE endpoint_id IS NOT NULL"
 )
 _DROP_COUNTS_INDEX = "DROP INDEX CONCURRENTLY IF EXISTS ix_pmue_endpoint_counts"
+_CREATE_DAY_COUNTS_STATS = (
+    "CREATE STATISTICS IF NOT EXISTS pmue_day_counts_stats "
+    "ON ((occurred_at)::date), tool, outcome FROM public_mcp_usage_events"
+)
+_SET_INSERT_VACUUM = (
+    "ALTER TABLE public_mcp_usage_events SET (autovacuum_vacuum_insert_scale_factor = 0.01)"
+)
 _DELETE_REST_BATCH = (
     "DELETE FROM public_mcp_usage_events WHERE id IN ("
     "SELECT id FROM public_mcp_usage_events WHERE route = 'rest' AND id > :after "
@@ -101,6 +120,10 @@ def upgrade() -> None:
     )
     op.create_index("ix_pmdv_day", _VISITORS, ["day"], if_not_exists=True)
 
+    op.execute(_CREATE_DAY_COUNTS_STATS)
+    op.execute(_SET_INSERT_VACUUM)
+    op.execute("ANALYZE public_mcp_usage_events")
+
     invalid = index_is_invalid(_COUNTS_INDEX)
     with op.get_context().autocommit_block():
         if invalid:
@@ -134,6 +157,8 @@ def downgrade() -> None:
                 after = max(deleted)
     op.drop_index("ix_pmdv_day", table_name=_VISITORS, if_exists=True)
     op.drop_table(_VISITORS, if_exists=True)
+    op.execute("DROP STATISTICS IF EXISTS pmue_day_counts_stats")
+    op.execute("ALTER TABLE public_mcp_usage_events RESET (autovacuum_vacuum_insert_scale_factor)")
     op.execute("ALTER TABLE public_mcp_usage_events DROP CONSTRAINT IF EXISTS valid_pmue_route")
     op.execute("ALTER TABLE public_mcp_usage_events DROP CONSTRAINT IF EXISTS valid_pmue_caller")
     op.drop_column(_TABLE, "route", if_exists=True)

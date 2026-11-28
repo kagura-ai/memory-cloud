@@ -5,7 +5,9 @@
    ``public_mcp_daily_visitors`` (primary key ``endpoint_id, day,
    visitor_key``, the key-shape CHECK, ``ix_pmdv_day``); and builds
    ``ix_pmue_endpoint_counts`` valid, with its key and INCLUDE columns and
-   its predicate. It takes no lock on another table: it runs while
+   its predicate; adds the statistics ``pmue_day_counts_stats`` on (day,
+   tool, outcome) and sets ``autovacuum_vacuum_insert_scale_factor`` to 0.01
+   on the events table. It takes no lock on another table: it runs while
    ``users``, ``workspaces`` and ``contexts`` are held in ``ACCESS
    EXCLUSIVE`` by a transaction that ran only ``LOCK TABLE``.
 2. An INSERT that names neither column (the previous release) stores NULL;
@@ -13,7 +15,8 @@
    refused.
 3. A rerun after an interrupted upgrade (the index left INVALID) rebuilds
    the index; downgrade deletes the REST rows over more than one batch,
-   keeps the others, and drops the rest; the round trip is repeatable.
+   keeps the others, and drops the rest (the statistics and the storage
+   parameter included); the round trip is repeatable.
 
 Not executed in the local unit run — needs the DB container.
 """
@@ -107,6 +110,22 @@ def _visitor_table(conn: Connection) -> tuple[list[str], list[str]] | None:
     return list(pk), sorted(indexes)
 
 
+def _day_counts_stats(conn: Connection) -> str | None:
+    return conn.scalar(
+        text(
+            "SELECT pg_get_statisticsobjdef_columns(oid) FROM pg_statistic_ext "
+            "WHERE stxname = 'pmue_day_counts_stats'"
+        )
+    )
+
+
+def _reloptions(conn: Connection) -> list[str]:
+    options = conn.scalar(
+        text("SELECT reloptions FROM pg_class WHERE oid = 'public_mcp_usage_events'::regclass")
+    )
+    return list(options or [])
+
+
 def _insert(conn: Connection, ids: dict[str, uuid.UUID]) -> int:
     return int(conn.execute(text(_TOOL_CALL), ids).scalar_one())
 
@@ -121,6 +140,8 @@ def test_f67_round_trip_without_locking_other_tables() -> None:
         with engine.begin() as conn:
             assert _columns(conn) == {}
             assert _visitor_table(conn) is None
+            assert _day_counts_stats(conn) is None
+            assert _reloptions(conn) == []
             existing = _insert(conn, ids)
 
         with holder.connect() as lock_conn:
@@ -170,6 +191,9 @@ def test_f67_round_trip_without_locking_other_tables() -> None:
                 2,
                 "(endpoint_id IS NOT NULL)",
             )
+            # PostgreSQL lists the columns first, then the expression.
+            assert _day_counts_stats(conn) == "tool, outcome, (occurred_at::date)"
+            assert _reloptions(conn) == ["autovacuum_vacuum_insert_scale_factor=0.01"]
             row = conn.execute(
                 text("SELECT caller, route FROM public_mcp_usage_events WHERE id = :id"),
                 {"id": existing},
@@ -215,6 +239,8 @@ def test_f67_round_trip_without_locking_other_tables() -> None:
         with engine.begin() as conn:
             index = _index(conn)
             assert index is not None and index[0] is True
+            assert _day_counts_stats(conn) is not None
+            assert _reloptions(conn) == ["autovacuum_vacuum_insert_scale_factor=0.01"]
 
             # More REST rows than one downgrade batch, and rows to keep.
             conn.execute(
@@ -247,6 +273,8 @@ def test_f67_round_trip_without_locking_other_tables() -> None:
             assert _checks(conn) == {}
             assert _visitor_table(conn) is None
             assert _index(conn) is None
+            assert _day_counts_stats(conn) is None
+            assert _reloptions(conn) == []
             kept = set(
                 conn.execute(
                     text("SELECT id FROM public_mcp_usage_events WHERE endpoint_id = :e"),

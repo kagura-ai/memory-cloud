@@ -211,6 +211,10 @@ class PublicMcpUsageEvent(Base):
             "occurred_at",
             postgresql_where=text("endpoint_id IS NOT NULL"),
         ),
+        # The owner's day counts read every column they name from this index.
+        # f67 also adds the statistics ``pmue_day_counts_stats`` (day, tool,
+        # outcome) and a lower ``autovacuum_vacuum_insert_scale_factor`` on the
+        # table; neither is declared here (create_all does not build them).
         Index(
             "ix_pmue_endpoint_counts",
             "endpoint_id",
