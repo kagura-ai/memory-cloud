@@ -376,9 +376,13 @@ class PublicMcpUsageWriter:
                     logger.info("public_mcp_doc_keys_skipped", count=len(doc_rows))
             # #3053: the calls inserted above, added to their days' counts
             # in the same transaction (a retry that inserts nothing adds nothing).
-            days = {row["occurred_at"].date() for row in rows if row["kind"] == "tool_call"}
-            if days:
-                await add_batch_to_day_counts(session, days)
+            calls = [row for row in rows if row["kind"] == "tool_call"]
+            if calls:
+                await add_batch_to_day_counts(
+                    session,
+                    {row["occurred_at"].date() for row in calls},
+                    [row["event_id"] for row in calls],
+                )
             await session.commit()
 
     # ------------------------------------------------------------------

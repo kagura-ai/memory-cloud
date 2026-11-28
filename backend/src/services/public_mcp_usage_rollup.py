@@ -6,10 +6,13 @@ the statistics read whole past days from a few rows instead of from every
 event. ``public_mcp_usage_closed_days`` says which days are complete there.
 
 The usage writer adds a batch's calls in the batch's own transaction
-(``add_batch_to_day_counts``), after the events: it counts the rows that
-transaction inserted (the ``txid`` column), not the rows it sent, so a batch
-sent again after a commit that landed adds nothing, and a batch that fails
-adds nothing either. A call counts for the UTC day it started on, whenever
+(``add_batch_to_day_counts``), after the events: it counts the rows of the
+batch (their event ids) that this transaction inserted (the ``txid``
+column), not the rows it sent, so a batch sent again after a commit that
+landed adds nothing, and a batch that fails adds nothing either. The event
+ids bound the count because a stored ``txid`` can repeat: a database
+restored from a logical dump keeps its rows' values while its transaction
+counter starts again. A call counts for the UTC day it started on, whenever
 it is written.
 
 A day is trusted only once it is CLOSED: counted again from the events in
@@ -36,6 +39,7 @@ reaches such a day.
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta
 from datetime import time as day_time
@@ -61,15 +65,16 @@ _DAY_LOCK_PREFIX = "public_mcp_usage_day:"
 _LOCK_SHARED = text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))")
 _LOCK_EXCLUSIVE = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
 
-# The calls this transaction inserted, added to their days. Sorted, so two
-# processes take the rows in one order.
+# The batch's calls this transaction inserted, added to their days. Sorted,
+# so two processes take the rows in one order.
 _ADD_BATCH = text(
     "INSERT INTO public_mcp_usage_day_counts AS c "
     "(endpoint_id, day, workspace_id, tool, outcome, route, caller, calls) "
     "SELECT endpoint_id, (occurred_at)::date, workspace_id, tool, outcome, "
     "COALESCE(route, :default_route), COALESCE(caller, :default_caller), count(*) "
     "FROM public_mcp_usage_events "
-    "WHERE txid = (SELECT " + PMU_TXID_DEFAULT + ") AND kind = 'tool_call' "
+    "WHERE event_id = ANY(CAST(:event_ids AS uuid[])) "
+    "AND txid = (SELECT " + PMU_TXID_DEFAULT + ") AND kind = 'tool_call' "
     "GROUP BY 1, 2, 3, 4, 5, 6, 7 "
     "ORDER BY 1, 2, 3, 4, 5, 6, 7 "
     "ON CONFLICT (endpoint_id, day, workspace_id, tool, outcome, route, caller) "
@@ -118,16 +123,23 @@ def last_closable_day(now: datetime) -> date:
     return (now - DAY_CLOSE_GRACE).date() - timedelta(days=1)
 
 
-async def add_batch_to_day_counts(session: AsyncSession, days: Iterable[date]) -> None:
-    """Add the calls this transaction inserted to their days' counts.
+async def add_batch_to_day_counts(
+    session: AsyncSession, days: Iterable[date], event_ids: Iterable[uuid.UUID]
+) -> None:
+    """Add the batch's calls this transaction inserted to their days' counts.
 
-    Call it after the batch's INSERT, in the same transaction, with every
-    UTC day of the batch's calls; it takes each day's lock shared, oldest
-    first, until the transaction ends.
+    Call it after the batch's INSERT, in the same transaction; it takes each
+    day's lock shared, oldest first, until the transaction ends.
+
+    Args:
+        session: The batch's session, its INSERT done and not committed.
+        days: Every UTC day of the batch's calls.
+        event_ids: The event ids of the batch's calls; a row with one of
+            them that an earlier transaction inserted is not counted.
     """
     for day in sorted(set(days)):
         await session.execute(_LOCK_SHARED, {"key": day_lock_key(day)})
-    await session.execute(_ADD_BATCH, _DEFAULTS)
+    await session.execute(_ADD_BATCH, {**_DEFAULTS, "event_ids": list(event_ids)})
 
 
 async def count_day(db: AsyncSession, day: date, *, now: datetime) -> bool:

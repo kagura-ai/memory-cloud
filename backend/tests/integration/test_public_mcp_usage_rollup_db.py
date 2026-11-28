@@ -35,6 +35,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from models.public_mcp_usage import PMU_TXID_DEFAULT
 from services import public_mcp_usage_rollup as rollup
 from services.public_mcp_usage_events import UsageEventInput, build_usage_event_row
 from services.public_mcp_usage_stats import LiveEndpoint, read_usage_stats
@@ -182,37 +183,44 @@ async def _write(session_factory, calls: list[UsageEventInput], **overrides: Any
     assert writer.health().dropped_since_start == 0
 
 
+_EVENT_COLUMNS = (
+    "event_id",
+    "occurred_at",
+    "kind",
+    "endpoint_id",
+    "workspace_id",
+    "context_id",
+    "resource_pk",
+    "resource_id",
+    "tool",
+    "outcome",
+    "era",
+    "duration_ms",
+)
+_INSERT_EVENT = text(
+    f"INSERT INTO public_mcp_usage_events ({', '.join(_EVENT_COLUMNS)}) "
+    f"VALUES ({', '.join(':' + c for c in _EVENT_COLUMNS)})"
+)
+# A row as a restored database holds it: its ``txid`` stored, not this transaction's.
+_INSERT_WITH_TXID = text(
+    f"INSERT INTO public_mcp_usage_events (txid, {', '.join(_EVENT_COLUMNS)}) "
+    f"VALUES (:txid, {', '.join(':' + c for c in _EVENT_COLUMNS)})"
+)
+# Transaction ids the test stores ahead of the counter: more than the
+# transactions the database starts before the writer's batch.
+_TXIDS_AHEAD = 20
+
+
+def _event_values(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: row[k] for k in _EVENT_COLUMNS}
+
+
 async def _insert_without_the_writer(env: Env, calls: list[UsageEventInput]) -> None:
     """The previous release's INSERT: events only, no day counts."""
     rows = [build_usage_event_row(c, key=KEY, session_details_enabled=False).row for c in calls]
     async with env.factory() as s:
         for row in rows:
-            await s.execute(
-                text(
-                    "INSERT INTO public_mcp_usage_events (event_id, occurred_at, kind, "
-                    "endpoint_id, workspace_id, context_id, resource_pk, resource_id, tool, "
-                    "outcome, era, duration_ms) VALUES (:event_id, :occurred_at, :kind, "
-                    ":endpoint_id, :workspace_id, :context_id, :resource_pk, :resource_id, "
-                    ":tool, :outcome, :era, :duration_ms)"
-                ),
-                {
-                    k: row[k]
-                    for k in (
-                        "event_id",
-                        "occurred_at",
-                        "kind",
-                        "endpoint_id",
-                        "workspace_id",
-                        "context_id",
-                        "resource_pk",
-                        "resource_id",
-                        "tool",
-                        "outcome",
-                        "era",
-                        "duration_ms",
-                    )
-                },
-            )
+            await s.execute(_INSERT_EVENT, _event_values(row))
         await s.commit()
 
 
@@ -277,6 +285,40 @@ async def test_a_retried_batch_is_counted_once(env: Env) -> None:
     counts = await env.counts()
     assert counts == await env.events()
     assert sum(counts.values()) == 5
+
+
+async def test_a_batch_counts_only_its_own_rows_when_a_stored_txid_repeats(env: Env) -> None:
+    """A database restored from a logical dump keeps the stored ``txid`` values
+    while its transaction counter starts again, so a later batch can run under
+    a transaction id that rows already carry. The batch counts its own rows."""
+    stored, endpoint = env.endpoint(), env.endpoint()
+    at = _midnight(env.back(62)) + timedelta(hours=9)
+    rows = [
+        build_usage_event_row(_call(env, stored, at), key=KEY, session_details_enabled=False).row
+        for _ in range(_TXIDS_AHEAD)
+    ]
+    async with env.factory() as s:
+        current = int((await s.execute(text("SELECT " + PMU_TXID_DEFAULT))).scalar_one())
+        ahead = list(range(current + 1, current + 1 + _TXIDS_AHEAD))
+        for row, txid in zip(rows, ahead, strict=True):
+            await s.execute(_INSERT_WITH_TXID, {**_event_values(row), "txid": txid})
+        await s.commit()
+
+    await _write(env.factory, _mix(env, endpoint, at + timedelta(hours=1)))
+
+    async with env.factory() as s:
+        written = set(
+            (
+                await s.execute(
+                    text("SELECT txid FROM public_mcp_usage_events WHERE endpoint_id = :e"),
+                    {"e": endpoint},
+                )
+            ).scalars()
+        )
+    assert len(written) == 1 and written <= set(ahead), "the batch ran under a stored txid"
+    counts = await env.counts()
+    assert {key[0] for key in counts} == {endpoint}
+    assert counts == {k: v for k, v in (await env.events()).items() if k[0] == endpoint}
 
 
 async def test_closing_counts_events_the_writer_did_not(env: Env) -> None:

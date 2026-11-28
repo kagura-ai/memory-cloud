@@ -680,8 +680,9 @@ async def test_doc_key_rows_are_sorted():
 
 async def test_day_counts_follow_the_events_in_their_transaction():
     """After the events and doc keys: one shared lock per UTC day of the
-    batch's calls, oldest first, then the counts of the rows this transaction
-    inserted; one commit for all of it."""
+    batch's calls, oldest first, then the counts of the batch's calls (their
+    event ids, not the gap row's) this transaction inserted; one commit for
+    all of it."""
     from datetime import time as day_time
 
     from models.public_mcp_usage import PMU_CALLER_ANONYMOUS, PMU_ROUTE_MCP
@@ -691,13 +692,17 @@ async def test_day_counts_follow_the_events_in_their_transaction():
     writer = _writer(db)
     today = datetime.now(UTC).date()
     midnight = datetime.combine(today, day_time.min, tzinfo=UTC)
+    writer._record_drop(
+        "queue_full", 1, midnight.replace(tzinfo=None), midnight.replace(tzinfo=None)
+    )
     for at in (midnight, midnight - timedelta(microseconds=1), midnight):
         writer.offer(_event(started_at=at))
     writer.start()
-    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 3)
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 4)
     await writer.stop(timeout=1)
 
     [batch] = db.committed
+    assert [r["kind"] for r in _events(batch)] == ["gap"] + ["tool_call"] * 3
     [log] = db.logs
     assert log[:2] == ["public_mcp_usage_events", "public_mcp_doc_keys"]
     locks, counts = batch["sql"][:-1], batch["sql"][-1]
@@ -711,6 +716,7 @@ async def test_day_counts_follow_the_events_in_their_transaction():
     assert counts["params"] == {
         "default_route": PMU_ROUTE_MCP,
         "default_caller": PMU_CALLER_ANONYMOUS,
+        "event_ids": [r["event_id"] for r in _events(batch)[1:]],
     }
     assert log[2:] == [str(rollup._LOCK_SHARED)] * 2 + [str(rollup._ADD_BATCH)]
 
@@ -727,12 +733,15 @@ async def test_a_batch_of_gap_rows_takes_no_day_lock():
 
 
 async def test_the_counts_take_the_rows_of_their_own_transaction():
-    """Counted: what this transaction inserted (a row a retry sent again and
-    the conflict skipped is not), with the read's defaults bound."""
+    """Counted: the batch's rows (its event ids: a stored ``txid`` repeats
+    after a restore from a logical dump) that this transaction inserted (a
+    row a retry sent again and the conflict skipped is not), with the read's
+    defaults bound."""
     from models.public_mcp_usage import PMU_TXID_DEFAULT
     from services import public_mcp_usage_rollup as rollup
 
     sql = str(rollup._ADD_BATCH)
+    assert "event_id = ANY(CAST(:event_ids AS uuid[]))" in sql
     assert f"txid = (SELECT {PMU_TXID_DEFAULT})" in sql
     assert "kind = 'tool_call'" in sql
     assert "COALESCE(route, :default_route)" in sql
