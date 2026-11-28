@@ -294,6 +294,28 @@ class TestRerankDocument:
         )
         assert doc == "title: Q3 plan\nchunk body"
 
+    def test_a_long_resource_body_leaves_room_for_the_matched_chunk(self):
+        content = "title: Trail shoe\ndescription: " + "d" * 2000
+        doc = rerank_document(
+            {
+                "payload": {"content": content, "metadata": {"title": "Trail shoe"}},
+                "matched_chunk_text": "MATCHED chunk text",
+            }
+        )
+        assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
+        assert doc.startswith("title: Trail shoe\ndescription: ")
+        assert doc.endswith("\nMATCHED chunk text")
+
+    def test_a_matched_chunk_at_its_own_cap_still_fits(self):
+        chunk = "c" * (RERANK_CHUNK_TEXT_MAX_CHARS + 10)
+        doc = rerank_document(
+            {"payload": {"content": "title: T\n" + "d" * 2000}, "matched_chunk_text": chunk}
+        )
+        assert len(doc) <= RERANK_RESOURCE_DOC_MAX_CHARS
+        assert doc.endswith(
+            chunk[: min(RERANK_CHUNK_TEXT_MAX_CHARS, RERANK_RESOURCE_DOC_MAX_CHARS)]
+        )
+
     def test_empty_summary_falls_back_to_content(self):
         assert rerank_document({"payload": {"summary": "", "content": "body"}}) == "body"
 

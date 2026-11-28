@@ -347,7 +347,8 @@ def rerank_document(candidate: dict[str, Any]) -> str:
     point the resource indexer writes) is scored on its ``content`` with the
     lead fields' lines first, then a context summary the user wrote
     (:func:`_resource_rerank_document`), the whole document cut to
-    ``RERANK_RESOURCE_DOC_MAX_CHARS``. A candidate with no text at all gets
+    ``RERANK_RESOURCE_DOC_MAX_CHARS``; a matched chunk always fits (that
+    document is cut first to leave it room). A candidate with no text at all gets
     ``RERANK_EMPTY_DOCUMENT``, so one candidate never fails the whole pool and
     no document is empty.
     """
@@ -364,6 +365,10 @@ def rerank_document(candidate: dict[str, Any]) -> str:
     chunk_text = candidate.get("matched_chunk_text")
     if chunk_text:
         cut = chunk_text[:RERANK_CHUNK_TEXT_MAX_CHARS]
+        if not is_memory:
+            # The matched chunk always fits the cap: the resource document is
+            # cut first to leave it room.
+            doc = doc[: max(RERANK_RESOURCE_DOC_MAX_CHARS - len(cut) - 1, 0)]
         doc = f"{doc}\n{cut}" if doc else cut
     if not is_memory:
         doc = doc[:RERANK_RESOURCE_DOC_MAX_CHARS]
