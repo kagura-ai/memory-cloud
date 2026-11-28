@@ -23,7 +23,11 @@ On real PostgreSQL rows, over HTTP with the session dependency:
   workspace-scoped key's rotation locks its workspace the same way (#3052,
   the order the deletion of the workspace's sole owner takes: the workspace,
   then its keys in the cascade); an edit of the context or the workspace does
-  not hold the rotation up.
+  not hold the rotation up;
+* a REST request authenticated by a key holds no lock on the key row past
+  authentication (the dependency commits the ``last_used_at`` stamp), so a
+  rotation of that key and the request locking the key's workspace ``FOR
+  UPDATE`` afterwards both finish.
 """
 
 from __future__ import annotations
@@ -115,7 +119,9 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
         _, outsider_key = await manager.create_key(
             name="outside-x", user_id=outsider, workspace_id=x
         )
-        _, member_key = await manager.create_key(name="member-x", user_id=member, workspace_id=x)
+        member_secret, member_key = await manager.create_key(
+            name="member-x", user_id=member, workspace_id=x
+        )
         await db.commit()
         world = SimpleNamespace(
             factory=factory,
@@ -125,6 +131,7 @@ async def world(async_engine, monkeypatch, fernet_api_key_secret):
             x=x,
             outsider_key=outsider_key.public_id,
             member_key=member_key.public_id,
+            member_secret=member_secret,
         )
     try:
         yield world
@@ -514,6 +521,77 @@ async def test_a_workspace_key_rotation_does_not_wait_on_an_edit_of_its_workspac
             )
         finally:
             await holder.rollback()
+
+    assert response.status_code == 200, response.text
+
+
+def _rest_key_auth(name: str):
+    """The REST dependency that turns an API key into a principal."""
+    from auth import dependencies
+
+    return getattr(dependencies, name)
+
+
+def _key_request() -> Request:
+    return Request(
+        {"type": "http", "method": "POST", "path": "/api/v1/memory/remember", "headers": []}
+    )
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("auth", ["get_user_from_api_key_or_session", "verify_api_key_user"])
+async def test_a_request_authenticated_by_a_key_holds_no_key_row_past_authentication(world, auth):
+    """The first use of a key in its throttle window writes ``last_used_at``.
+    The REST dependency commits that write before the route runs, so the
+    request holds no lock on its key row: another transaction locks the row at
+    once and reads the stamp."""
+    async with world.factory() as request_db:
+        principal = await _rest_key_auth(auth)(
+            _key_request(), api_key=world.member_secret, db=request_db
+        )
+        assert principal["user_id"] == world.member
+        try:
+            async with world.factory() as other:
+                stamped = await other.scalar(
+                    select(APIKey.last_used_at)
+                    .where(APIKey.public_id == world.member_key)
+                    .with_for_update(nowait=True)
+                )
+                await other.rollback()
+        finally:
+            await request_db.rollback()
+
+    assert stamped is not None
+
+
+@pytest.mark.timeout(90)
+@pytest.mark.parametrize("auth", ["get_user_from_api_key_or_session", "verify_api_key_user"])
+async def test_a_rotation_and_a_request_with_the_key_do_not_deadlock(world, auth):
+    """A rotation locks the key's workspace (``FOR KEY SHARE``) before the key
+    (#3052). A REST request authenticated by that key that then locks the
+    workspace ``FOR UPDATE`` (the memory quota check, a context creation) must
+    not hold the key row while it waits: the rotation would wait on the request
+    and the request on the rotation. Both finish."""
+    async with world.factory() as request_db:
+        await _rest_key_auth(auth)(_key_request(), api_key=world.member_secret, db=request_db)
+        request_pid = await request_db.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(
+            _call(world, "POST", f"/{world.member_key}/regenerate", world.member)
+        )
+        try:
+            # The rotation finishes, or waits on the request (on the key row a
+            # request that kept its stamp uncommitted would hold).
+            await _blocked_pid(world, request_pid, task)
+            await asyncio.wait_for(
+                request_db.execute(
+                    select(Workspace.id).where(Workspace.id == world.x).with_for_update()
+                ),
+                30,
+            )
+            await request_db.commit()
+        finally:
+            await request_db.rollback()
+            response = await asyncio.wait_for(task, 30)
 
     assert response.status_code == 200, response.text
 

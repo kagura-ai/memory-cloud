@@ -333,8 +333,11 @@ def probe():
         request.state.user = {"user_id": user_id} if user_id else None
         return await call_next(request)
 
+    # Awaitable: an accepted key's verification is committed (#3052).
+    db = AsyncMock()
+
     async def no_db():
-        yield MagicMock()
+        yield db
 
     app.dependency_overrides[get_db] = no_db
     client = TestClient(app, raise_server_exceptions=False)
@@ -345,7 +348,7 @@ def probe():
                 method, path, headers={"Authorization": f"Bearer {PLAINTEXT}", **headers}
             )
 
-    return SimpleNamespace(call=call, handled=handled)
+    return SimpleNamespace(call=call, handled=handled, db=db)
 
 
 _REFUSAL = {
@@ -367,6 +370,8 @@ def test_a_connector_key_is_refused_by_the_api_key_or_session_dependency(
     assert response.status_code == 403
     assert response.json() == _REFUSAL
     assert probe.handled == []
+    # A refused key commits nothing: the request's rollback drops its stamp.
+    probe.db.commit.assert_not_awaited()
     # The decision read the template FastAPI matched, prefixes included.
     assert logger.warning.call_args.kwargs["target"] == "GET /api/v1/probe/items/{item_id}"
     assert logger.warning.call_args.kwargs["key_prefix"] == "kagura_conn"
@@ -389,6 +394,7 @@ def test_a_connector_key_is_refused_by_the_api_key_dependency(probe, scope_mode)
     assert response.status_code == 403
     assert response.json() == _REFUSAL
     assert probe.handled == []
+    probe.db.commit.assert_not_awaited()
     assert logger.warning.call_args.kwargs["target"] == "POST /api/v1/probe/keys-only"
 
 
