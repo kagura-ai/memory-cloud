@@ -23,7 +23,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Qu
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.api_keys import APIKeyManager, apply_zero_knowledge_hide
+from auth.api_keys import APIKeyManager, apply_zero_knowledge_hide, lock_key_rotation
 from auth.connector_keys import CONNECTOR_KEY_REGENERATE_MESSAGE
 from auth.dependencies import APIKeyOrSessionUser, SessionUser
 from auth.programmatic_workspace_auth import (
@@ -580,18 +580,17 @@ async def regenerate_api_key(
 
     from sqlalchemy import and_, or_, select
 
-    from models.auth import APIKey, User
+    from models.auth import APIKey
 
-    # #2370: users before api_keys. User deletion, account erasure and member
-    # removal lock the key owner's users row FOR UPDATE before they sweep the
-    # owner's keys, so the key is read after any such sweep has committed (a
-    # swept key is the 404 below) and no replacement is minted past it. FOR
-    # KEY SHARE does not wait on an ordinary edit of the user row.
-    await db.execute(
-        select(User.user_id)
-        .where(User.user_id == user_id)
-        .with_for_update(read=True, key_share=True)
-    )
+    # #2370 / #3052 (``lock_key_rotation``): the key owner's users row, then
+    # the workspace row, both FOR KEY SHARE, before the key is read and
+    # locked. User deletion, account erasure and member removal lock the
+    # owner's users row FOR UPDATE before they sweep the owner's keys (a swept
+    # key is the 404 below, and no replacement is minted past it); deleting
+    # the workspace's sole owner locks the workspace row first and reaches
+    # the keys in the workspace delete cascade (a workspace gone after the
+    # wait is the same 404).
+    workspace_locked = await lock_key_rotation(db, key_owner=user_id, workspace_id=workspace_id)
 
     # Scope the id lookup as tightly as the legacy lookup: an id from another
     # owner/workspace, a public-bound key or an inactive key is the same 404.
@@ -607,9 +606,10 @@ async def regenerate_api_key(
         statement = statement.where(APIKey.public_id == key_id)
     else:
         statement = statement.order_by(APIKey.created_at.desc(), APIKey.id.desc()).limit(1)
-    # A second rotation of the same id must observe its revocation before minting.
-    result = await db.execute(statement.with_for_update())
-    old_key = result.scalar_one_or_none()
+    old_key: APIKey | None = None
+    if workspace_locked:
+        # A second rotation of the same id must observe its revocation before minting.
+        old_key = (await db.execute(statement.with_for_update())).scalar_one_or_none()
 
     if not old_key:
         raise HTTPException(status_code=404, detail="API key not found")

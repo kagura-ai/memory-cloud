@@ -170,6 +170,7 @@ class TestApiKeyRoutes:
         db.execute = AsyncMock(
             return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old))
         )
+        db.scalar = AsyncMock(return_value=WS)  # #3052: the key's workspace
         db.flush = AsyncMock()
         db.commit = AsyncMock()
         manager = MagicMock()

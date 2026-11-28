@@ -19,8 +19,11 @@ On real PostgreSQL rows, over HTTP with the session dependency:
   before they sweep the user's contexts and keys, so a rotation never mints a
   replacement such a sweep has passed; a bound key's rotation then locks its
   context (``FOR KEY SHARE``) before it revokes the key, the order user
-  deletion takes (the doomed contexts, then the keys bound to them); an edit
-  of the context does not hold the rotation up.
+  deletion takes (the doomed contexts, then the keys bound to them), and a
+  workspace-scoped key's rotation locks its workspace the same way (#3052,
+  the order the deletion of the workspace's sole owner takes: the workspace,
+  then its keys in the cascade); an edit of the context or the workspace does
+  not hold the rotation up.
 """
 
 from __future__ import annotations
@@ -418,6 +421,96 @@ async def test_a_bound_key_rotation_does_not_wait_on_an_edit_of_its_context(worl
         try:
             response = await asyncio.wait_for(
                 _call(world, "POST", f"/{bound.member_key}/regenerate", world.member), 10
+            )
+        finally:
+            await holder.rollback()
+
+    assert response.status_code == 200, response.text
+
+
+async def _blocked_pid(world, holder_pid: int, task: asyncio.Task, timeout: float = 15):
+    """The backend ``holder_pid`` blocks, or None once ``task`` ended without
+    waiting on it."""
+
+    async def poll() -> int | None:
+        while not task.done():
+            async with world.factory() as observer:
+                pid = await observer.scalar(
+                    text("SELECT pid FROM pg_stat_activity WHERE :h = ANY(pg_blocking_pids(pid))"),
+                    {"h": holder_pid},
+                )
+            if pid is not None:
+                return pid
+            await asyncio.sleep(0.02)
+        return None
+
+    return await asyncio.wait_for(poll(), timeout)
+
+
+async def _tuple_locks(world, pid: int) -> list[str]:
+    """The relations of the row locks ``pid`` waits for (a row lock waiter
+    holds the tuple lock of the row it waits on)."""
+    async with world.factory() as observer:
+        rows = await observer.scalars(
+            text(
+                "SELECT relation::regclass::text FROM pg_locks "
+                "WHERE pid = :pid AND locktype = 'tuple'"
+            ),
+            {"pid": pid},
+        )
+        return list(rows.all())
+
+
+@pytest.mark.timeout(90)
+async def test_a_workspace_key_rotation_waits_on_its_workspace_before_the_key(world):
+    """#3052: deleting or erasing a workspace's sole owner locks the workspace
+    row first and reaches the members' keys only in the workspace delete
+    cascade. The rotation of a workspace-scoped key locks that row ``FOR KEY
+    SHARE`` (the lock the replacement's foreign key takes anyway) before it
+    revokes the key, so it waits holding no key: the deletion takes the key at
+    once, and the rotation finds the workspace gone and answers 404."""
+    async with world.factory() as holder:
+        await holder.execute(select(Workspace.id).where(Workspace.id == world.x).with_for_update())
+        holder_pid = await holder.scalar(text("SELECT pg_backend_pid()"))
+        task = asyncio.create_task(
+            _call(world, "POST", f"/{world.member_key}/regenerate", world.member)
+        )
+        try:
+            pid = await _blocked_pid(world, holder_pid, task)
+            assert pid is not None, "the rotation never waited on the workspace row"
+            assert await _tuple_locks(world, pid) == ["workspaces"]
+            await holder.execute(
+                select(APIKey.id)
+                .where(APIKey.workspace_id == world.x)
+                .order_by(APIKey.id)
+                .with_for_update(nowait=True)
+            )
+            await holder.execute(delete(APIKey).where(APIKey.workspace_id == world.x))
+            await holder.execute(
+                delete(WorkspaceMember).where(WorkspaceMember.workspace_id == world.x)
+            )
+            await holder.execute(delete(Workspace).where(Workspace.id == world.x))
+            await holder.commit()
+        finally:
+            await holder.rollback()
+            response = await asyncio.wait_for(task, 30)
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert await _keys_of(world, world.member) == []
+    assert await _history(world) == []
+
+
+@pytest.mark.timeout(90)
+async def test_a_workspace_key_rotation_does_not_wait_on_an_edit_of_its_workspace(world):
+    """``FOR KEY SHARE``: a transaction editing the workspace row (``FOR NO
+    KEY UPDATE``) does not hold the rotation up."""
+    async with world.factory() as holder:
+        await holder.execute(
+            update(Workspace).where(Workspace.id == world.x).values(name=f"edited-{uuid4().hex}")
+        )
+        try:
+            response = await asyncio.wait_for(
+                _call(world, "POST", f"/{world.member_key}/regenerate", world.member), 10
             )
         finally:
             await holder.rollback()

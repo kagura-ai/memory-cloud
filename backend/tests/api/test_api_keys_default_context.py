@@ -60,6 +60,8 @@ def _key(**over) -> SimpleNamespace:
 def _db(key) -> MagicMock:
     db = MagicMock()
     db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=key)))
+    # #3052: the regenerate route reads the key's workspace before its locks.
+    db.scalar = AsyncMock(return_value=getattr(key, "workspace_id", None))
     db.commit = AsyncMock()
     db.flush = AsyncMock()
     return db
