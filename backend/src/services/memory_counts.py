@@ -18,7 +18,7 @@ without a cycle.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
@@ -59,6 +59,29 @@ async def count_live_memories(db: AsyncSession, workspace_id: UUID) -> int:
     """
     result = await db.execute(live_memory_count_stmt(workspace_id))
     return int(result.scalar() or 0)
+
+
+async def count_live_memories_among(
+    db: AsyncSession, workspace_id: UUID, memory_ids: Collection[UUID]
+) -> tuple[int, int]:
+    """The live count and how many of ``memory_ids`` are among those rows.
+
+    One statement, so both numbers come from the same snapshot: a row in
+    ``memory_ids`` that is soft-deleted or in another workspace is in
+    neither.
+
+    Args:
+        db: The request-scoped async session.
+        workspace_id: The workspace whose rows are counted.
+        memory_ids: The rows to look for among the live ones.
+
+    Returns:
+        ``(live count, live rows of memory_ids)``.
+    """
+    among = func.count(Memory.id).filter(Memory.id.in_(list(memory_ids)))
+    result = await db.execute(live_memory_count_stmt(workspace_id).add_columns(among))
+    live, found = result.one()
+    return int(live or 0), int(found or 0)
 
 
 async def live_memory_counts_by_workspace(

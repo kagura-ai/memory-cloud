@@ -56,6 +56,7 @@ def _db(plan: str = "pro"):
         is_public=True,
         resource_id=None,
         name="pub",
+        deleted_at=None,
     )
     workspace = Workspace(id=workspace_id, name="w", plan_name=plan, owner_user_id="owner")
 

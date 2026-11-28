@@ -11,10 +11,11 @@ Implements:
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.api_keys import member_keys_in_workspace
 from models.auth import (
     APIKey,
     Context,
@@ -185,23 +186,16 @@ class MemberCredentialsService:
         # Issue #626: public-bound keys have ``workspace_id=NULL`` (mutually
         # exclusive with the #169 workspace scoping). To surface them in the
         # credentials UI for the workspace where their bound context lives,
-        # OR in via the ``bound_context_id``'s workspace. Without this OR,
-        # public-bound keys are invisible to ``get_or_create_credentials``
-        # and the entire #626 frontend flow (binding badge, per-id revoke,
-        # one-time-reveal of plaintext) renders nothing.
-        from models.auth import Context as _Context
-
+        # ``member_keys_in_workspace`` ORs in the ``bound_context_id``'s
+        # workspace. Without this OR, public-bound keys are invisible to
+        # ``get_or_create_credentials`` and the entire #626 frontend flow
+        # (binding badge, per-id revoke, one-time-reveal of plaintext) renders
+        # nothing. The member's removal deletes by the same predicate.
         result = await self.db.execute(
             select(APIKey)
             .where(
                 and_(
-                    APIKey.user_id == user_id,
-                    or_(
-                        APIKey.workspace_id == workspace_id,
-                        APIKey.bound_context_id.in_(
-                            select(_Context.id).where(_Context.workspace_id == workspace_id)
-                        ),
-                    ),
+                    member_keys_in_workspace(user_id, workspace_id),
                     APIKey.revoked_at.is_(None),
                 )
             )
@@ -379,7 +373,8 @@ class MemberCredentialsService:
 
         Deletes:
         - All other API keys for this user + workspace (agent-bound ones
-          included)
+          included), and the user's public-bound keys of this workspace's
+          contexts
         - All OAuth clients for this user + workspace
         - All OAuth tokens for this user + workspace
         - All workspace-scoped external API keys
@@ -416,12 +411,13 @@ class MemberCredentialsService:
 
         # 1. Delete API keys (bulk operation)
         # Issue #200: Use rowcount for efficient counting without loading data
+        # The member's public-bound keys of this workspace's contexts go too:
+        # the listing's predicate (``member_keys_in_workspace``), revoked rows
+        # included.
         api_keys_result = cast(
             CursorResult[Any],
             await self.db.execute(
-                delete(APIKey).where(
-                    and_(APIKey.user_id == user_id, APIKey.workspace_id == workspace_id)
-                )
+                delete(APIKey).where(member_keys_in_workspace(user_id, workspace_id))
             ),
         )
         api_keys_count = api_keys_result.rowcount

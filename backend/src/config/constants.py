@@ -345,6 +345,7 @@ QUOTA_TYPES: frozenset[str] = frozenset(
         "contexts",
         "members",
         "workspace_limit_reached",
+        "memories",  # #3022: the workspace's total (live) memory cap
         "memories_per_day",
         "memory_analysis",
         "sleep_enabled_contexts",

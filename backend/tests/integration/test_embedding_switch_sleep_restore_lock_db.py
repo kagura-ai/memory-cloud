@@ -1,4 +1,9 @@
-"""Sleep restores and embedding switches share the point-writer lock."""
+"""Sleep restores and embedding switches share the point-writer lock.
+
+These tests commit, so each deletes what it wrote (the operation history the
+restore records included): later files in the same CI shard read whole tables
+and expect them empty.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ from db.qdrant import get_collection_name
 from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
 from models.config import ContextSearchConfig
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
+from models.operation_history import OperationHistory
 from models.sleep import SleepAction, SleepReport
 from services import embedding_migration_service as migration
 from utils.datetime import utcnow
@@ -309,6 +315,9 @@ async def test_switch_waits_for_sleep_restore_and_requeues_it(
                     pass
         await restore_db.close()
         async with maker() as cleanup:
+            await cleanup.execute(
+                delete(OperationHistory).where(OperationHistory.workspace_id == workspace_id)
+            )
             await cleanup.execute(delete(SleepAction).where(SleepAction.report_id == report_id))
             await cleanup.execute(delete(SleepReport).where(SleepReport.id == report_id))
             await cleanup.execute(delete(Memory).where(Memory.id == memory_id))
@@ -516,6 +525,9 @@ async def test_switch_waits_for_new_route_restore_before_pruning(async_engine: A
                     pass
         await restore_db.close()
         async with maker() as cleanup:
+            await cleanup.execute(
+                delete(OperationHistory).where(OperationHistory.workspace_id == workspace_id)
+            )
             await cleanup.execute(delete(SleepAction).where(SleepAction.report_id == report_id))
             await cleanup.execute(delete(SleepReport).where(SleepReport.id == report_id))
             await cleanup.execute(delete(Memory).where(Memory.id == memory_id))

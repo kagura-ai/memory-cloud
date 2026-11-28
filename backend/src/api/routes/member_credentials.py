@@ -808,7 +808,10 @@ async def create_api_key(
 
         from models.auth import Context
 
-        ctx_row = await db.execute(_select(Context).where(Context.id == bound_context_uuid))
+        # A soft-deleted context reads as a missing one.
+        ctx_row = await db.execute(
+            _select(Context).where(Context.id == bound_context_uuid, Context.deleted_at.is_(None))
+        )
         ctx = ctx_row.scalar_one_or_none()
         if ctx is None:
             raise HTTPException(status_code=404, detail="bound_context_id: context not found")

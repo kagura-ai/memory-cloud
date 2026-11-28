@@ -39,6 +39,7 @@ def _db(plan: str):
         display_name=None,
         description=None,
         created_at=None,
+        deleted_at=None,
     )
     workspace = Workspace(id=workspace_id, name="w", plan_name=plan, owner_user_id="owner")
 

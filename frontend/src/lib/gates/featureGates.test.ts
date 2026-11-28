@@ -49,6 +49,7 @@ const SERVER_QUOTA_TYPES = [
   "contexts",
   "members",
   "workspace_limit_reached",
+  "memories",
   "memories_per_day",
   "memory_analysis",
   "sleep_enabled_contexts",
@@ -247,10 +248,11 @@ describe("normalizeGate — older servers (semantic code only)", () => {
 });
 
 describe("normalizeGate — QUOTA-001 limits that are not gates", () => {
-  // The server raises QUOTA-001 for the 1 MB memory-size guard, the total
-  // memory cap and a missing workspace too. None of them is a plan quota,
-  // so none may normalise to a quota gate — an upgrade treatment on a
-  // request-size limit would promise something no tier provides.
+  // The server raises QUOTA-001 for the 1 MB memory-size guard and a missing
+  // workspace too. Neither is a plan quota, so neither may normalise to a
+  // quota gate — an upgrade treatment on a request-size limit would promise
+  // something no tier provides. (The total memory cap is a typed quota gate
+  // since #3022, below.)
 
   it("yields no gate for the untyped body the server sends", () => {
     // Byte-for-byte the details block backend/tests/api/
@@ -314,6 +316,28 @@ describe("normalizeGate — legacy count aliases", () => {
       limit: 3,
       resetsAt: "2026-09-24T00:00:00+09:00",
     });
+  });
+
+  it("reads the total memory cap as a quota gate on memories (#3022)", () => {
+    expect(
+      normalizeGate(429, "QUOTA-001", {
+        gate: "quota",
+        quota_type: "memories",
+        current: 1000,
+        limit: 1000,
+        current_plan: "free",
+        required_plan: "basic",
+        remedies: ["cleanup", "upgrade"],
+        never_delivered_count: 3,
+      }),
+    ).toMatchObject({
+      state: "quota",
+      quotaType: "memories",
+      current: 1000,
+      limit: 1000,
+      requiredPlan: "basic",
+    });
+    expect(QUOTA_TYPE_TO_GATE_KEY.memories).toBe("memories");
   });
 
   it("aliases used_today/limit onto current/limit for memories_per_day", () => {
@@ -1439,6 +1463,118 @@ describe("gateFromFacts with the matrix (#1645)", () => {
 
   it("undefined facts still return null", () => {
     expect(gateFromFacts(undefined, ctx)).toBeNull();
+  });
+});
+
+describe("the two memory caps resolve their own columns (#3022)", () => {
+  // Both quota types answer as the `memories` gate, but the total cap is the
+  // tier's memory_limit and the daily cap its memories_per_day. This matrix
+  // raises the two on different tiers, so a wrong column names a wrong tier.
+  const tiers: readonly PlanTierFeature[] = [
+    tierRow("free", { memory_limit: 1000, memories_per_day: 1000 }),
+    tierRow("basic", { memory_limit: 1000, memories_per_day: 5000 }),
+    tierRow("pro", { memory_limit: 5000, memories_per_day: 5000 }),
+    tierRow("promax", { memory_limit: 5000, memories_per_day: 10000 }),
+  ];
+  const ctx = {
+    fallbackKey: "memories" as const,
+    canUpgrade: true,
+    locale: "en",
+    tiers,
+  };
+  const local = {
+    key: "memories" as const,
+    planName: "free",
+    tiers,
+    canUpgrade: true,
+    locale: "en",
+  };
+
+  it("a total-cap refusal without required_plan names the tier with a higher memory_limit", () => {
+    expect(
+      gateFromFacts(
+        {
+          state: "quota",
+          quotaType: "memories",
+          current: 1000,
+          limit: 1000,
+          currentPlan: "free",
+        },
+        ctx,
+      ),
+    ).toMatchObject({
+      state: "quota",
+      feature: "memories",
+      requiredPlan: "pro",
+      canUpgrade: true,
+    });
+  });
+
+  it("a daily-cap refusal without required_plan names the tier with a higher memories_per_day", () => {
+    expect(
+      gateFromFacts(
+        {
+          state: "quota",
+          quotaType: "memories_per_day",
+          current: 1000,
+          limit: 1000,
+          currentPlan: "free",
+        },
+        ctx,
+      ),
+    ).toMatchObject({
+      state: "quota",
+      feature: "memories",
+      requiredPlan: "basic",
+      canUpgrade: true,
+    });
+  });
+
+  it("no tier raises the total cap: no requiredPlan and no CTA, though a daily cap rises", () => {
+    const gate = gateFromFacts(
+      {
+        state: "quota",
+        quotaType: "memories",
+        current: 5000,
+        limit: 5000,
+        currentPlan: "pro",
+      },
+      ctx,
+    );
+    expect(gate?.state).toBe("quota");
+    expect(gate).not.toHaveProperty("requiredPlan");
+    expect(gate?.canUpgrade).toBe(false);
+  });
+
+  it("the wire and the page-local producer agree for each quota type", () => {
+    for (const quotaType of ["memories", "memories_per_day"]) {
+      const wire = gateFromFacts(
+        {
+          state: "quota",
+          quotaType,
+          current: 1000,
+          limit: 1000,
+          currentPlan: "free",
+        },
+        ctx,
+      );
+      expect(
+        quotaGate({ ...local, quotaType, current: 1000, limit: 1000 }),
+      ).toEqual(wire);
+    }
+  });
+
+  it("a memories gate that names no quota type guesses no tier", () => {
+    const page = quotaGate({ ...local, current: 1000, limit: 1000 });
+    const wire = gateFromFacts(
+      { state: "quota", current: 1000, limit: 1000, currentPlan: "free" },
+      ctx,
+    );
+    for (const gate of [page, wire]) {
+      expect(gate?.state).toBe("quota");
+      expect(gate).not.toHaveProperty("requiredPlan");
+      expect(gate?.canUpgrade).toBe(false);
+    }
   });
 });
 

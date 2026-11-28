@@ -491,7 +491,10 @@ def describe_tool_exception(
                 exc=str(exc),
                 exc_info=exc,
             )
-        return ToolFailure(error or code, message, {"help": _REFUSAL_HELP[code], **details})
+        # A code whose help is built per refusal (``payload_too_large``) has
+        # no entry of its own: its ``details`` carry the help.
+        fallback = {"help": _REFUSAL_HELP[code]} if code in _REFUSAL_HELP else {}
+        return ToolFailure(error or code, message, {**fallback, **details})
 
     cause = classify_cause(exc)
     correlation_id = new_correlation_id()

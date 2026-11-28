@@ -891,6 +891,18 @@ async def delete_user_rows(
                 )
             ).all()
         ]
+    if ctx_ids:
+        # Every key public-bound to a doomed context, whoever minted it: its
+        # foreign key would only SET NULL and leave the key without its
+        # binding. Before the files, the order the other key deletes take.
+        bound = await db.execute(
+            delete(APIKey).where(
+                APIKey.id.in_(locked_ids(APIKey, lambda k: (k.bound_context_id.in_(ctx_ids),)))
+            )
+        )
+        bound_keys = cast(CursorResult[Any], bound).rowcount or 0
+        if bound_keys:
+            logger.info("user_deletion_bound_keys_deleted", count=bound_keys)
     released = await FileStorageService(db).purge_files_for_contexts(ctx_ids)
     # Redis follows the committed state: only a workspace that survives this
     # deletion keeps a quota counter to release.

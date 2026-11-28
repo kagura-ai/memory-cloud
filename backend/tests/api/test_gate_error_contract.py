@@ -463,6 +463,26 @@ REFUSALS: list[Refusal] = [
         legacy=frozenset({"used_today", "requested", "limit", "resets_at"}),
     ),
     Refusal(
+        # #3022: the total (live) memory cap, typed like the other caps; the
+        # upgrade path is the lowest tier whose base limit beats the plan's.
+        id="quota/memories",
+        site="services.quota_service:QuotaService.check_memory_quota._refuse",
+        exc=QuotaExceededError(
+            "Memory quota exceeded. Current: 1000, Limit: 1000 (free plan + addons)",
+            **quota_gate_details(
+                _FREE,
+                "memories",
+                current=1000,
+                limit=1000,
+                required_plan=lowest_tier_with_limit(
+                    "memory_limit", PLAN_TIERS[_FREE].memory_limit
+                ),
+            ),
+            remedies=["cleanup", "upgrade"],
+        ),
+        site_literal="memories",
+    ),
+    Refusal(
         id="quota/workspace_limit_reached",
         site="services.quota_service:QuotaService.check_workspace_creation_allowed",
         exc=QuotaExceededError(
@@ -670,12 +690,9 @@ NOT_GATE_REFUSALS: frozenset[str] = frozenset(
         # anomaly wearing a quota type. Out of scope for #1644 — giving it a
         # code of its own is a separate change.
         "services.quota_service:QuotaService.check_memories_per_day",
-        # Two raises: the same not-found anomaly, and the TOTAL memory cap.
-        # The total cap is a genuine quota refusal, but §1.4's frozen
-        # vocabulary has no key for it (``memories_per_day`` is the daily
-        # rate, not the lifetime ceiling) and the client-side map is frozen
-        # against that same set. Annotating it means extending the
-        # vocabulary on both sides, which is a follow-up, not this PR.
+        # The same not-found anomaly. The TOTAL memory cap it also refuses is
+        # typed since #3022 (``quota_type: "memories"``) and raised from its
+        # nested ``_refuse`` (``quota/memories`` above).
         "services.quota_service:QuotaService.check_memory_quota",
     }
 )
@@ -1163,19 +1180,6 @@ async def _memory_quota_workspace_missing() -> QuotaExceededError:
     return await _raised_by(QuotaService(db).check_memory_quota(uuid4(), raise_on_exceeded=True))
 
 
-async def _memory_quota_total_cap() -> QuotaExceededError:
-    from services.quota_service import QuotaService
-
-    count = MagicMock()
-    count.scalar.return_value = 1000
-    db = _execute_returning(_workspace_result(SimpleNamespace(plan_name=_FREE)), count)
-    effective = MagicMock(get_effective_quotas=AsyncMock(return_value={"memory_limit": 1000}))
-    with patch("services.quota_service.EffectiveQuotaService", return_value=effective):
-        return await _raised_by(
-            QuotaService(db).check_memory_quota(uuid4(), raise_on_exceeded=True)
-        )
-
-
 # Every raise at every ``NOT_GATE_REFUSALS`` site, driven through the real
 # code. Keyed by site so a new entry in ``NOT_GATE_REFUSALS`` fails
 # ``test_every_non_gate_site_is_driven`` until it is exercised here too.
@@ -1186,10 +1190,7 @@ NON_GATE_DRIVERS = {
     "services.quota_service:QuotaService.check_memories_per_day": [
         _memories_per_day_workspace_missing
     ],
-    "services.quota_service:QuotaService.check_memory_quota": [
-        _memory_quota_workspace_missing,
-        _memory_quota_total_cap,
-    ],
+    "services.quota_service:QuotaService.check_memory_quota": [_memory_quota_workspace_missing],
 }
 _NON_GATE_CASES = [
     pytest.param(driver, id=f"{site.rpartition('.')[2]}:{driver.__name__}")
@@ -1387,6 +1388,35 @@ async def _mcp_remember(exc: MemoryCloudException) -> dict:
             await handle_remember(
                 {
                     "context_id": str(uuid4()),
+                    "summary": "a summary long enough",
+                    "content": "c",
+                    "type": "note",
+                },
+                "u",
+                uuid4(),
+            )
+        )
+
+
+async def _mcp_update_memory_upsert(exc: MemoryCloudException) -> dict:
+    """The create half of ``update_memory(external_id=...)`` (#3022)."""
+    from mcp_server.tools.memory import handle_update_memory
+
+    get_db, _ = _db_yielding()
+    context = MagicMock()
+    context.id = uuid4()
+    service = MagicMock(update_memory=AsyncMock(side_effect=exc))
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch("mcp_server.tools.memory._resolve_context", new=AsyncMock(return_value=context)),
+        patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),
+        patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),
+    ):
+        return _mcp_payload(
+            await handle_update_memory(
+                {
+                    "context_id": str(uuid4()),
+                    "external_id": "sync-1",
                     "summary": "a summary long enough",
                     "content": "c",
                     "type": "note",
@@ -1688,6 +1718,12 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
             _QUOTA,
             frozenset({"quota_type", "limit", "used_today", "requested", "resets_at"}),
         ),
+    ),
+    # #3022: the total cap on remember and on update_memory's create half
+    # (before, the latter reached the dispatcher's mapper untyped).
+    "quota/memories": (
+        McpRoute(_mcp_remember, _QUOTA),
+        McpRoute(_mcp_update_memory_upsert, _QUOTA),
     ),
     "quota/storage_bytes": (McpRoute(_mcp_files, _QUOTA),),
     "quota/agents": (McpRoute(_mcp_register_agent, _QUOTA),),

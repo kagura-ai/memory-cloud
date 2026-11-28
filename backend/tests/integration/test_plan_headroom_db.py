@@ -15,6 +15,8 @@ in-place ``update_memory`` read, ``memories_per_day`` and ``mcp_calls_per_day``
 with ``resets_at``, an add-on raising the headroom, that the notice adds no
 SQL statement to ``remember``, and that a read the timeout cancels fails
 neither bootstrap nor an update.
+Each test deletes what it committed (the usage rows, the workspace and its
+owner): later files in the same CI shard read whole tables.
 Not executed in the local unit run — needs the DB container.
 """
 
@@ -65,7 +67,7 @@ def _limits(memory_limit: int = 1000, memories_per_day: int = 1000, mcp: int = 1
 @pytest_asyncio.fixture(loop_scope="session")
 async def world(async_engine: AsyncEngine, monkeypatch) -> AsyncIterator[World]:
     from mcp_server.tools import invalidate_rate_limit_cache
-    from models.auth import Context, User, Workspace, WorkspaceMember, WorkspaceRole
+    from models.auth import Context, UsageStats, User, Workspace, WorkspaceMember, WorkspaceRole
 
     tag = uuid.uuid4().hex[:8]
     owner = f"owner-{tag}"
@@ -121,7 +123,11 @@ async def world(async_engine: AsyncEngine, monkeypatch) -> AsyncIterator[World]:
     finally:
         invalidate_rate_limit_cache()
         async with maker() as session:
+            # The usage rows only SET NULL with the workspace; the owner stays
+            # without a delete of its own.
+            await session.execute(delete(UsageStats).where(UsageStats.user_id == owner))
             await session.execute(delete(Workspace).where(Workspace.id == ws_id))
+            await session.execute(delete(User).where(User.user_id == owner))
             await session.commit()
 
 

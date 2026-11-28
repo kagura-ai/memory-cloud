@@ -146,6 +146,7 @@ async def test_the_public_context_info_is_refused_in_the_redacted_form(mode, ref
         description=None,
         created_at=None,
         updated_at=None,
+        deleted_at=None,
     )
     workspace = Workspace(id=wid, name="w", owner_user_id="o", plan_name="pro")
     db = MagicMock()
