@@ -1,5 +1,7 @@
 """Unit tests for the #2015 content-chunk helpers (pure functions)."""
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from utils.content_chunks import (
@@ -10,11 +12,13 @@ from utils.content_chunks import (
     CONTENT_CHUNK_OVERLAP_CHARS,
     RERANK_CHUNK_TEXT_MAX_CHARS,
     RERANK_EMPTY_DOCUMENT,
-    RERANK_RESOURCE_TEXT_MAX_CHARS,
+    RERANK_RESOURCE_DOC_MAX_CHARS,
+    RESOURCE_CONTEXT_SUMMARY_MAX_CHARS,
     build_chunk_payload,
     chunk_point_id,
     collapse_chunk_hits,
     rerank_document,
+    resource_context_summary,
     split_content,
 )
 
@@ -175,13 +179,64 @@ class TestRerankDocument:
 
     # #3031: a resource-indexed point (build_resource_point) has no summary.
     def test_resource_payload_uses_its_content_cut_to_the_maximum(self):
-        long = "title: " + "r" * (RERANK_RESOURCE_TEXT_MAX_CHARS + 100)
+        long = "title: " + "r" * (RERANK_RESOURCE_DOC_MAX_CHARS + 100)
         doc = rerank_document({"payload": {"content": long}})
-        assert doc == long[:RERANK_RESOURCE_TEXT_MAX_CHARS]
+        assert doc == long[:RERANK_RESOURCE_DOC_MAX_CHARS]
 
-    def test_resource_payload_appends_context_summary(self):
+    def test_resource_payload_keeps_a_context_summary_the_user_wrote(self):
+        # Not the indexer's cut of the content: an edit, or a remember(external_id) row.
         doc = rerank_document({"payload": {"content": "title: Q3 plan", "context_summary": "why"}})
-        assert doc == "title: Q3 plan why"
+        assert doc == "why\ntitle: Q3 plan"
+
+    def test_resource_payload_drops_the_indexers_own_context_summary(self):
+        content = "title: Q3 plan\ndescription: budget"
+        doc = rerank_document({"payload": {"content": content, "context_summary": content}})
+        assert doc == content
+
+    def test_a_cut_indexer_context_summary_is_not_repeated(self):
+        content = "description: " + "d" * 5000
+        summary = resource_context_summary(content)
+        assert len(summary) == RESOURCE_CONTEXT_SUMMARY_MAX_CHARS
+        doc = rerank_document({"payload": {"content": content, "context_summary": summary}})
+        assert doc == content[:RERANK_RESOURCE_DOC_MAX_CHARS]
+
+    def test_a_user_context_summary_stays_inside_the_cap(self):
+        payload = {"content": "body: " + "b" * 3000, "context_summary": "u" * 1000}
+        doc = rerank_document({"payload": payload})
+        assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
+        assert doc.startswith("u" * 1000 + "\nbody: ")
+
+    def test_lead_fields_come_first_from_the_metadata(self):
+        content = "answer: long answer\nquestion: How do I return an item?"
+        payload = {
+            "content": content,
+            "metadata": {"answer": "long answer", "question": "How do I return an item?"},
+        }
+        doc = rerank_document({"payload": payload})
+        assert doc == "question: How do I return an item?\nanswer: long answer"
+
+    def test_a_lead_value_that_is_part_of_another_line_is_not_removed(self):
+        content = "subtitle: Q3\ntitle: Q3"
+        doc = rerank_document({"payload": {"content": content, "metadata": {"title": "Q3"}}})
+        assert doc == "title: Q3\nsubtitle: Q3"
+
+    def test_a_multi_line_lead_value_is_moved_whole(self):
+        content = "brand: B\ntitle: line one\nline two"
+        doc = rerank_document(
+            {"payload": {"content": content, "metadata": {"title": "line one\nline two"}}}
+        )
+        assert doc == "title: line one\nline two\nbrand: B"
+
+    def test_without_metadata_the_content_comes_first(self):
+        content = "brand: B\ntitle: T"
+        assert rerank_document({"payload": {"content": content}}) == content
+        assert rerank_document({"payload": {"content": content, "metadata": None}}) == content
+
+    def test_a_long_title_alone_is_cut_at_the_cap(self):
+        title = "t" * 2048
+        payload = {"content": f"title: {title}", "metadata": {"title": title}}
+        doc = rerank_document({"payload": payload})
+        assert doc == f"title: {title}"[:RERANK_RESOURCE_DOC_MAX_CHARS]
 
     def test_resource_payload_with_a_matched_chunk(self):
         doc = rerank_document(
@@ -206,6 +261,94 @@ class TestRerankDocument:
 
     def test_context_summary_alone_is_the_document(self):
         assert rerank_document({"payload": {"context_summary": "why"}}) == "why"
+
+
+def _indexed_resource_candidate(fields: dict[str, str]) -> dict:
+    """A recall candidate as the resource indexer writes it for a sync record."""
+    from models.sync_feed_schemas import DEFINITIONS
+    from services.resource_indexer import (
+        ResourceIndexer,
+        build_resource_point,
+        resource_document_text,
+    )
+
+    projected = ResourceIndexer._project_payload(
+        None,  # type: ignore[arg-type]  # the projection reads no instance state
+        fields,
+        SimpleNamespace(field_definitions=DEFINITIONS),  # type: ignore[arg-type]
+    )
+    content = resource_document_text(projected, "doc_1")
+    context = SimpleNamespace(workspace_id=uuid4(), id=uuid4(), created_by=uuid4())
+    point = build_resource_point(
+        context=context,  # type: ignore[arg-type]
+        resource_id="res_1",
+        doc_id="doc_1",
+        version=1,
+        content=content,
+        projected=projected,
+        embedding=[0.1] * 8,
+        updated_at=datetime(2026, 11, 1, tzinfo=UTC),
+        memory_id=uuid4(),
+        context_summary=resource_context_summary(content),
+    )
+    return {"payload": point.payload}
+
+
+class TestRerankDocumentOfIndexedSyncRecords:
+    """The document of a record indexed through the sync feed schema."""
+
+    def test_a_product_starts_with_title_and_keeps_its_sku(self):
+        candidate = _indexed_resource_candidate(
+            {
+                "record_type": "product",
+                "title": "Trail shoe",
+                "url": "https://example.com/p/1",
+                "brand": "b" * 2048,
+                "description": "d" * 16_000,
+                "sku": "SKU-123",
+            }
+        )
+        # The indexed text is ordered by field name: brand, description, sku, title.
+        assert candidate["payload"]["content"].startswith("brand: ")
+        doc = rerank_document(candidate)
+        assert doc.startswith("title: Trail shoe\nsku: SKU-123\nbrand: b")
+        assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
+        assert doc.count("title: Trail shoe") == 1
+
+    def test_an_faq_starts_with_its_question(self):
+        candidate = _indexed_resource_candidate(
+            {
+                "record_type": "faq",
+                "question": "How do I return an item?",
+                "answer": "a" * 16_000,
+            }
+        )
+        assert candidate["payload"]["content"].startswith("answer: ")
+        doc = rerank_document(candidate)
+        assert doc.startswith("question: How do I return an item?\nanswer: a")
+        assert len(doc) == RERANK_RESOURCE_DOC_MAX_CHARS
+
+    def test_a_normalized_indexer_context_summary_is_recognised(self):
+        # The point stores the context summary NFKC-normalized; the content is raw.
+        candidate = _indexed_resource_candidate(
+            {"record_type": "faq", "question": "㈱ ｶﾀｶﾅ?", "answer": "A."}
+        )
+        assert candidate["payload"]["context_summary"] != candidate["payload"]["content"]
+        assert rerank_document(candidate) == "question: ㈱ ｶﾀｶﾅ?\nanswer: A."
+
+    def test_a_short_record_goes_in_once(self):
+        candidate = _indexed_resource_candidate(
+            {"record_type": "faq", "question": "Q?", "answer": "A."}
+        )
+        assert rerank_document(candidate) == "question: Q?\nanswer: A."
+
+
+def test_resource_context_summary_is_the_indexers_cut():
+    assert resource_context_summary("short") == "short"
+    exact = "x" * RESOURCE_CONTEXT_SUMMARY_MAX_CHARS
+    assert resource_context_summary(exact) == exact
+    longer = exact + "y"
+    assert resource_context_summary(longer) == exact[:-3] + "..."
 
 
 def test_chunk_payload_keeps_every_field_of_the_real_summary_point():

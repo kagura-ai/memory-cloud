@@ -68,7 +68,7 @@ These process data the server already holds. Each destination is configured by t
 | Destination | Reached from | What is sent |
 |---|---|---|
 | Embedding provider (OpenAI or a self-hosted OpenAI-compatible server) | `remember`, `update_memory`, `recall`, `ingest_events`, `rollback_sleep_run` | a memory's summary or the event text; the search query |
-| Reranker (Voyage, Cohere or self-hosted), when reranking is enabled | `recall` | the query and each candidate's summary and context summary |
+| Reranker (Voyage, Cohere or self-hosted), when reranking is enabled | `recall` | the query and each candidate's summary and context summary; for a document indexed from a resource, its indexed text (title, question and sku first, and a context summary only when the user wrote or edited it), up to 1,500 characters |
 | LLM provider (OpenAI, Anthropic, Gemini, Ollama Cloud or self-hosted) | `analyze_context` only, as a background task | cluster representatives: memory type and summary, cut to 240 characters (`services/analysis/labeler.py`) |
 | Object storage (S3-compatible) | `complete_file_upload` | a `head_object` request |
 | Vector store | memory reads and writes | embeddings and their ids |

@@ -864,7 +864,16 @@ class TestRerankerServiceRerank:
             ]
         )
         monkeypatch.setattr(service, "get_active_provider", AsyncMock(return_value=fake_provider))
-        resource = {"payload": {"content": "title: Q3 plan\nowner: ops", "context_summary": "c"}}
+        # The indexer writes the indexed text as the context summary too; it is
+        # not sent twice.
+        indexed = "owner: ops\ntitle: Q3 plan"
+        resource = {
+            "payload": {
+                "content": indexed,
+                "context_summary": indexed,
+                "metadata": {"owner": "ops", "title": "Q3 plan"},
+            }
+        }
         candidates = [self._candidate("ordinary summary"), resource]
         outcome: dict = {}
 
@@ -872,7 +881,7 @@ class TestRerankerServiceRerank:
 
         assert outcome["scored"] is True
         documents = fake_provider.rerank.await_args.args[1]
-        assert documents == ["ordinary summary ", "title: Q3 plan\nowner: ops c"]
+        assert documents == ["ordinary summary ", "title: Q3 plan\nowner: ops"]
         assert all(d.strip() for d in documents)
         assert out[0] is resource
 

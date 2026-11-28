@@ -30,6 +30,8 @@ from uuid import UUID, uuid5
 
 import xxhash
 
+from utils.text import normalize_for_search
+
 #: Payload key that marks a chunk point and names its memory.
 CHUNK_OF_FIELD = "chunk_of"
 
@@ -52,10 +54,19 @@ CONTENT_CHUNK_DENSE_MAX_FETCH = 600
 #: How much of the matched chunk the reranker sees, after the summary.
 RERANK_CHUNK_TEXT_MAX_CHARS = 1500
 
-#: How much of a payload's ``content`` the reranker sees when the payload has
-#: no ``summary`` (a resource-indexed point: its indexed ``<field>: <value>``
-#: lines, the text it is embedded and keyword-indexed by).
-RERANK_RESOURCE_TEXT_MAX_CHARS = 1500
+#: The longest document the reranker sees for a payload without a ``summary``
+#: (a resource-indexed point), lead fields and context summary included.
+RERANK_RESOURCE_DOC_MAX_CHARS = 1500
+
+#: Fields of a resource-indexed point's ``metadata`` put first in its rerank
+#: document, in this order. The indexed text lists fields in schema order
+#: (by name for the sync feed schema), so a long ``brand`` or ``answer`` would
+#: otherwise push a product's title and sku or an FAQ's question past the cap.
+RERANK_RESOURCE_LEAD_FIELDS = ("title", "question", "sku")
+
+#: The longest ``context_summary`` the resource indexer writes for a document
+#: (see :func:`resource_context_summary`).
+RESOURCE_CONTEXT_SUMMARY_MAX_CHARS = 2000
 
 #: Stand-in document for a candidate whose payload carries no text at all, so
 #: every candidate gets a non-empty document.
@@ -221,6 +232,72 @@ def collapse_chunk_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def resource_context_summary(content: str) -> str:
+    """The ``context_summary`` the resource indexer writes for a document.
+
+    Its indexed text, cut to ``RESOURCE_CONTEXT_SUMMARY_MAX_CHARS`` with an
+    ellipsis. The point stores it ``normalize_for_search``-ed.
+    """
+    if len(content) > RESOURCE_CONTEXT_SUMMARY_MAX_CHARS:
+        return content[: RESOURCE_CONTEXT_SUMMARY_MAX_CHARS - 3] + "..."
+    return content
+
+
+def _is_indexer_context_summary(context_summary: str, content: str) -> bool:
+    """Whether ``context_summary`` is the indexer's own cut of ``content``."""
+    cut = resource_context_summary(content)
+    if context_summary == cut:
+        return True
+    try:
+        return context_summary == normalize_for_search(cut)
+    except ValueError:  # over MAX_NORMALIZE_SIZE: keep the summary
+        return False
+
+
+def _without_line(text: str, line: str) -> str:
+    """``text`` without ``line`` when it is one whole line of it, exactly once."""
+    padded = f"\n{text}\n"
+    needle = f"\n{line}\n"
+    if padded.count(needle) != 1:
+        return text
+    at = padded.index(needle)
+    return (padded[:at] + "\n" + padded[at + len(needle) :])[1:-1]
+
+
+def _resource_rerank_document(payload: dict[str, Any]) -> str:
+    """Rerank document of a payload without a ``summary`` (a resource-indexed point).
+
+    The lead fields first (``RERANK_RESOURCE_LEAD_FIELDS`` found in the
+    payload's ``metadata``, each as ``<name>: <value>`` and taken out of the
+    rest when the content holds that exact line once), then the
+    ``context_summary`` unless it is the indexer's own cut of ``content``
+    (kept when the user wrote or edited it), then the rest of ``content``,
+    one per line. Cut to ``RERANK_RESOURCE_DOC_MAX_CHARS`` by the caller.
+    """
+    content = payload.get("content")
+    content = content if isinstance(content, str) else ""
+    rest = content
+    parts: list[str] = []
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        for name in RERANK_RESOURCE_LEAD_FIELDS:
+            value = metadata.get(name)
+            if isinstance(value, bool) or not isinstance(value, str | int | float):
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            line = f"{name}: {value}"
+            parts.append(line)
+            rest = _without_line(rest, line)
+    context_summary = payload.get("context_summary")
+    if isinstance(context_summary, str) and not _is_indexer_context_summary(
+        context_summary, content
+    ):
+        parts.append(context_summary)
+    parts.append(rest)
+    return "\n".join(p for p in parts if p.strip())
+
+
 def rerank_document(candidate: dict[str, Any]) -> str:
     """Text the reranker scores for one recall candidate.
 
@@ -230,30 +307,29 @@ def rerank_document(candidate: dict[str, Any]) -> str:
     document never cuts the summary.
 
     No payload key is required (#3031): a payload without a ``summary`` (the
-    point the resource indexer writes) is scored on its ``content`` cut to
-    ``RERANK_RESOURCE_TEXT_MAX_CHARS``, then its ``context_summary``. A
-    candidate with no text at all gets ``RERANK_EMPTY_DOCUMENT``, so one
-    candidate never fails the whole pool and no document is empty.
+    point the resource indexer writes) is scored on its lead fields, a
+    context summary the user wrote and its ``content``
+    (:func:`_resource_rerank_document`), the whole document cut to
+    ``RERANK_RESOURCE_DOC_MAX_CHARS``. A candidate with no text at all gets
+    ``RERANK_EMPTY_DOCUMENT``, so one candidate never fails the whole pool and
+    no document is empty.
     """
     payload = candidate.get("payload") or {}
     summary = payload.get("summary")
-    if isinstance(summary, str) and summary:
+    is_memory = isinstance(summary, str) and bool(summary)
+    if is_memory:
         # The memory point always carries the key; its value is None when the
         # memory has no context summary.
         context_summary = payload.get("context_summary")
         doc = f"{summary} {context_summary if isinstance(context_summary, str) else ''}"
     else:
-        content = payload.get("content")
-        context_summary = payload.get("context_summary")
-        parts = [
-            content[:RERANK_RESOURCE_TEXT_MAX_CHARS] if isinstance(content, str) else "",
-            context_summary if isinstance(context_summary, str) else "",
-        ]
-        doc = " ".join(p for p in parts if p.strip())
+        doc = _resource_rerank_document(payload)
     chunk_text = candidate.get("matched_chunk_text")
     if chunk_text:
         cut = chunk_text[:RERANK_CHUNK_TEXT_MAX_CHARS]
         doc = f"{doc}\n{cut}" if doc else cut
+    if not is_memory:
+        doc = doc[:RERANK_RESOURCE_DOC_MAX_CHARS]
     if not doc.strip():
         return RERANK_EMPTY_DOCUMENT
     return doc
