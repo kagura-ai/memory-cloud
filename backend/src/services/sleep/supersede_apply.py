@@ -13,7 +13,9 @@ floor (``SUPERSEDE_VERIFY_MIN_CONFIDENCE``), still about both memories'
 current texts, between two of the run user's own memories that dedup may
 compare (``dedup_eligible``: live, not pinned, not a tool guardrail, not a
 time memory, not owned by the resource indexer), the older one carrying no
-exempt tag and not written after the newer one, with no ``supersedes`` or
+exempt tag and its text not written after the newer one's (dedup's recency:
+the later of creation and the last logged text edit, #3019; a pair the
+revision log cannot order is left alone), with no ``supersedes`` or
 ``contradicts`` edge on the pair (either direction, any author) and no
 declared edge of the run user from the newer to the older. A dismissed,
 ``parallel``, ``unclear``, unverified or stale suggestion is never applied,
@@ -31,6 +33,7 @@ allowance per run. ``undo_apply_supersede`` reverses one action in
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
@@ -51,6 +54,13 @@ from models.memory import (
 )
 from repositories.neural_edge import NeuralEdgeRepository
 from services.exempt_tags import carries_exempt_tag, exempt_tags, not_exempt_tagged_predicate
+from services.memory_versions import (
+    TextEditEvent,
+    revision_log_began_query,
+    text_edit_event,
+    text_edit_events_query,
+    text_edit_times,
+)
 from services.sleep.coverage import (
     FAILURE,
     PASSED,
@@ -60,7 +70,13 @@ from services.sleep.coverage import (
     after_sweep_position,
 )
 from services.sleep.dedup_merge import dedup_eligible
-from services.sleep.pair_write import locked_refusals, write_sleep_supersedes_edge
+from services.sleep.pair_write import (
+    edited_version,
+    locked_refusals,
+    recency_key,
+    recency_unknowable,
+    write_sleep_supersedes_edge,
+)
 from services.sleep.reporter import PhaseResult, SleepBudget, SleepReporter, phase_outcome
 from services.supersede_verify import (
     CONTENT_HEAD_CHARS,
@@ -92,6 +108,8 @@ REASON_MALFORMED = "malformed_candidate"
 REASON_BELOW_FLOOR = "below_floor"
 REASON_TARGET_INELIGIBLE = "target_ineligible"
 REASON_NEWER_TARGET = "newer_target"
+# dedup's keep-both reason for the same rule (#3019).
+REASON_AMBIGUOUS_RECENCY = "ambiguous_recency"
 REASON_VERDICT_STALE = "verdict_stale"
 REASON_ALREADY_LINKED = "already_linked"
 REASON_CONTRADICTS = "contradicts"
@@ -180,6 +198,15 @@ class SupersedeApplyPhase:
         # rows with their outcomes, which the orchestrator turns into the next.
         self._entry = coverage or LaneEntry()
         self.coverage_outcome: ApplyCoverage | None = None
+        # #3019's revision reads, as dedup keeps them: the last logged text
+        # edit of each edited memory read (None when no logged edit wrote its
+        # text), the memories whose read failed, the doubt a session rollback
+        # naming no block left, and the log start, read once a run if needed.
+        self._text_edited_at: dict[UUID, datetime | None] = {}
+        self._text_edit_unread: set[UUID] = set()
+        self._text_edit_unsure: dict[UUID, datetime] = {}
+        self._log_began_at: datetime | None = None
+        self._log_began_read = False
 
     async def execute(
         self,
@@ -232,6 +259,7 @@ class SupersedeApplyPhase:
         edges = await self._read_pair_edges(
             workspace_id, context_id, {row.id for row in carriers} | set(targets)
         )
+        await self._load_text_edit_times([*carriers, *targets.values()])
 
         reasons: dict[str, int] = {}
         failed: list[UUID] = []
@@ -240,7 +268,7 @@ class SupersedeApplyPhase:
             candidate = carrier.supersede_candidate
             target_id = targets_of[carrier.id]
             target = targets.get(target_id) if target_id is not None else None
-            reason = self._refusal(
+            reason = await self._refusal(
                 carrier, candidate, target_id, target, edges, user_id=user_id, floor=floor
             )
             if reason is None and target is not None:
@@ -343,6 +371,9 @@ class SupersedeApplyPhase:
                 Memory.user_id,
                 Memory.context_id,
                 Memory.created_at,
+                # Only tells whether an edit the revision log does not show
+                # could be later than the newer memory (``recency_unknowable``).
+                Memory.updated_at,
                 Memory.version,
                 Memory.summary,
                 func.substr(Memory.content, 1, CONTENT_HEAD_CHARS).label("content_head"),
@@ -373,8 +404,90 @@ class SupersedeApplyPhase:
         )
         return list(rows.all())
 
-    @staticmethod
-    def _refusal(
+    async def _load_text_edit_times(self, rows: Iterable[Any]) -> None:
+        """Read when each edited memory of the page last had its text written.
+
+        Dedup's read (#3019): a memory at version 1 was never edited through a
+        versioned path, so its creation time is its recency and nothing is
+        read; the others' ``updated`` revisions are read in one statement and
+        walked by ``text_edit_times``. A read that fails is rolled back to its
+        savepoint and leaves those memories at their creation time, marked
+        unread (``recency_unknowable`` then leaves a pair alone when an older
+        one's stamp says an edit could make it the newer one).
+        """
+        ids = [
+            row.id
+            for row in rows
+            if edited_version(row.version) and row.id not in self._text_edited_at
+        ]
+        if not ids:
+            return
+        try:
+            async with self.db.begin_nested():
+                found = (await self.db.execute(text_edit_events_query(ids))).all()
+        except Exception as e:
+            logger.warning(
+                "sleep_supersede_apply_text_edit_times_unavailable",
+                count=len(ids),
+                error_type=type(e).__name__,
+            )
+            found = []
+            self._text_edit_unread.update(ids)
+        events: dict[UUID, list[TextEditEvent]] = {}
+        for row in found:
+            events.setdefault(row.memory_id, []).append(text_edit_event(row))
+        for memory_id in ids:
+            times = text_edit_times(events.get(memory_id, ()))
+            self._text_edited_at[memory_id] = times.last
+            if times.unsure_until is not None:
+                self._text_edit_unsure[memory_id] = times.unsure_until
+
+    async def _revision_log_began(self) -> datetime | None:
+        """When the deployment's revision log began, read once a run (#3019).
+
+        Made only when a pair needs it. A log with no row yet, or a read that
+        fails, is None: nothing tells when logging began, so it orders no pair.
+        """
+        if not self._log_began_read:
+            self._log_began_read = True
+            value: object = None
+            try:
+                async with self.db.begin_nested():
+                    value = (await self.db.execute(revision_log_began_query())).scalar()
+            except Exception as e:
+                logger.warning(
+                    "sleep_supersede_apply_revision_log_start_unavailable",
+                    error_type=type(e).__name__,
+                )
+            self._log_began_at = value if isinstance(value, datetime) else None
+        return self._log_began_at
+
+    async def _direction_refusal(self, carrier: Any, target: Any) -> str | None:
+        """Rule 4: the older memory's text is not newer than the newer one's.
+
+        Recency is dedup's (``recency_key``): the later of creation and the
+        last logged text edit. An older memory edited after the newer one was
+        written is ``newer_target``, at any precision (equal times pass, as on
+        the accept path); one whose recency the revision log cannot tell
+        under dedup's keep-both conditions is ``ambiguous_recency``.
+        """
+        newer = recency_key(carrier.created_at, self._text_edited_at.get(carrier.id))
+        older = recency_key(target.created_at, self._text_edited_at.get(target.id))
+        if newer is None or older is None or older > newer:
+            return REASON_NEWER_TARGET
+        if await recency_unknowable(
+            newer,
+            loser_text_edited_at=self._text_edited_at.get(target.id),
+            loser_unsure_until=self._text_edit_unsure.get(target.id),
+            loser_updated_at=target.updated_at,
+            loser_unread=target.id in self._text_edit_unread,
+            log_began=self._revision_log_began,
+        ):
+            return REASON_AMBIGUOUS_RECENCY
+        return None
+
+    async def _refusal(
+        self,
         carrier: Any,
         candidate: Any,
         target_id: UUID | None,
@@ -391,8 +504,9 @@ class SupersedeApplyPhase:
             return REASON_BELOW_FLOOR
         if target is None:
             return REASON_TARGET_INELIGIBLE
-        if target.created_at > carrier.created_at:
-            return REASON_NEWER_TARGET
+        direction = await self._direction_refusal(carrier, target)
+        if direction is not None:
+            return direction
         if not verdict_current(
             candidate,
             old_summary=target.summary,

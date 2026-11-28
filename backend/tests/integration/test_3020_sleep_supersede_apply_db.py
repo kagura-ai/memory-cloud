@@ -19,10 +19,10 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text, update
+from sqlalchemy import DateTime, literal, select, text, update
 
 from models.auth import WorkspaceMember
-from models.memory import Memory
+from models.memory import Memory, MemoryRevision
 from services.sleep.coverage import LaneEntry, parse_state
 from services.supersede_dismissal import build_tombstone
 from tests.integration._supersede_apply_support import (
@@ -36,6 +36,7 @@ from tests.integration._supersede_apply_support import (
     run_phase,
     run_sleep,
     scope,
+    verified_candidate,
     verified_pair,
 )
 from utils.datetime import utcnow
@@ -247,6 +248,97 @@ async def test_left_alone_by_state_or_edges(db_session, case):
     assert await apply_actions(db, report.id) == []
     assert await candidate_column(db, newer.id) == before
     assert await edge_row(db, s.owner, newer.id, older.id) == edge_before
+
+
+# ------------------------------------------------------------ text recency
+
+
+async def _log_text_edit(db, memory: Memory, at, **fields) -> None:
+    """An API edit of ``memory``'s text at ``at``, logged as ``record_edit`` logs it."""
+    prior = {name: getattr(memory, name) for name in fields}
+    for name, value in fields.items():
+        setattr(memory, name, value)
+    memory.version += 1
+    memory.updated_at = at
+    db.add(
+        MemoryRevision(
+            memory_id=memory.id,
+            context_id=memory.context_id,
+            version=memory.version,
+            kind="updated",
+            writer="api",
+            actor_user_id=memory.user_id,
+            prior=prior,
+            at=at,
+        )
+    )
+    await db.flush()
+
+
+def _log_start(at):
+    """A stand-in for ``revision_log_began_query`` answering ``at`` on Postgres."""
+    return lambda: select(literal(at, DateTime()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edited", ["after", "before"])
+async def test_an_older_memory_edited_after_the_newer_was_written_is_refused(db_session, edited):
+    """The verdict is fresh for both current texts (the pair was judged after
+    the edit): only the edit time says the older memory holds the later text."""
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    shift = timedelta(hours=2) if edited == "after" else -timedelta(hours=2)
+    await _log_text_edit(db, older, newer.created_at + shift, summary="the office is on floor 4")
+    newer_summary, newer_content = newer.summary, newer.content
+    await _stored(
+        db,
+        newer,
+        verified_candidate(older, newer_summary=newer_summary, newer_content=newer_content),
+    )
+    before = await candidate_column(db, newer.id)
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+
+    _, result = await run_phase(db, s, report)
+
+    if edited == "after":
+        assert result.details["no_action_reasons"] == {"newer_target": 1}
+        assert await apply_actions(db, report.id) == []
+        assert await candidate_column(db, newer.id) == before
+        assert await edge_row(db, s.owner, newer.id, older.id) is None
+    else:
+        assert result.details["applied"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("log", ["none", "began-after", "began-before"])
+async def test_an_older_memory_whose_recency_cannot_be_known_is_refused(db_session, log):
+    """No logged text edit, a stamp later than the newer memory, and a log that
+    does not cover that time: dedup would keep both, so Sleep links neither."""
+    db = db_session
+    s = await scope(db)
+    newer, older = await verified_pair(db, s, created_at=_base())
+    await db.execute(
+        update(Memory)
+        .where(Memory.id == older.id)
+        .values(updated_at=newer.created_at + timedelta(hours=2))
+    )
+    began = {
+        "none": None,
+        "began-after": newer.created_at + timedelta(hours=1),
+        "began-before": newer.created_at - timedelta(days=30),
+    }[log]
+    report = await new_report(db, s, utcnow() - timedelta(hours=1))
+
+    with patch("services.sleep.supersede_apply.revision_log_began_query", _log_start(began)):
+        _, result = await run_phase(db, s, report)
+
+    if log == "began-before":
+        assert result.details["applied"] == 1
+    else:
+        assert result.details["no_action_reasons"] == {"ambiguous_recency": 1}
+        assert await apply_actions(db, report.id) == []
+        assert await edge_row(db, s.owner, newer.id, older.id) is None
 
 
 # --------------------------------------------------------------- write access

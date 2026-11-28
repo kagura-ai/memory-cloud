@@ -245,3 +245,108 @@ class TestWriteSleepSupersedesEdge:
             context_id="c",
         )
         assert prior is None
+
+
+# ------------------------------------------------------------ text recency
+
+
+def _minutes(n: float):
+    from datetime import datetime, timedelta
+
+    return datetime(2026, 3, 1, 12, 0) + timedelta(minutes=n)
+
+
+class TestTextRecency:
+    """#3020: dedup's recency (#3019), shared so both phases order a pair alike."""
+
+    def test_the_key_is_the_later_of_creation_and_the_last_text_edit(self) -> None:
+        from services.sleep.pair_write import recency_key
+
+        assert recency_key(_minutes(0), None) == _minutes(0)
+        assert recency_key(_minutes(0), _minutes(30)) == _minutes(30)
+        assert recency_key(_minutes(30), _minutes(0)) == _minutes(30)
+        assert recency_key(None, None) is None
+        assert recency_key("not a time", None) is None
+
+    @staticmethod
+    async def _unknowable(winner, *, began=None, **loser):
+        from services.sleep.pair_write import recency_unknowable
+
+        values = {
+            "loser_text_edited_at": None,
+            "loser_unsure_until": None,
+            "loser_updated_at": None,
+            "loser_unread": False,
+        }
+        values.update(loser)
+        log_began = AsyncMock(return_value=began)
+        result = await recency_unknowable(winner, log_began=log_began, **values)
+        return result, log_began
+
+    @pytest.mark.asyncio
+    async def test_a_logged_edit_of_the_loser_is_known(self) -> None:
+        result, log_began = await self._unknowable(
+            _minutes(0), loser_text_edited_at=_minutes(-5), loser_updated_at=_minutes(60)
+        )
+        assert result is False
+        log_began.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_stamp_at_or_before_the_winner_minute_is_known(self) -> None:
+        result, log_began = await self._unknowable(_minutes(0), loser_updated_at=_minutes(0.5))
+        assert result is False
+        log_began.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_later_stamp_is_known_once_the_log_began_before_the_winner(self) -> None:
+        result, _ = await self._unknowable(
+            _minutes(0), loser_updated_at=_minutes(60), began=_minutes(-600)
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("began", [None, 120], ids=["no-log", "log-began-after"])
+    async def test_a_later_stamp_without_a_log_that_covers_it_is_unknowable(self, began) -> None:
+        result, log_began = await self._unknowable(
+            _minutes(0),
+            loser_updated_at=_minutes(60),
+            began=None if began is None else _minutes(began),
+        )
+        assert result is True
+        log_began.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_unread_loser_with_a_later_stamp_is_unknowable(self) -> None:
+        result, log_began = await self._unknowable(
+            _minutes(0), loser_updated_at=_minutes(60), loser_unread=True, began=_minutes(-600)
+        )
+        assert result is True
+        log_began.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_rollback_that_may_have_restored_a_later_edit_is_unknowable(self) -> None:
+        result, _ = await self._unknowable(_minutes(0), loser_unsure_until=_minutes(30))
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_no_winner_recency_tells_nothing(self) -> None:
+        result, _ = await self._unknowable(None, loser_updated_at=_minutes(60))
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_dedup_decides_through_the_shared_rule(self) -> None:
+        """Dedup's keep-both check is the shared function, called with its
+        per-run state (no copy of the rule left in dedup_merge)."""
+        winner = SimpleNamespace(id=uuid4(), created_at=_minutes(0), version=1)
+        loser = SimpleNamespace(id=uuid4(), created_at=_minutes(-60), updated_at=_minutes(30))
+        phase = DedupMergePhase.__new__(DedupMergePhase)
+        phase._log_began_read, phase._log_began_at = True, None
+        shared = AsyncMock(return_value=True)
+        with patch("services.sleep.dedup_merge.recency_unknowable", shared):
+            assert await phase._recency_unknowable(winner, loser) is True
+        args, kwargs = shared.await_args
+        assert args == (_minutes(0),)
+        assert kwargs["loser_updated_at"] == _minutes(30)
+        assert kwargs["loser_text_edited_at"] is None
+        assert kwargs["loser_unread"] is False
+        assert kwargs["log_began"] == phase._revision_log_began

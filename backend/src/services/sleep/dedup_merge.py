@@ -78,7 +78,14 @@ from services.sleep.coverage import (
     sweep_call_share,
 )
 from services.sleep.judge_lane import judge_platform_only
-from services.sleep.pair_write import locked_refusals, write_sleep_supersedes_edge
+from services.sleep.pair_write import (
+    edited_version,
+    locked_refusals,
+    recency_key,
+    recency_unknowable,
+    to_minute,
+    write_sleep_supersedes_edge,
+)
 from services.sleep.prompts import (
     DEDUP_JUDGE_SYSTEM,
     DEDUP_JUDGE_USER,
@@ -184,20 +191,6 @@ def _fmt_minute(dt: datetime | None) -> str | None:
     the post-hoc verification honest.
     """
     return f"{dt:%Y-%m-%d %H:%M}" if dt else None
-
-
-def _to_minute(dt: datetime) -> datetime:
-    """``dt`` at the minute precision the winner rules compare at."""
-    return dt.replace(second=0, microsecond=0)
-
-
-def _edited_version(version: object) -> bool:
-    """A ``Memory.version`` above 1: an edit moved it at least once (#3019).
-
-    Anything that is not an int (a test double, a missing attribute) reads as
-    unedited, so no revision read is made for it.
-    """
-    return isinstance(version, int) and not isinstance(version, bool) and version > 1
 
 
 # Similarity threshold for auto-merge without LLM (LLM-off mode)
@@ -1728,10 +1721,8 @@ class DedupMergePhase(EmbeddingSpendTracker):
         revision log (``_load_text_edit_times``); a memory with no edit known
         there is compared by its creation time.
         """
-        created = getattr(mem, "created_at", None)
         edited = (getattr(self, "_text_edited_at", None) or {}).get(mem.id)
-        stamps = [v for v in (created, edited) if isinstance(v, datetime)]
-        return max(stamps) if stamps else None
+        return recency_key(getattr(mem, "created_at", None), edited)
 
     async def _load_text_edit_times(self, cluster_memories: list[Memory]) -> None:
         """Read when each edited cluster member's text was last written (#3019).
@@ -1753,7 +1744,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         ids = [
             mem.id
             for mem in cluster_memories
-            if _edited_version(getattr(mem, "version", None)) and mem.id not in known
+            if edited_version(getattr(mem, "version", None)) and mem.id not in known
         ]
         if not ids:
             return
@@ -1796,43 +1787,20 @@ class DedupMergePhase(EmbeddingSpendTracker):
         show make it the newer row? Then the pair is kept (#3019, owner
         decision 2026-11-27).
 
-        ``loser`` is the row the winner rules make lose. The log holds every
-        text edit made since it began (``revision_log_began_query``), so an
-        edit it does not show was made before that. At the minute precision
-        the rules compare at, the pair is kept when:
-
-        - no logged edit wrote the loser's current text (a logged one is its
-          recency already, and an edit the log does not show is older);
-        - its ``updated_at`` is later than the winner's recency (every text
-          write stamps it, so an edit is never later than the stamp; Sleep's
-          bookkeeping stamps it without an edit, so the stamp alone tells
-          nothing);
-        - the log began after the winner's recency, or nothing tells when it
-          began. Otherwise an edit later than the winner's recency would be in
-          the log.
-
-        A loser whose revision read failed skips the last condition (its
-        logged edits are unknown). One a session rollback naming no block put
-        older text back on is kept when the latest edit it may have restored
-        (``TextEditTimes.unsure_until``) is later than the winner's recency.
-        The documented exception: a context-merge copy starts at version 1 and
-        its source's edits are logged under the source's id, so an edit made
-        there before the merge is not seen even after the log began.
+        ``loser`` is the row the winner rules make lose. The rule is
+        :func:`services.sleep.pair_write.recency_unknowable`, shared with the
+        supersede-apply phase (#3020), on this run's revision reads
+        (``_load_text_edit_times``) and log start (``_revision_log_began``).
         """
         self._ensure_audit_state()
-        winner_minute = self._recency_minute(winner)
-        if winner_minute is None or self._text_edited_at.get(loser.id) is not None:
-            return False
-        unsure = self._text_edit_unsure.get(loser.id)
-        if unsure is not None and _to_minute(unsure) > winner_minute:
-            return True
-        stamped = getattr(loser, "updated_at", None)
-        if not isinstance(stamped, datetime) or _to_minute(stamped) <= winner_minute:
-            return False
-        if loser.id in self._text_edit_unread:
-            return True
-        began = await self._revision_log_began()
-        return began is None or _to_minute(began) > winner_minute
+        return await recency_unknowable(
+            self._recency_key(winner),
+            loser_text_edited_at=self._text_edited_at.get(loser.id),
+            loser_unsure_until=self._text_edit_unsure.get(loser.id),
+            loser_updated_at=getattr(loser, "updated_at", None),
+            loser_unread=loser.id in self._text_edit_unread,
+            log_began=self._revision_log_began,
+        )
 
     async def _keep_both_when_unknowable(
         self,
@@ -1973,7 +1941,7 @@ class DedupMergePhase(EmbeddingSpendTracker):
         trigger the newer-wins flip nor defeat the source tie-break (#1209).
         """
         key = self._recency_key(mem)
-        return _to_minute(key) if key else None
+        return to_minute(key) if key else None
 
     def _rule_winner(self, a: Memory, b: Memory) -> tuple[Memory, str] | None:
         """The row the winner rules make win a merge of ``a`` and ``b`` whichever

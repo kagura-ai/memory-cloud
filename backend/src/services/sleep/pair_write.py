@@ -1,9 +1,12 @@
 """The pair writes Sleep's dedup and supersede-apply phases share (#3020).
 
 Both phases decide on two memory rows read earlier in the run and then write a
-``supersedes`` edge from the newer one to the older one. Two steps are shared
+``supersedes`` edge from the newer one to the older one. Three steps are shared
 so the two phases cannot drift:
 
+* :func:`recency_key` and :func:`recency_unknowable` say which memory of a pair
+  is newer: the later of its creation and its last logged text edit, and
+  whether the revision log can tell at all (#3019, owner decision 2026-11-27);
 * :func:`locked_refusals` re-reads both rows under ``FOR UPDATE`` right before
   the write and names every reason the write must not happen (the rules of
   #1519, #1524, #2996 and #3019);
@@ -14,7 +17,8 @@ so the two phases cannot drift:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +37,97 @@ from models.memory import (
 )
 from repositories.neural_edge import NeuralEdgeRepository
 from services.supersede_verify import CONTENT_HEAD_CHARS
+
+
+def to_minute(dt: datetime) -> datetime:
+    """``dt`` at the minute precision dedup's winner rules compare at."""
+    return dt.replace(second=0, microsecond=0)
+
+
+def edited_version(version: object) -> bool:
+    """A ``Memory.version`` above 1: an edit moved it at least once (#3019).
+
+    Anything that is not an int (a test double, a missing attribute) reads as
+    unedited, so no revision read is made for it.
+    """
+    return isinstance(version, int) and not isinstance(version, bool) and version > 1
+
+
+def recency_key(created_at: object, text_edited_at: object) -> datetime | None:
+    """When a memory's text was last written: the later of ``created_at`` and
+    its last logged text edit, else None (#1198, #3019).
+
+    ``created_at`` alone misses an in-place edit: an edit keeps it, so the row
+    holding the current fact can carry the older one. ``updated_at`` is not
+    the recency: writes that change no text stamp it too. The edit time is
+    ``memory_versions.text_edit_times(...).last`` over the memory's
+    ``updated`` revisions; a memory with no logged text edit is compared by
+    its creation time. Dedup compares two keys at the minute
+    (:func:`to_minute`) and lets its tie rules decide an equal minute; the
+    supersede-apply phase has no tie rule and refuses a later older memory at
+    any precision.
+    """
+    stamps = [value for value in (created_at, text_edited_at) if isinstance(value, datetime)]
+    return max(stamps) if stamps else None
+
+
+async def recency_unknowable(
+    winner_recency: datetime | None,
+    *,
+    loser_text_edited_at: datetime | None,
+    loser_unsure_until: datetime | None,
+    loser_updated_at: object,
+    loser_unread: bool,
+    log_began: Callable[[], Awaitable[datetime | None]],
+) -> bool:
+    """Could an edit of the loser's text that the revision log does not show
+    make it the newer memory? Then the pair is left alone (#3019, owner
+    decision 2026-11-27).
+
+    The loser is the memory a write would put behind the other: dedup's merge
+    loser, the supersede-apply phase's older memory. The log holds every text
+    edit made since it began (``memory_versions.revision_log_began_query``),
+    so an edit it does not show was made before that. At minute precision,
+    the pair is left alone when:
+
+    - no logged edit wrote the loser's current text (a logged one is its
+      recency already, and an edit the log does not show is older);
+    - its ``updated_at`` is later than the winner's recency (every text write
+      stamps it, so an edit is never later than the stamp; Sleep's
+      bookkeeping stamps it without an edit, so the stamp alone tells
+      nothing);
+    - the log began after the winner's recency, or nothing tells when it
+      began. Otherwise an edit later than the winner's recency would be in
+      the log.
+
+    A loser whose revision read failed (``loser_unread``) skips the last
+    condition (its logged edits are unknown). One a session rollback naming
+    no block put older text back on is left alone when the latest edit it may
+    have restored (``loser_unsure_until``, ``TextEditTimes.unsure_until``) is
+    later than the winner's recency. A context-merge copy starts at version 1
+    and its source's edits are logged under the source's id, so an edit made
+    there before the merge is not seen even after the log began.
+
+    Args:
+        winner_recency: The winner's :func:`recency_key`; None tells nothing.
+        loser_text_edited_at: The loser's last logged text edit, or None.
+        loser_unsure_until: ``TextEditTimes.unsure_until`` of the loser.
+        loser_updated_at: The loser's ``updated_at`` as read.
+        loser_unread: The loser's revision read failed.
+        log_began: Reads when the deployment's revision log began; awaited
+            only when the answer depends on it (the caller reads it once a run).
+    """
+    if winner_recency is None or loser_text_edited_at is not None:
+        return False
+    winner_minute = to_minute(winner_recency)
+    if loser_unsure_until is not None and to_minute(loser_unsure_until) > winner_minute:
+        return True
+    if not isinstance(loser_updated_at, datetime) or to_minute(loser_updated_at) <= winner_minute:
+        return False
+    if loser_unread:
+        return True
+    began = await log_began()
+    return began is None or to_minute(began) > winner_minute
 
 
 def _edited_since_fetch(memory: Any, locked_version: object) -> bool:

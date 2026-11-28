@@ -57,9 +57,11 @@ def _pair(i: int, *, verdict="supersedes", confidence=0.9, older_after=False, ta
         user_id=USER,
         context_id=UUID(CTX),
         created_at=created + timedelta(minutes=1) if older_after else created - timedelta(days=1),
+        updated_at=None,
         version=1,
         summary=f"old value {i}",
         content_head="old body",
+        content_chars=len("old body"),
         tags=list(tags or []),
     )
     new_summary, new_head = f"new value {i}", "new body"
@@ -106,11 +108,27 @@ class _Savepoint:
 class _Db:
     """Answers the three column selects from lists and records the rest."""
 
-    def __init__(self, carriers, targets=(), edges=(), locked_edges=None) -> None:
+    def __init__(
+        self,
+        carriers,
+        targets=(),
+        edges=(),
+        locked_edges=None,
+        *,
+        revisions=(),
+        revision_error: Exception | None = None,
+        log_began=None,
+    ) -> None:
         self.carriers = list(carriers)
         self.targets = list(targets)
         self.edges = list(edges)
         self.locked_edges = locked_edges
+        # The revision log: ``updated`` events (#3019's read) and its start.
+        self.revisions = list(revisions)
+        self.revision_error = revision_error
+        self.log_began = log_began
+        self.revision_reads: list[Any] = []
+        self.log_reads = 0
         self.statements: list[Any] = []
         self.updates: list[Any] = []
         self.savepoints: list[str] = []
@@ -129,6 +147,16 @@ class _Db:
             self.updates.append(stmt)
             return result
         names = {column.name for column in stmt.selected_columns}
+        if "writer" in names:
+            self.revision_reads.append(stmt)
+            if self.revision_error is not None:
+                raise self.revision_error
+            result.all.return_value = list(self.revisions)
+            return result
+        if names == {"at"}:
+            self.log_reads += 1
+            result.scalar.return_value = self.log_began
+            return result
         if "supersede_candidate" in names:
             rows = self.carriers
         elif "tags" in names:
@@ -515,6 +543,131 @@ class TestReasons:
         run = await _run(db, [(newer, older)])
         assert run.result.details["applied"] == 1
         assert _reasons(run) == {}
+
+
+# ------------------------------------------------------------ text recency
+
+
+def _text_edit(memory, at, *, version=2, text=True):
+    """One logged ``updated`` event of ``memory`` (an API edit), as the read returns it."""
+    memory.version = max(memory.version, version)
+    return SimpleNamespace(
+        memory_id=memory.id, version=version, writer="api", at=at, text=text, restored_from=None
+    )
+
+
+class TestTextRecency:
+    """#3020: the direction rule is dedup's recency (#3019): the later of a
+    memory's creation and its last logged text edit; a pair the revision log
+    cannot order is left alone, under dedup's keep-both conditions."""
+
+    @pytest.mark.asyncio
+    async def test_an_older_memory_edited_after_the_newer_was_written_is_refused(self) -> None:
+        """The verdict is fresh for both current texts: only the edit time tells."""
+        newer, older = _pair(0)
+        older.updated_at = newer.created_at + timedelta(hours=1)
+        edits = [_text_edit(older, newer.created_at + timedelta(hours=1))]
+        db = _db_for([(newer, older)], revisions=edits)
+        run = await _run(db, [(newer, older)])
+        assert _reasons(run) == {"newer_target": 1}
+        run.writer.assert_not_awaited()
+        assert run.phase.coverage_outcome.outcomes[newer.id] == SETTLED
+
+    @pytest.mark.asyncio
+    async def test_an_edit_seconds_after_the_newer_refuses_too(self) -> None:
+        """Compared to the microsecond: no tie rule decides an equal minute here."""
+        newer, older = _pair(0)
+        older.updated_at = newer.created_at + timedelta(seconds=5)
+        edits = [_text_edit(older, newer.created_at + timedelta(seconds=5))]
+        run = await _run(_db_for([(newer, older)], revisions=edits), [(newer, older)])
+        assert _reasons(run) == {"newer_target": 1}
+
+    @pytest.mark.asyncio
+    async def test_an_older_memory_edited_before_the_newer_was_written_is_applied(self) -> None:
+        newer, older = _pair(0)
+        older.updated_at = newer.created_at - timedelta(hours=1)
+        edits = [_text_edit(older, newer.created_at - timedelta(hours=1))]
+        db = _db_for([(newer, older)], revisions=edits)
+        run = await _run(db, [(newer, older)])
+        assert run.result.details["applied"] == 1
+        # One read for the edited rows only; the log start is not needed.
+        assert len(db.revision_reads) == 1
+        params = db.revision_reads[0].compile(dialect=postgresql.dialect()).params
+        assert [v for v in params.values() if isinstance(v, list)] == [[older.id]]
+        assert db.log_reads == 0
+
+    @pytest.mark.asyncio
+    async def test_a_newer_memory_edited_later_still_wins(self) -> None:
+        newer, older = _pair(0)
+        older.updated_at = newer.created_at + timedelta(hours=1)
+        edits = [
+            _text_edit(older, newer.created_at + timedelta(hours=1)),
+            _text_edit(newer, newer.created_at + timedelta(hours=2)),
+        ]
+        run = await _run(_db_for([(newer, older)], revisions=edits), [(newer, older)])
+        assert run.result.details["applied"] == 1
+
+    @pytest.mark.asyncio
+    async def test_an_edit_of_other_fields_does_not_count(self) -> None:
+        newer, older = _pair(0)
+        older.updated_at = newer.created_at + timedelta(hours=1)
+        edits = [_text_edit(older, newer.created_at + timedelta(hours=1), text=False)]
+        db = _db_for([(newer, older)], revisions=edits, log_began=T0 - timedelta(days=90))
+        run = await _run(db, [(newer, older)])
+        assert run.result.details["applied"] == 1
+        assert db.log_reads == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("began", [None, "after"], ids=["no-log", "log-began-after"])
+    async def test_a_later_stamp_the_log_does_not_cover_is_unknowable(self, began) -> None:
+        newer, older = _pair(0)
+        older.updated_at = newer.created_at + timedelta(hours=1)
+        log_began = None if began is None else newer.created_at + timedelta(minutes=30)
+        db = _db_for([(newer, older)], log_began=log_began)
+        run = await _run(db, [(newer, older)])
+        assert _reasons(run) == {"ambiguous_recency": 1}
+        run.writer.assert_not_awaited()
+        assert db.revision_reads == []
+
+    @pytest.mark.asyncio
+    async def test_a_later_stamp_the_log_covers_is_known(self) -> None:
+        newer, older = _pair(0)
+        older.updated_at = newer.created_at + timedelta(hours=1)
+        db = _db_for([(newer, older)], log_began=T0 - timedelta(days=90))
+        run = await _run(db, [(newer, older)])
+        assert run.result.details["applied"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_revision_read_leaves_a_later_stamp_unknowable(self) -> None:
+        newer, older = _pair(0)
+        older.version = 2
+        older.updated_at = newer.created_at + timedelta(hours=1)
+        db = _db_for(
+            [(newer, older)],
+            revision_error=RuntimeError("revision read failed"),
+            log_began=T0 - timedelta(days=90),
+        )
+        run = await _run(db, [(newer, older)])
+        assert _reasons(run) == {"ambiguous_recency": 1}
+        # The failed read was rolled back to its own savepoint.
+        assert db.savepoints[:2] == ["begin", "rollback"]
+
+    @pytest.mark.asyncio
+    async def test_the_log_start_is_read_once_a_run(self) -> None:
+        pairs = [_pair(i) for i in range(2)]
+        for newer, older in pairs:
+            older.updated_at = newer.created_at + timedelta(hours=1)
+        db = _db_for(pairs, log_began=None)
+        run = await _run(db, pairs)
+        assert _reasons(run) == {"ambiguous_recency": 2}
+        assert db.log_reads == 1
+
+    @pytest.mark.asyncio
+    async def test_newer_target_wins_over_ambiguous_recency(self) -> None:
+        newer, older = _pair(0, older_after=True)
+        older.updated_at = newer.created_at + timedelta(hours=1)
+        run = await _run(_db_for([(newer, older)], log_began=None), [(newer, older)])
+        assert _reasons(run) == {"newer_target": 1}
 
 
 # ------------------------------------------------------------- under the lock
