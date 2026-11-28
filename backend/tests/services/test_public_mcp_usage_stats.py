@@ -180,9 +180,10 @@ async def test_statements_get_a_naive_utc_bound_and_both_ids(serving) -> None:
     bound = [p for s, p in db.executed if s in (stats.DAY_COUNTS, stats.TOP_DOCUMENTS)]
     assert len(bound) == 2
     today = stats.utcnow().date()
-    for params in bound:
+    # No day closed (#3053): the events of the whole window are counted.
+    for params, key in zip(bound, ("events_from", "first_day_start"), strict=True):
         assert params is not None
-        start = params["first_day_start"]
+        start = params[key]
         assert type(start) is datetime and start.tzinfo is None
         assert start == datetime.combine(today - timedelta(days=6), datetime.min.time())
         assert params["endpoint_id"] == ENDPOINT.id
@@ -208,9 +209,9 @@ async def test_every_statement_is_planned_for_its_own_window(serving) -> None:
     ]
     await _read(db, clock)
     statements = [s for s, _ in db.executed]
-    for read in (stats.DAY_COUNTS, stats.VISITORS_BY_DAY, stats.TOP_DOCUMENTS):
+    for read in (stats.CLOSED_DAYS, stats.DAY_COUNTS, stats.VISITORS_BY_DAY, stats.TOP_DOCUMENTS):
         at = statements.index(read)
-        assert stats._STATEMENT_TIMEOUT in statements[:at]
+        assert statements[at - 1] is stats._STATEMENT_TIMEOUT
 
 
 async def test_both_sections_take_search_from_one_definition(serving) -> None:
@@ -279,8 +280,9 @@ async def test_statement_timeout_is_the_smaller_of_five_seconds_and_the_time_lef
     ]
     db.cost[stats.TOP_DOCUMENTS] = 2.4996  # 0.4 ms left for the next steps
     await _read(db, clock)
-    # A, then V and B with what is left, then B's two later steps.
-    assert db.timeouts() == ["5000", "2500", "2500", "1", "1"]
+    # A (the closed days, then the counts: #3053), then V and B with what is
+    # left, then B's two later steps.
+    assert db.timeouts() == ["5000", "5000", "2500", "2500", "1", "1"]
 
 
 async def test_day_count_failure_is_unavailable(monkeypatch) -> None:
@@ -571,3 +573,59 @@ def test_the_recording_flags_follow_both_switches(monkeypatch) -> None:
         monkeypatch.setattr(settings, "mcp_public_telemetry_enabled", telemetry)
         monkeypatch.setattr(settings, "public_search_telemetry_enabled", rest)
         assert stats.usage_recording_flags() == expected
+
+
+# ----------------------------------------------------------------------------
+# #3053: closed past days from the day counts, the rest from the events
+# ----------------------------------------------------------------------------
+
+
+def test_the_events_are_read_from_the_oldest_open_day() -> None:
+    today = date(2026, 11, 29)
+    first = today - timedelta(days=6)
+    every_past_day = [first + timedelta(days=i) for i in range(6)]
+    assert stats.events_start(first, today, every_past_day) == datetime(2026, 11, 29)
+    assert stats.events_start(first, today, []) == datetime(2026, 11, 23)
+    # Yesterday not closed yet (the minutes after midnight).
+    assert stats.events_start(first, today, every_past_day[:-1]) == datetime(2026, 11, 28)
+    # A day in the middle not closed: from that day on.
+    gap = every_past_day[:2] + every_past_day[3:]
+    assert stats.events_start(first, today, gap) == datetime(2026, 11, 25)
+    # A one-day window is today alone.
+    assert stats.events_start(today, today, []) == datetime(2026, 11, 29)
+
+
+async def test_closed_days_are_read_from_the_counts_and_the_rest_from_the_events(
+    serving,
+) -> None:
+    clock = _Clock()
+    db = _Session(clock)
+    today = stats.utcnow().date()
+    first = today - timedelta(days=29)
+    closed = [first + timedelta(days=i) for i in range(29) if i != 20]
+    db.results[stats.CLOSED_DAYS] = [(day,) for day in reversed(closed)]
+    await _read(db, clock, days=30)
+    [closed_params] = [p for s, p in db.executed if s is stats.CLOSED_DAYS]
+    assert closed_params == {"first_day": first, "today": today}
+    [params] = [p for s, p in db.executed if s is stats.DAY_COUNTS]
+    assert params is not None
+    assert params["closed_days"] == closed
+    assert params["events_from"] == datetime.combine(
+        first + timedelta(days=20), datetime.min.time()
+    )
+    # Both statements in the counts' savepoint, the closed days first.
+    statements = [s for s, _ in db.executed]
+    assert statements.index(stats.CLOSED_DAYS) < statements.index(stats.DAY_COUNTS)
+    assert db.savepoints == 3
+
+
+def test_the_day_counts_read_the_closed_days_and_the_open_events() -> None:
+    sql = str(stats.DAY_COUNTS)
+    assert "FROM public_mcp_usage_day_counts" in sql
+    assert "day = ANY(CAST(:closed_days AS date[]))" in sql
+    assert "UNION ALL" in sql
+    assert "occurred_at >= :events_from" in sql
+    assert "(occurred_at)::date <> ALL(CAST(:closed_days AS date[]))" in sql
+    closed = str(stats.CLOSED_DAYS)
+    assert "FROM public_mcp_usage_closed_days" in closed
+    assert "day >= :first_day AND day < :today" in closed

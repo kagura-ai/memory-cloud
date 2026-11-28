@@ -9,6 +9,12 @@ reported per UTC day, and the documents searches returned most often.
 Anonymous REST public searches are never recorded, so never counted here.
 Nothing is written.
 
+Day counts (#3053): a past UTC day that is closed
+(``public_mcp_usage_closed_days``) is read from its per-day counts
+(``public_mcp_usage_day_counts``, ``services/public_mcp_usage_rollup.py``),
+every other day of the window, today always, from the events. Both give the
+same numbers; the body does not say which was read.
+
 Bounds: one wall-clock budget for the whole read (no step starts after it);
 before each step a transaction-local ``statement_timeout`` of the smaller of
 ``USAGE_STATS_STATEMENT_TIMEOUT_MS`` and the time left, and custom plans
@@ -31,7 +37,7 @@ serves right now, through the resolver the observability API uses
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import time as day_time
@@ -86,16 +92,28 @@ _STATEMENT_TIMEOUT = text(
     "SELECT set_config('statement_timeout', :ms, true), "
     "set_config('plan_cache_mode', 'force_custom_plan', true)"
 )
-# Route and caller: NULL (a row written before f67) is a public MCP call by
-# an anonymous caller; both defaults are bound, never written in the SQL.
+# #3053: the closed past days of the window (today is never one).
+CLOSED_DAYS = text(
+    "SELECT day FROM public_mcp_usage_closed_days WHERE day >= :first_day AND day < :today"
+)
+# The closed days from their counts, every other day of the window from the
+# events (from ``events_from``, the start of the oldest day that is not
+# closed). Route and caller of an event: NULL (a row written before f67) is
+# a public MCP call by an anonymous caller; both defaults are bound, never
+# written in the SQL; the counts carry them already.
 DAY_COUNTS = text(
+    "SELECT day, tool, outcome, route, caller, calls FROM public_mcp_usage_day_counts "
+    "WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id "
+    "AND day = ANY(CAST(:closed_days AS date[])) "
+    "UNION ALL "
     "SELECT (occurred_at)::date AS day, tool, outcome, "
     "COALESCE(route, :default_route) AS route, "
     "COALESCE(caller, :default_caller) AS caller, "
     "count(*) AS calls "
     "FROM public_mcp_usage_events "
     "WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id "
-    "AND kind = 'tool_call' AND occurred_at >= :first_day_start "
+    "AND kind = 'tool_call' AND occurred_at >= :events_from "
+    "AND (occurred_at)::date <> ALL(CAST(:closed_days AS date[])) "
     "GROUP BY 1, 2, 3, 4, 5"
 )
 VISITORS_BY_DAY = text(
@@ -276,6 +294,19 @@ def window(days: int, retention_days: int, today: date) -> tuple[int, date, date
     return window_days, first_day, datetime.combine(first_day, day_time.min)
 
 
+def events_start(first_day: date, today: date, closed_days: Iterable[date]) -> datetime:
+    """Where the window's events are counted from (#3053), a naive UTC datetime.
+
+    The start of the oldest day of the window that is not closed, or of
+    today when every earlier day is.
+    """
+    closed = set(closed_days)
+    day = first_day
+    while day < today and day in closed:
+        day += timedelta(days=1)
+    return datetime.combine(day, day_time.min)
+
+
 def usage_recording_flags() -> tuple[bool, bool, bool]:
     """``(recording_enabled, rest_recording_enabled, visitor_counting_enabled)``.
 
@@ -374,23 +405,35 @@ async def read_usage_stats(
         await db.execute(_READ_ONLY)
         await step(ms)
 
-    window_days, first_day, first_day_start = window(days, retention_days, utcnow().date())
+    today = utcnow().date()
+    window_days, first_day, first_day_start = window(days, retention_days, today)
     scope = {
         "endpoint_id": endpoint.id,
         "workspace_id": workspace_id,
         "first_day_start": first_day_start,
     }
 
-    # A. Day counts: the answer itself.
+    # A. Day counts: the answer itself. Closed past days from their counts,
+    # the rest from the events (#3053).
     try:
         time_left_ms()
         async with db.begin_nested():
             await section_start()
+            closed_days = sorted(
+                row[0]
+                for row in (
+                    await db.execute(CLOSED_DAYS, {"first_day": first_day, "today": today})
+                ).all()
+            )
+            await step()
             rows = (
                 await db.execute(
                     DAY_COUNTS,
                     {
-                        **scope,
+                        "endpoint_id": endpoint.id,
+                        "workspace_id": workspace_id,
+                        "closed_days": closed_days,
+                        "events_from": events_start(first_day, today, closed_days),
                         "default_route": PMU_ROUTE_MCP,
                         "default_caller": PMU_CALLER_ANONYMOUS,
                     },
