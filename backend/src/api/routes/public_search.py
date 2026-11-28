@@ -15,7 +15,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.api_keys import APIKeyManager, VerifiedKey
+from auth.api_keys import (
+    APIKeyManager,
+    VerifiedKey,
+    bound_key_owner_holds_context_workspace,
+)
 from auth.dependencies import get_api_key
 from config.plan_tiers import get_plan_tier
 from db.base import get_db
@@ -348,7 +352,9 @@ async def _resolve_public_attribution(
 
     Status codes (matches the route docstring's ``Errors:`` section):
 
-    - ``401`` for authentication failure (invalid / expired / revoked key).
+    - ``401`` for authentication failure (invalid / expired / revoked key,
+      or a public-bound key whose owner no longer belongs to the live
+      workspace of its context: the same answer).
     - ``403`` for authorization failure (key authenticates but is owner /
       workspace-scoped, or is bound to a different context).
     """
@@ -358,6 +364,22 @@ async def _resolve_public_attribution(
     verified = await APIKeyManager(db).verify_key(api_key)
     if verified is None:
         # Authentication failure — invalid hash, revoked, or expired.
+        raise APIKeyError("Invalid or expired API key")
+
+    # A public-bound key serves only while its owner belongs to the live
+    # workspace of its context, as a workspace-scoped key does (#2928). Checked
+    # before anything else reads the key, with an unknown key's answer; the
+    # request's rollback drops the ``last_used_at`` that ``verify_key`` wrote.
+    if verified.bound_context_id is not None and not (
+        await bound_key_owner_holds_context_workspace(
+            db, user_id=verified.user_id, context_id=verified.bound_context_id
+        )
+    ):
+        logger.warning(
+            "public_bound_key_rejected_owner_not_in_workspace",
+            key_prefix=verified.key_prefix,
+            requested_context_id=str(context_id),
+        )
         raise APIKeyError("Invalid or expired API key")
 
     if verified.bound_context_id is None:
@@ -497,9 +519,10 @@ async def public_search(
         bound_key_id=bound_key.id if bound_key else None,
     )
 
-    # 2. Get context and verify it's public
+    # 2. Get context and verify it's public. A soft-deleted context reads as
+    # a missing one.
     context = await db.get(Context, context_id)
-    if not context:
+    if not context or context.deleted_at is not None:
         raise NotFoundException("Context", str(context_id))
 
     if context.is_public is not True:
@@ -541,6 +564,10 @@ async def public_search(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Context workspace not found",
             )
+    # The context of a soft-deleted workspace reads as missing too (a bound
+    # key of one was refused above: its owner holds no live workspace).
+    if workspace.deleted_at is not None:
+        raise NotFoundException("Context", str(context_id))
 
     # #1939: anonymous serving pauses when the owner's plan has no public
     # allowance (it fell back to Free) — after the anonymous bucket, so a
@@ -729,9 +756,9 @@ async def get_public_context_info(
         await check_pre_auth_rate_limit(context_id)
     await _resolve_public_attribution(api_key, context_id, db)
 
-    # Get context
+    # Get context (a soft-deleted one reads as missing, as on /search)
     context = await db.get(Context, context_id)
-    if not context:
+    if not context or context.deleted_at is not None:
         raise NotFoundException("Context", str(context_id))
 
     if context.is_public is not True:
@@ -741,6 +768,8 @@ async def get_public_context_info(
     # plan has no public allowance — same refusal as /search.
     workspace = await db.get(Workspace, context.workspace_id)
     if workspace is not None:
+        if workspace.deleted_at is not None:
+            raise NotFoundException("Context", str(context_id))
         ensure_public_serving_allowed(workspace)
         # #2918: nor while the workspace is slot-suspended (redacted, as /search).
         await ensure_slot_active(db, workspace, user_id=None, outsider=True)

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import secrets
 from datetime import timedelta
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from uuid import UUID
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import ColumnElement, and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.connector_keys import CONNECTOR_KEY_PREFIX
@@ -120,6 +120,70 @@ async def key_owner_holds_workspace(db: AsyncSession, *, user_id: str, workspace
         ),
     )
     return bool(await db.scalar(select(holds)))
+
+
+async def bound_key_owner_holds_context_workspace(
+    db: AsyncSession, *, user_id: str, context_id: UUID
+) -> bool:
+    """Whether the owner of a public-bound key holds its context's workspace.
+
+    The rule of :func:`key_owner_holds_workspace`, for the workspace of the
+    key's bound context: the workspace is live and ``user_id`` is its owner or
+    has a ``workspace_members`` row in it. A missing context does not hold.
+    One statement.
+
+    Args:
+        db: Async database session.
+        user_id: The key's owner.
+        context_id: The key's ``bound_context_id``.
+
+    Returns:
+        True when the key's owner holds the workspace of the bound context.
+    """
+    holds = exists().where(
+        Context.id == context_id,
+        Workspace.id == Context.workspace_id,
+        Workspace.deleted_at.is_(None),
+        or_(
+            Workspace.owner_user_id == user_id,
+            exists().where(
+                WorkspaceMember.workspace_id == Context.workspace_id,
+                WorkspaceMember.user_id == user_id,
+            ),
+        ),
+    )
+    return bool(await db.scalar(select(holds)))
+
+
+def bound_to_contexts_of(workspace_ids: Any) -> ColumnElement[bool]:
+    """``api_keys`` rows public-bound to a context of the given workspaces.
+
+    Such a key has no ``workspace_id`` of its own (the DB CHECK), so a path
+    that ends a workspace's keys (member removal, a workspace's rows deleted
+    for good) reaches it through its context. ``bound_context_id`` is
+    ``ON DELETE SET NULL``: a key left in place when its context goes would
+    lose its binding, so these paths delete it before the context.
+
+    Args:
+        workspace_ids: A list of workspace ids or a select of them.
+    """
+    return APIKey.bound_context_id.in_(
+        select(Context.id).where(Context.workspace_id.in_(workspace_ids))
+    )
+
+
+def member_keys_in_workspace(user_id: str, workspace_id: UUID) -> ColumnElement[bool]:
+    """The ``api_keys`` rows of ``user_id`` that belong to ``workspace_id``.
+
+    The workspace-scoped ones (plain, agent and connector keys) and the
+    public-bound ones of the workspace's contexts. The member credentials
+    listing shows these (it adds ``revoked_at IS NULL``) and the member's
+    removal deletes them.
+    """
+    return and_(
+        APIKey.user_id == user_id,
+        or_(APIKey.workspace_id == workspace_id, bound_to_contexts_of([workspace_id])),
+    )
 
 
 def apply_zero_knowledge_hide(key: APIKey) -> None:
