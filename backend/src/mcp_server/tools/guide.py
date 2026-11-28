@@ -474,7 +474,6 @@ GUIDE_TOPICS: dict[str, str] = {
         "embedding call; use "
         "it for the memory you suspect already exists, not for every write."
     ),
-    # ----------------------------------------------------------- remember_batch
     "remember.limits": (
         "Two plan limits refuse a new memory with error quota_exceeded. quota_type "
         "'memories' is the workspace's total of live memories (every member's and the "
@@ -493,6 +492,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "upgrade the plan from the web UI (Workspace settings → Plan); on a deployment "
         "without billing ('admin') its administrator raises the limit."
     ),
+    # ----------------------------------------------------------- remember_batch
     "remember_batch.usage": (
         "remember_batch(context_id, items, atomic=false, tags_normalize=false, "
         "dedupe='suggest') stores up to 50 memories in one call — the end-of-session "
