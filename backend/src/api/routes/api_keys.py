@@ -71,13 +71,15 @@ async def get_api_key_manager(db: AsyncSession = Depends(get_db)) -> APIKeyManag
 # ============================================================================
 
 
-async def _key_workspace_held(db: AsyncSession, key: APIKey) -> bool:
+async def _key_workspace_held(db: AsyncSession, key: APIKey, *, live_context: bool = False) -> bool:
     """Whether the key's owner holds the key's workspace (#2928).
 
     A workspace-scoped key needs the condition key verification applies: a
     live workspace its owner owns or has a membership row in. A public-bound
     key needs the same of the workspace of its bound context, the condition
-    the REST public search applies. True for a global key.
+    the REST public search applies, and with ``live_context`` a bound context
+    that is not soft-deleted (a rotation re-mints the binding). True for a
+    global key.
     """
     if key.workspace_id is not None:
         return await key_owner_holds_workspace(
@@ -85,7 +87,7 @@ async def _key_workspace_held(db: AsyncSession, key: APIKey) -> bool:
         )
     if key.bound_context_id is not None:
         return await bound_key_owner_holds_context_workspace(
-            db, user_id=key.user_id, context_id=key.bound_context_id
+            db, user_id=key.user_id, context_id=key.bound_context_id, live_context=live_context
         )
     return True
 
@@ -572,9 +574,10 @@ async def regenerate_api_key(
         old_key = result.scalar_one_or_none()
 
         # #2928: a workspace-scoped key is rotated only while its owner holds
-        # the workspace, the condition key verification applies; otherwise the
-        # same 404, before anything is minted or recorded.
-        if not old_key or not await _key_workspace_held(db, old_key):
+        # the workspace, the condition key verification applies, and a bound
+        # key only while its context is live; otherwise the same 404, before
+        # anything is minted or recorded.
+        if not old_key or not await _key_workspace_held(db, old_key, live_context=True):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="API key not found or not owned by you",

@@ -9,7 +9,8 @@ On real PostgreSQL rows:
 * a bound key whose owner has no membership row in the context's workspace,
   or whose workspace is soft-deleted, is refused by the REST public search
   and ``/info`` with an unknown key's 401, and the refusal writes nothing; a
-  current member's key serves; MCP binding introspection lists neither;
+  current member's key serves; MCP binding introspection lists neither,
+  nor a binding to a soft-deleted context;
 * a soft-deleted context, and a context of a soft-deleted workspace, answer
   404 on both routes like a missing context, with a key and without;
 * deleting a workspace's rows for good (admin user deletion, account
@@ -385,6 +386,25 @@ async def test_binding_introspection_lists_only_bindings_whose_workspace_is_held
         )
     )
     assert by_key["error"] == "binding_not_found"
+
+
+async def test_a_binding_to_a_soft_deleted_context_is_not_listed(served):
+    from mcp_server.tools.api_keys import handle_describe_binding, handle_list_my_bindings
+
+    member_ctx, _ = served.member
+    key_id = await served.db.scalar(
+        select(APIKey.public_id).where(APIKey.bound_context_id == member_ctx)
+    )
+    await served.db.execute(
+        update(Context).where(Context.id == member_ctx).values(deleted_at=func.now())
+    )
+    await served.db.commit()
+
+    listed = _tool_data(await handle_list_my_bindings({}, served.member_user, None))
+    assert listed["bindings"] == []
+    for selector in ({"context_id": str(member_ctx)}, {"key_id": key_id}):
+        described = _tool_data(await handle_describe_binding(selector, served.member_user, None))
+        assert described["error"] == "binding_not_found", selector
 
 
 # ---------------------------------------------------------------------------

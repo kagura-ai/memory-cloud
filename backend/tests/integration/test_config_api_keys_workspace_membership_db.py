@@ -12,7 +12,8 @@ On real PostgreSQL rows, over HTTP with the session dependency:
   before;
 * a public-bound key is held through the workspace of its bound context: the
   same rules for a bound key whose owner has no membership row there, and for
-  a member's bound key.
+  a member's bound key; a bound key of a soft-deleted context is not rotated
+  (the same 404).
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -254,7 +255,9 @@ async def bound(world):
         )
         await db.commit()
         bound = SimpleNamespace(
-            member_key=member_bound.public_id, outsider_key=outsider_bound.public_id
+            context_id=context_id,
+            member_key=member_bound.public_id,
+            outsider_key=outsider_bound.public_id,
         )
     try:
         yield bound
@@ -274,6 +277,21 @@ async def test_a_bound_key_is_rotated_only_while_its_owner_holds_the_contexts_wo
 
     assert (response.status_code, response.json()) == (404, NOT_FOUND)
     assert await _keys_of(world, world.outsider) == before
+    assert await _history(world) == []
+
+
+async def test_a_bound_key_of_a_soft_deleted_context_is_not_rotated(world, bound):
+    async with world.factory() as db:
+        await db.execute(
+            update(Context).where(Context.id == bound.context_id).values(deleted_at=func.now())
+        )
+        await db.commit()
+    before = await _keys_of(world, world.member)
+
+    response = await _call(world, "POST", f"/{bound.member_key}/regenerate", world.member)
+
+    assert (response.status_code, response.json()) == (404, NOT_FOUND)
+    assert await _keys_of(world, world.member) == before
     assert await _history(world) == []
 
 

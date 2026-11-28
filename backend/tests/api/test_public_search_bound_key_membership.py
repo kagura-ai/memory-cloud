@@ -6,7 +6,9 @@ Unit level, on stubs (the database cases are in
 * a public-bound key whose owner does not hold the live workspace of its
   context is refused with an unknown key's error, before the scope checks;
 * the membership statement is one EXISTS over the context, its live workspace
-  and the membership row; it runs only for a bound key;
+  and the membership row; it runs only for a bound key; the public search's
+  statement leaves a soft-deleted context to the context check, the binding
+  introspection's (``live_context``) leaves the binding out;
 * a soft-deleted context, and a context of a soft-deleted workspace, raise the
   missing context's 404 on ``/search`` and ``/info``;
 * the member credentials listing and the member's removal use one predicate.
@@ -143,6 +145,53 @@ def test_the_condition_correlates_to_an_outer_query_over_api_keys():
     assert "workspaces_1.owner_user_id = api_keys.user_id" in sql
     assert "FROM workspace_members WHERE" in sql
     assert "workspace_members.user_id = api_keys.user_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_the_public_search_check_leaves_a_deleted_context_to_the_context_check():
+    """The REST public search answers a soft-deleted context with the missing
+    context's 404 from its context check, with a key and without: its
+    membership statement does not refuse the key for the context's deletion."""
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=True)
+
+    await bound_key_owner_holds_context_workspace(db, user_id="u-1", context_id=uuid4())
+
+    (stmt,), _ = db.scalar.await_args
+    sql = " ".join(_compiled(stmt).split())
+    assert "workspaces_1.deleted_at IS NULL" in sql
+    assert "contexts_1.deleted_at IS NULL" not in sql
+
+
+@pytest.mark.asyncio
+async def test_a_live_binding_also_needs_its_context_live():
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=True)
+
+    await bound_key_owner_holds_context_workspace(
+        db, user_id="u-1", context_id=uuid4(), live_context=True
+    )
+
+    (stmt,), _ = db.scalar.await_args
+    sql = " ".join(_compiled(stmt).split())
+    assert sql.startswith("SELECT EXISTS (SELECT")
+    assert "contexts_1.deleted_at IS NULL" in sql
+    assert "workspaces_1.deleted_at IS NULL" in sql
+    assert "workspace_members.user_id = " in sql
+
+
+def test_binding_introspection_lists_only_bindings_to_a_live_context():
+    """``list_my_bindings`` and ``describe_binding`` share these conditions."""
+    from sqlalchemy import select
+
+    from mcp_server.tools.api_keys import _key_scope_conditions
+    from models.auth import APIKey
+
+    stmt = select(APIKey.id).where(*_key_scope_conditions())
+    sql = " ".join(_compiled(stmt).split())
+
+    assert "contexts_1.id = api_keys.bound_context_id" in sql
+    assert "contexts_1.deleted_at IS NULL" in sql
 
 
 # ---------------------------------------------------------------------------

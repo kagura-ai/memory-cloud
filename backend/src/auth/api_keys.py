@@ -123,7 +123,9 @@ async def key_owner_holds_workspace(db: AsyncSession, *, user_id: str, workspace
     return bool(await db.scalar(select(holds)))
 
 
-def bound_key_owner_holds(user_id: Any, context_id: Any) -> ColumnElement[bool]:
+def bound_key_owner_holds(
+    user_id: Any, context_id: Any, *, live_context: bool = False
+) -> ColumnElement[bool]:
     """The rule of :func:`key_owner_holds_workspace` for a public-bound key.
 
     True when the workspace of the key's bound context is live and
@@ -132,15 +134,24 @@ def bound_key_owner_holds(user_id: Any, context_id: Any) -> ColumnElement[bool]:
     the condition also filters a query over ``api_keys`` (correlated on
     ``APIKey.user_id`` / ``APIKey.bound_context_id``).
 
+    With ``live_context`` the bound context itself must also be live
+    (``deleted_at IS NULL``): the binding introspection and a key's rotation
+    leave out a binding to a soft-deleted context. The REST public search
+    does not ask for it: its context check answers a soft-deleted context
+    with the missing context's 404, with a key and without.
+
     Args:
         user_id: The key's owner (a value or a column).
         context_id: The key's ``bound_context_id`` (a value or a column).
+        live_context: Also require the bound context not to be soft-deleted.
     """
     # Aliased, so an outer query over ``contexts`` or ``workspaces`` does not
     # correlate them away.
     bound, workspace = aliased(Context), aliased(Workspace)
+    context_live = (bound.deleted_at.is_(None),) if live_context else ()
     return exists().where(
         bound.id == context_id,
+        *context_live,
         workspace.id == bound.workspace_id,
         workspace.deleted_at.is_(None),
         or_(
@@ -158,7 +169,7 @@ def bound_key_owner_holds(user_id: Any, context_id: Any) -> ColumnElement[bool]:
 
 
 async def bound_key_owner_holds_context_workspace(
-    db: AsyncSession, *, user_id: str, context_id: UUID
+    db: AsyncSession, *, user_id: str, context_id: UUID, live_context: bool = False
 ) -> bool:
     """Whether the owner of a public-bound key holds its context's workspace.
 
@@ -168,11 +179,13 @@ async def bound_key_owner_holds_context_workspace(
         db: Async database session.
         user_id: The key's owner.
         context_id: The key's ``bound_context_id``.
+        live_context: Also require the bound context not to be soft-deleted.
 
     Returns:
         True when the key's owner holds the workspace of the bound context.
     """
-    return bool(await db.scalar(select(bound_key_owner_holds(user_id, context_id))))
+    held = bound_key_owner_holds(user_id, context_id, live_context=live_context)
+    return bool(await db.scalar(select(held)))
 
 
 def bound_to_contexts_of(workspace_ids: Any) -> ColumnElement[bool]:
