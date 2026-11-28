@@ -329,3 +329,87 @@ class TestFoldUnderKeywordFloor:
         assert head["hybrid_score"] == pytest.approx(0.9)
         assert head["score"] == pytest.approx(0.9)
         assert head["keyword_rank"] == 1
+
+
+class TestAppliedLinkInThePool3020:
+    """#3020 ``folded``: a link Sleep applied keeps its older memory in the pool
+    (it does not hide), and the fold links it like a verified suggestion. The
+    links come from every applied (older -> newer ones) pair shadowing read,
+    not from the shadow map, which names one superseder per older memory."""
+
+    def test_an_applied_link_whose_dst_stayed_in_the_pool_links(self):
+        newer, older = _mem(0), _mem(1)
+        fold = _nodes(pool=[newer, older])
+
+        links = fold_links(fold, {}, {older.id: newer.id}, {older.id: {newer.id}})
+
+        assert links == {newer.id: {older.id}}
+
+    def test_the_annotation_map_alone_links_no_pool_row(self):
+        """The shadow map is the ``superseded_by`` annotation, not the link set."""
+        newer, older = _mem(0), _mem(1)
+        fold = _nodes(pool=[newer, older])
+
+        assert fold_links(fold, {}, {older.id: newer.id}) == {}
+
+    def test_its_newer_memory_must_be_a_node(self):
+        older = _mem(1)
+        fold = _nodes(pool=[older])
+
+        assert fold_links(fold, {}, {older.id: uuid4()}, {older.id: {uuid4()}}) == {}
+
+    def test_a_self_link_is_ignored(self):
+        row = _mem(0)
+
+        assert fold_links(_nodes(pool=[row]), {}, {row.id: row.id}, {row.id: {row.id}}) == {}
+
+    def test_a_hiding_dst_is_a_bridge_not_a_pool_row(self):
+        """Shadowing removed a hiding link's older memory from the pool: it only
+        reaches the fold as a bridge, through the clause that was there before."""
+        newer, older = _mem(0), _mem(1)
+        search_results, memories = _pool((newer, 0.9))
+        memories[str(older.id)] = older
+
+        nodes = fold_nodes(search_results, memories, {older.id: newer.id})
+
+        assert set(nodes.pool) == {newer.id}
+        assert set(nodes.bridges) == {older.id}
+        assert fold_links(nodes, {}, {older.id: newer.id}) == {newer.id: {older.id}}
+
+    def test_the_pool_row_folds_under_its_newer_memory(self):
+        newer, older = _mem(0), _mem(1)
+        search_results, memories = _pool((older, 0.9), (newer, 0.8))
+        nodes = fold_nodes(search_results, memories, {older.id: newer.id})
+        links = fold_links(nodes, {}, {older.id: newer.id}, {older.id: {newer.id}})
+
+        fold_map = fold_linked_versions(search_results, memories, nodes.pool, links)
+
+        assert fold_map == {newer.id: [older.id]}
+        assert [r["id"] for r in search_results] == [str(newer.id)]
+
+    def test_two_applied_links_fold_the_older_under_the_one_in_the_pool(self):
+        """N1 and N2 both applied a link to O; the shadow map names N2 (the
+        newest). With only N1 in the pool, O still folds under N1."""
+        n2, n1, older = _mem(0), _mem(1), _mem(2)
+        search_results, memories = _pool((older, 0.9), (n1, 0.8))
+        shadow_map = {older.id: n2.id}
+        nodes = fold_nodes(search_results, memories, shadow_map)
+        links = fold_links(nodes, {}, shadow_map, {older.id: {n1.id, n2.id}})
+
+        fold_map = fold_linked_versions(search_results, memories, nodes.pool, links)
+
+        assert fold_map == {n1.id: [older.id]}
+        assert [r["id"] for r in search_results] == [str(n1.id)]
+
+    def test_two_applied_links_both_in_the_pool_fold_under_the_newer(self):
+        """No verdict compared N1 and N2: both stay, O folds under the newer."""
+        n2, n1, older = _mem(0), _mem(1), _mem(2)
+        search_results, memories = _pool((older, 0.9), (n1, 0.8), (n2, 0.7))
+        shadow_map = {older.id: n2.id}
+        nodes = fold_nodes(search_results, memories, shadow_map)
+        links = fold_links(nodes, {}, shadow_map, {older.id: {n1.id, n2.id}})
+
+        fold_map = fold_linked_versions(search_results, memories, nodes.pool, links)
+
+        assert fold_map == {n2.id: [older.id]}
+        assert {r["id"] for r in search_results} == {str(n1.id), str(n2.id)}

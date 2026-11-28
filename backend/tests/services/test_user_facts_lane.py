@@ -437,3 +437,36 @@ def test_a_lane_row_carries_superseded_by_from_the_shadow_map():
         hit, memory, {}, with_content=False, trusted_context_ids=None, shadow_map={}
     )
     assert plain.superseded_by is None
+
+
+def test_a_lane_row_that_heads_a_group_carries_folded():
+    """#3020 ``folded``: lane rows carry ``folded`` like recall rows."""
+    memory, older = _lane_memory(), uuid4()
+    hit = {"id": str(memory.id), "score": 0.5}
+    row = user_facts_lane._row(
+        hit,
+        memory,
+        {},
+        with_content=False,
+        trusted_context_ids=None,
+        shadow_map={},
+        fold_map={memory.id: [older]},
+    )
+    assert row.folded is not None
+    assert (row.folded.count, row.folded.memory_ids) == (1, [older])
+    plain = user_facts_lane._row(
+        hit, memory, {}, with_content=False, trusted_context_ids=None, shadow_map={}
+    )
+    assert plain.folded is None
+
+
+def test_a_lane_fold_never_names_a_memory_the_page_already_shows():
+    """#3020 ``folded``: a version the page shows (a row or a version folded
+    under one) is not named again under a lane row; a group left empty
+    carries no ``folded``."""
+    head, kept, on_page, lone_head, only_member = (uuid4() for _ in range(5))
+    fold_map = {head: [kept, on_page], lone_head: [only_member]}
+
+    lane_folds = user_facts_lane._lane_folds(fold_map, exclude={on_page, only_member})
+
+    assert lane_folds == {head: [kept]}

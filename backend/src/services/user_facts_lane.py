@@ -46,7 +46,7 @@ from uuid import UUID
 
 from db.base import isolated_session
 from models.memory import SOURCE_TYPE_CONNECTOR, Memory
-from models.schemas import MemoryResponse, RecallRequest, RecallResponse
+from models.schemas import FoldedVersions, MemoryResponse, RecallRequest, RecallResponse
 from repositories.memory import MemoryRepository
 from utils.event_dates import event_row_kwargs
 from utils.logger import get_logger
@@ -228,16 +228,18 @@ async def _search(
             cluster_memory_ids=None,
         )
         memories = await _binding_filter(lane_db, hits, memories, user_id=user_id)
+        applied_links: dict[UUID, set[UUID]] = {}
         shadow_map, contradiction_map = await lane._apply_supersede_shadowing(
-            hits, memories, include_superseded=False
+            hits, memories, include_superseded=False, applied_links=applied_links
         )
-        await lane._apply_supersede_fold(
+        fold_map = await lane._apply_supersede_fold(
             hits,
             memories,
             include_superseded=False,
             user_id=user_id,
             shadow_map=shadow_map,
             filters=filters,
+            applied_links=applied_links,
         )
         picked: list[tuple[dict, Memory]] = []
         seen: set[UUID] = set()
@@ -271,6 +273,7 @@ async def _search(
                 with_content=with_content,
                 trusted_context_ids=trusted,
                 shadow_map=shadow_map,
+                fold_map=_lane_folds(fold_map, exclude),
             )
             for hit, memory in picked
         ]
@@ -286,6 +289,22 @@ async def _search(
         else:
             await lane_db.rollback()
         return rows
+
+
+def _lane_folds(fold_map: Mapping[UUID, list[UUID]], exclude: set[UUID]) -> dict[UUID, list[UUID]]:
+    """The lane's folded groups without the versions the page shows (#3020).
+
+    The lane folds over all its hits before it leaves out the page's memories,
+    so a group can name a row of ``results`` (or a version folded under one).
+    A memory the page shows is not named again under a lane row, and a group
+    left empty carries no ``folded``.
+    """
+    folds: dict[UUID, list[UUID]] = {}
+    for head, members in fold_map.items():
+        kept = [member for member in members if member not in exclude]
+        if kept:
+            folds[head] = kept
+    return folds
 
 
 async def _binding_filter(
@@ -317,12 +336,15 @@ def _row(
     with_content: bool,
     trusted_context_ids: set[UUID] | None,
     shadow_map: Mapping[UUID, UUID] | None = None,
+    fold_map: Mapping[UUID, list[UUID]] | None = None,
 ) -> MemoryResponse:
     """One lane row: the recall row shape, with its dates and, where the
     recall carries content, its content.
 
     #3020: the older memory of a link Sleep applied stays in the lane, marked
-    with ``superseded_by`` from ``shadow_map`` as a recall row is.
+    with ``superseded_by`` from ``shadow_map`` as a recall row is, and a row
+    that heads a folded group carries ``folded`` from ``fold_map``, as a
+    recall row does (also for a verified suggestion's fold).
 
     Content follows recall's rule (#2124): none when the call ships none
     (``with_content`` False); with ``trusted_context_ids`` set (a defaulted
@@ -357,6 +379,11 @@ def _row(
         source_uri=memory.source_uri,
         source_type=memory.source_type,
         superseded_by=(shadow_map or {}).get(memory.id),
+        folded=(
+            FoldedVersions(count=len(folded_ids), memory_ids=folded_ids)
+            if (folded_ids := (fold_map or {}).get(memory.id))
+            else None
+        ),
         contradicts=contradiction_map.get(memory.id, []),
         version=memory.version,
         content=content,

@@ -89,14 +89,30 @@ def fold_links(
     fold: FoldNodes,
     candidates: Mapping[UUID, SupersedeCandidate],
     shadow_map: Mapping[UUID, UUID] | None,
+    applied_links: Mapping[UUID, set[UUID]] | None = None,
 ) -> dict[UUID, set[UUID]]:
-    """Newer → older links: shadowing edges into bridges, verified candidates."""
+    """Newer → older links: shadowing edges into bridges, verified candidates.
+
+    #3020: ``applied_links`` (older → every newer memory, from shadowing) are
+    the links Sleep applied. They do not hide, so their older memory is still
+    in the pool (a hiding link's older memory was removed by shadowing, and the
+    fold never runs with ``include_superseded``), and each links like a
+    verified suggestion from a newer memory that is a node. They come from the
+    edges, not from ``shadow_map``: that is the ``superseded_by`` annotation,
+    one (the newest) superseder per older memory, and two newer memories may
+    each have an applied link to the same older one.
+    """
     bridges = fold.bridges
     nodes = fold.nodes
     links: dict[UUID, set[UUID]] = {}
     for dst, src in (shadow_map or {}).items():
         if dst in bridges and src in nodes:
             links.setdefault(src, set()).add(dst)
+    for dst, srcs in (applied_links or {}).items():
+        if dst in fold.pool:
+            for src in srcs:
+                if src in nodes and src != dst:
+                    links.setdefault(src, set()).add(dst)
     for source_id, candidate in candidates.items():
         if candidate.verified is True and candidate.memory_id in nodes:
             if candidate.memory_id != source_id:

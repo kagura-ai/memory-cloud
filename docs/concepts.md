@@ -185,8 +185,9 @@ version (the truth is gone) or keep returning it (the truth is buried). Since
   your own memories at both ends (in a private context, a linked account's
   too; #1803, #2313). One link does not shadow: the one a deployment's Sleep
   applies from a judge-verified suggestion (`sleep_supersede_apply_enabled`,
-  off by default; #3020). Its older memory stays in recall, marked with
-  `superseded_by`. Without an edge, a
+  off by default; #3020). Its older memory folds under the newer one when both
+  are among a recall's candidates, as the suggestion did, and comes back
+  marked with `superseded_by` when alone. Without an edge, a
   judge-verified `supersede_candidate` folds the older version under the newer
   one in recall (`folded`, #2123) — the same effect, reversible, and off
   under `include_superseded=true`.

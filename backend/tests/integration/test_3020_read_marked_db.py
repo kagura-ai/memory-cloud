@@ -4,9 +4,10 @@ One context holds three linked pairs: one applied by the real supersede-apply
 phase, an accepted link (``create_declared_edge``) and a dedup shadow edge
 (origin ``semantic``, NULL metadata), plus an unrelated memory. The applied
 link does not hide: recall and the user facts lane return its older memory as
-a row of its own with ``superseded_by`` (with or without the newer one in the
-pool, and nothing folds for the pair), and the ``load_guardrails`` index and
-the related index keep it. The two controls hide everywhere, and so does an
+a row of its own with ``superseded_by`` when the newer one is not in the pool
+(with it, ``folded`` folds the older under the newer: the fold cases are in
+``test_3020_read_folded_db.py``), and the ``load_guardrails`` index and the
+related index keep it. The two controls hide everywhere, and so does an
 applied link a person re-declared and a semantic link another writer marked
 with another source.
 
@@ -198,18 +199,22 @@ def everything(w: World) -> list[UUID]:
 
 
 @pytest.mark.asyncio
-async def test_both_in_the_pool_both_are_rows_and_the_older_is_marked(committed):
+async def test_both_in_the_pool_the_older_folds_under_the_newer(committed):
+    """``folded``: the pair reads as it read before the link, a fold."""
     w = await build_world(committed.db, committed)
     newer, older = w.applied
 
     response = await recall(committed.db, w, everything(w))
 
     by_id = {r.memory_id: r for r in response.results}
-    assert set(by_id) == {newer, older, w.accepted[0], w.shadow[0], w.other}
-    assert by_id[older].superseded_by == newer
+    assert set(by_id) == {newer, w.accepted[0], w.shadow[0], w.other}
+    assert by_id[newer].folded is not None
+    assert (by_id[newer].folded.count, by_id[newer].folded.memory_ids) == (1, [older])
     assert by_id[newer].superseded_by is None
-    assert by_id[newer].folded is None
     assert by_id[newer].supersede_candidate is None
+    # The controls hide; nothing folds for them.
+    assert by_id[w.accepted[0]].folded is None
+    assert by_id[w.shadow[0]].folded is None
 
 
 @pytest.mark.asyncio

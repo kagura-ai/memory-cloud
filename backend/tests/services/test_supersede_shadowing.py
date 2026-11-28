@@ -205,6 +205,47 @@ async def test_a_hiding_link_wins_over_an_applied_one_on_the_same_memory() -> No
     assert search_results == []
 
 
+@pytest.mark.asyncio
+async def test_applied_links_collect_every_applied_superseder() -> None:
+    """``folded``: every live link that does not hide, older -> its newer ones;
+    the shadow map keeps one superseder per older memory (the annotation)."""
+    old, n1, n2, hidden_old, hidden_new = uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    memories = {str(i): _mem(i) for i in (old, hidden_old)}
+    search_results = [{"id": str(old), "score": 0.9}, {"id": str(hidden_old), "score": 0.8}]
+    svc = _service_with_edges(
+        [(old, n1, False), (old, n2, False), (hidden_old, hidden_new, True)], []
+    )
+    applied: dict = {}
+
+    shadow_map, _ = await svc._apply_supersede_shadowing(
+        search_results, memories, include_superseded=False, applied_links=applied
+    )
+
+    assert shadow_map == {old: n2, hidden_old: hidden_new}
+    assert applied == {old: {n1, n2}}
+    assert [r["id"] for r in search_results] == [str(old)]
+
+
+@pytest.mark.asyncio
+async def test_applied_links_stay_empty_when_shadowing_fails_open() -> None:
+    old, new = uuid4(), uuid4()
+    memories = {str(old): _mem(old)}
+    search_results = [{"id": str(old), "score": 0.9}]
+    svc = MemoryService(MagicMock())
+    s_result = MagicMock()
+    s_result.all.return_value = [(old, new, False)]
+    svc.db = AsyncMock()
+    svc.db.execute.side_effect = [s_result, RuntimeError("contradicts query failed")]
+    applied: dict = {}
+
+    shadow_map, contradiction_map = await svc._apply_supersede_shadowing(
+        search_results, memories, include_superseded=False, applied_links=applied
+    )
+
+    assert (shadow_map, contradiction_map, applied) == ({}, {}, {})
+    assert len(search_results) == 1
+
+
 def test_the_hiding_rule_is_the_marker_alone() -> None:
     from sqlalchemy.dialects import postgresql
 

@@ -4723,6 +4723,7 @@ class MemoryService:
         memories: dict,
         *,
         include_superseded: bool,
+        applied_links: dict[UUID, set[UUID]] | None = None,
     ) -> tuple[dict[UUID, UUID], dict[UUID, list[UUID]]]:
         """#1208: demote superseded memories out of the candidate pool.
 
@@ -4740,7 +4741,11 @@ class MemoryService:
         (``models.memory.supersedes_edge_hides``): its older memory stays in
         the pool by default and is annotated from the shadow map like an
         ``include_superseded`` row. The shadow map holds every live edge;
-        only the dsts of hiding edges are removed.
+        only the dsts of hiding edges are removed. With ``applied_links`` given,
+        every live link that does not hide is added there, older → its newer
+        memories (the shadow map keeps one superseder per older memory, the
+        annotation); the fold links them. Added only when shadowing completes,
+        so a fail-open leaves it as it was.
 
         The liveness JOIN is the self-healing property: edge memory refs are
         bare UUIDs (no FK), so a deleted superseder must stop shadowing —
@@ -4803,10 +4808,13 @@ class MemoryService:
             edge_rows = list(rows.all())
             shadow_map: dict[UUID, UUID] = {}
             hidden: dict[UUID, UUID] = {}
+            applied: dict[UUID, set[UUID]] = {}
             for dst, src, hides in edge_rows:
                 shadow_map[dst] = src
                 if hides:
                     hidden[dst] = src
+                else:
+                    applied.setdefault(dst, set()).add(src)
 
             c_rows = await self.db.execute(
                 select(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id).where(
@@ -4835,6 +4843,9 @@ class MemoryService:
                     candidates=before,
                 )
 
+            if applied_links is not None:
+                for dst, srcs in applied.items():
+                    applied_links.setdefault(dst, set()).update(srcs)
             return shadow_map, contradiction_map
         except Exception as e:
             logger.warning("supersede_shadowing_failed", error=str(e))
@@ -4850,6 +4861,7 @@ class MemoryService:
         shadow_map: Mapping[UUID, UUID] | None = None,
         resolved: dict[UUID, SupersedeCandidate | None] | None = None,
         filters: Mapping[str, Any] | None = None,
+        applied_links: Mapping[UUID, set[UUID]] | None = None,
     ) -> dict[UUID, list[UUID]]:
         """#2123: fold judge-verified older versions of a fact under the newer one.
 
@@ -4884,7 +4896,13 @@ class MemoryService:
         3. A version shadowing just removed (``shadow_map``, dst → src) still
            links: through its edge and its own verified candidate. Accepting
            v3's suggestion with ``create_edge`` shadows v2, and v1 — linked to
-           v2 only — must stay folded under v3 rather than resurface.
+           v2 only — must stay folded under v3 rather than resurface. #3020: a
+           link Sleep applied does not shadow; its older memory stays in the
+           pool and the edge links it as a verified suggestion would. Those
+           links are ``applied_links`` (older → every newer memory, from
+           shadowing), not ``shadow_map``, which names one superseder per
+           older memory: an older memory two applied links name folds under
+           whichever newer one is in the pool.
         4. Each head (a row no other pool row reaches; the newest by
            ``created_at`` when several reach a folded row) takes the best
            position of its group in the pool and that row's ranking scores, so
@@ -4909,15 +4927,20 @@ class MemoryService:
             return {}
         try:
             nodes = fold_nodes(search_results, memories, shadow_map)
-            if len(nodes.pool) < 2 or not nodes.judged:
+            if len(nodes.pool) < 2:
                 return {}
-            candidates = await self._resolve_supersede_candidates(
-                nodes.judged,
-                user_id=user_id,
-                operation="recall",
-                filters=filters,
-                pool_ids=nodes.nodes.keys(),
-            )
+            # #3020: a link Sleep applied folds through its edge alone, so
+            # nothing judged is no longer an early return; the resolver is
+            # still not asked (no query on a deployment without the judge).
+            candidates: dict[UUID, SupersedeCandidate] = {}
+            if nodes.judged:
+                candidates = await self._resolve_supersede_candidates(
+                    nodes.judged,
+                    user_id=user_id,
+                    operation="recall",
+                    filters=filters,
+                    pool_ids=nodes.nodes.keys(),
+                )
             if resolved is not None and candidates:
                 # #2131: every judged id, None where no hint survives, so the
                 # page builder skips them all rather than asking again. Only
@@ -4925,7 +4948,7 @@ class MemoryService:
                 # a failed lookup must leave the page to resolve as before.
                 for memory_id in nodes.judged:
                     resolved[memory_id] = candidates.get(memory_id)
-            links = fold_links(nodes, candidates, shadow_map)
+            links = fold_links(nodes, candidates, shadow_map, applied_links)
             if not links:
                 return {}
             return fold_linked_versions(search_results, memories, nodes.pool, links)
@@ -7597,10 +7620,14 @@ class MemoryService:
         # short). include_superseded=true keeps them, annotated. This is the
         # non-destructive counterpart of dedup's update-by-removal: the truth
         # is shadowed, not gone.
+        # #3020: every applied (non-hiding) link among the candidates, for
+        # the fold; the combined pool below adds its own.
+        applied_links: dict[UUID, set[UUID]] = {}
         shadow_map, contradiction_map = await self._apply_supersede_shadowing(
             search_results,
             memories,
             include_superseded=request.include_superseded,
+            applied_links=applied_links,
         )
         # #2123: judge-verified older versions of a fact without an edge fold
         # under the newer one — same altitude as shadowing, so the re-rank,
@@ -7617,6 +7644,7 @@ class MemoryService:
             resolved=resolved_candidates,
             # #2027: the filters the rows matched with, widened tags included.
             filters=effective_filters,
+            applied_links=applied_links,
         )
 
         baseline_pool: list[dict] | None = None
@@ -7653,7 +7681,10 @@ class MemoryService:
             # Preserve the ordinary pool for confidence and learning. Folding
             # can move a derived score onto a different head in either direction.
             combined_shadow, combined_contradictions = await self._apply_supersede_shadowing(
-                search_results, memories, include_superseded=request.include_superseded
+                search_results,
+                memories,
+                include_superseded=request.include_superseded,
+                applied_links=applied_links,
             )
             shadow_map.update(combined_shadow)
             contradiction_map.update(combined_contradictions)
@@ -7665,6 +7696,7 @@ class MemoryService:
                 shadow_map=shadow_map,
                 resolved=resolved_candidates,
                 filters=effective_filters,
+                applied_links=applied_links,
             )
             for head, members in combined_fold.items():
                 inherited = [child for member in members for child in fold_map.get(member, [])]

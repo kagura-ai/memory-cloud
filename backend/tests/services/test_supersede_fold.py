@@ -87,7 +87,14 @@ def _pool(*rows):
 
 
 async def _fold(
-    svc, search_results, memories, *, include_superseded=False, shadow_map=None, resolved=None
+    svc,
+    search_results,
+    memories,
+    *,
+    include_superseded=False,
+    shadow_map=None,
+    resolved=None,
+    applied_links=None,
 ):
     return await svc._apply_supersede_fold(
         search_results,
@@ -96,6 +103,7 @@ async def _fold(
         user_id="u",
         shadow_map=shadow_map,
         resolved=resolved,
+        applied_links=applied_links,
     )
 
 
@@ -705,3 +713,62 @@ class TestSubThresholdCandidatesAtReadTime:
         resolved = await self._resolve(svc, new)
         assert resolved[new.id].memory_id == old.id
         assert resolved[new.id].verified is None
+
+
+@pytest.mark.asyncio
+class TestAppliedLinkFold3020:
+    async def test_an_applied_link_folds_without_a_judged_node_and_no_query(self):
+        """#3020 ``folded``: an applied link's older memory stays in the pool
+        and folds under its newer one through the applied links alone; with
+        nothing judged the resolver is not asked."""
+        older, newer = _mem(1), _mem(0)
+        search_results, memories = _pool((older, 0.9), (newer, 0.8))
+        svc = _service({})
+
+        fold_map = await _fold(
+            svc,
+            search_results,
+            memories,
+            shadow_map={older.id: newer.id},
+            applied_links={older.id: {newer.id}},
+        )
+
+        assert fold_map == {newer.id: [older.id]}
+        assert [r["id"] for r in search_results] == [str(newer.id)]
+        svc._resolve_supersede_candidates.assert_not_awaited()
+
+    async def test_the_older_memory_alone_stays_a_row(self):
+        older, newer_id = _mem(1), uuid4()
+        search_results, memories = _pool((older, 0.9), (_mem(3), 0.5))
+        svc = _service({})
+
+        fold_map = await _fold(
+            svc,
+            search_results,
+            memories,
+            shadow_map={older.id: newer_id},
+            applied_links={older.id: {newer_id}},
+        )
+
+        assert fold_map == {}
+        assert len(search_results) == 2
+
+    async def test_the_older_folds_under_an_applied_superseder_the_annotation_does_not_name(
+        self,
+    ):
+        """Two applied links into one older memory: the shadow map names the
+        newest superseder (N2), which is not in the pool; N1 is."""
+        older, n1, n2_id = _mem(2), _mem(1), uuid4()
+        search_results, memories = _pool((older, 0.9), (n1, 0.8))
+        svc = _service({})
+
+        fold_map = await _fold(
+            svc,
+            search_results,
+            memories,
+            shadow_map={older.id: n2_id},
+            applied_links={older.id: {n1.id, n2_id}},
+        )
+
+        assert fold_map == {n1.id: [older.id]}
+        assert [r["id"] for r in search_results] == [str(n1.id)]
