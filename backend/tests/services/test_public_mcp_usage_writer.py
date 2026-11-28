@@ -543,6 +543,39 @@ async def test_visitors_lost_at_shutdown_are_counted(writer_today, monkeypatch):
     assert lost[0].kwargs == {"count": 2, "visitors": 2}
 
 
+async def test_a_visitor_write_cancelled_at_shutdown_is_counted(writer_today, monkeypatch):
+    """The events were stored; the final visitor write hangs until ``stop`` cancels it."""
+    log = MagicMock()
+    monkeypatch.setattr(writer_module, "logger", log)
+
+    class _HangingVisitorSession(FakeSession):
+        async def execute(self, stmt: Any, params: list[dict] | None = None) -> None:
+            if stmt.table.name == "public_mcp_daily_visitors":
+                await asyncio.sleep(30)
+            await super().execute(stmt, params)
+
+    class HangingVisitorDB(FakeDB):
+        def factory(self) -> FakeSession:
+            self.attempts += 1
+            return _HangingVisitorSession(self, "ok")
+
+    db = HangingVisitorDB()
+    writer = _writer(db, write_timeout=5.0)
+    writer.start()
+    for i in range(4):
+        writer.offer(_visit(f"v{i}"))
+    await _until(lambda: sum(len(_events(b)) for b in db.committed) == 4)
+    await writer.stop(timeout=0.3)
+    lost = [
+        c
+        for c in log.warning.call_args_list
+        if c.args[0] == "public_mcp_telemetry_lost_at_shutdown"
+    ]
+    assert len(lost) == 1
+    assert lost[0].kwargs == {"count": 0, "visitors": 4}
+    assert _visitor_batches(db) == []
+
+
 async def test_the_pending_set_is_bounded(writer_today, monkeypatch):
     log = MagicMock()
     monkeypatch.setattr(writer_module, "logger", log)

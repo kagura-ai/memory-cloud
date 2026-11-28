@@ -380,7 +380,11 @@ class PublicMcpUsageWriter:
         visitors: list[VisitorRow] = []
         for group_key in ready:
             visitors.extend(self._visitors.pop(group_key).values())
+        # Moved from pending to in flight with no await between: a write that
+        # ``stop`` cancels leaves them in flight, so the shutdown line counts
+        # them. Only the two normal exits below clear the in-flight count.
         self._visitors_pending -= len(visitors)
+        self._inflight_visitors = len(visitors)
         # One order for every process: no deadlock on the primary key.
         visitors.sort(key=lambda v: (v.endpoint_id, v.day, v.visitor_key))
         rows = [
@@ -392,20 +396,18 @@ class PublicMcpUsageWriter:
             }
             for v in visitors
         ]
-        self._inflight_visitors = len(rows)
         error: Exception | None = None
-        try:
-            for attempt in range(2):
-                try:
-                    await asyncio.wait_for(self._write_visitors(rows), timeout=self._write_timeout)
-                except Exception as exc:  # noqa: BLE001 - includes the write timeout
-                    error = exc
-                    if attempt == 0:
-                        await asyncio.sleep(min(self._retry_backoff, _RETRY_BACKOFF_CAP_SECONDS))
-                    continue
-                return
-        finally:
+        for attempt in range(2):
+            try:
+                await asyncio.wait_for(self._write_visitors(rows), timeout=self._write_timeout)
+            except Exception as exc:  # noqa: BLE001 - includes the write timeout
+                error = exc
+                if attempt == 0:
+                    await asyncio.sleep(min(self._retry_backoff, _RETRY_BACKOFF_CAP_SECONDS))
+                continue
             self._inflight_visitors = 0
+            return
+        self._inflight_visitors = 0
         self._visitors_dropped += len(rows)
         now = time.monotonic()
         last = self._last_visitor_failure_log
