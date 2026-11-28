@@ -97,10 +97,12 @@ CLOSED_DAYS = text(
     "SELECT day FROM public_mcp_usage_closed_days WHERE day >= :first_day AND day < :today"
 )
 # The closed days from their counts, every other day of the window from the
-# events (from ``events_from``, the start of the oldest day that is not
-# closed). Route and caller of an event: NULL (a row written before f67) is
-# a public MCP call by an anonymous caller; both defaults are bound, never
-# written in the SQL; the counts carry them already.
+# events: from ``events_from`` (the start of the oldest day that is not
+# closed), less ``skip_days`` (the closed days after it; usually none, and
+# an empty list keeps the planner's row estimate of the events right). Route
+# and caller of an event: NULL (a row written before f67) is a public MCP
+# call by an anonymous caller; both defaults are bound, never written in the
+# SQL; the counts carry them already.
 DAY_COUNTS = text(
     "SELECT day, tool, outcome, route, caller, calls FROM public_mcp_usage_day_counts "
     "WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id "
@@ -113,7 +115,7 @@ DAY_COUNTS = text(
     "FROM public_mcp_usage_events "
     "WHERE endpoint_id = :endpoint_id AND workspace_id = :workspace_id "
     "AND kind = 'tool_call' AND occurred_at >= :events_from "
-    "AND (occurred_at)::date <> ALL(CAST(:closed_days AS date[])) "
+    "AND (occurred_at)::date <> ALL(CAST(:skip_days AS date[])) "
     "GROUP BY 1, 2, 3, 4, 5"
 )
 VISITORS_BY_DAY = text(
@@ -425,6 +427,7 @@ async def read_usage_stats(
                     await db.execute(CLOSED_DAYS, {"first_day": first_day, "today": today})
                 ).all()
             )
+            events_from = events_start(first_day, today, closed_days)
             await step()
             rows = (
                 await db.execute(
@@ -433,7 +436,8 @@ async def read_usage_stats(
                         "endpoint_id": endpoint.id,
                         "workspace_id": workspace_id,
                         "closed_days": closed_days,
-                        "events_from": events_start(first_day, today, closed_days),
+                        "events_from": events_from,
+                        "skip_days": [d for d in closed_days if d >= events_from.date()],
                         "default_route": PMU_ROUTE_MCP,
                         "default_caller": PMU_CALLER_ANONYMOUS,
                     },

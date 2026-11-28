@@ -613,6 +613,8 @@ async def test_closed_days_are_read_from_the_counts_and_the_rest_from_the_events
     assert params["events_from"] == datetime.combine(
         first + timedelta(days=20), datetime.min.time()
     )
+    # The events part skips the closed days after the open one only.
+    assert params["skip_days"] == closed[20:]
     # Both statements in the counts' savepoint, the closed days first.
     statements = [s for s, _ in db.executed]
     assert statements.index(stats.CLOSED_DAYS) < statements.index(stats.DAY_COUNTS)
@@ -625,7 +627,24 @@ def test_the_day_counts_read_the_closed_days_and_the_open_events() -> None:
     assert "day = ANY(CAST(:closed_days AS date[]))" in sql
     assert "UNION ALL" in sql
     assert "occurred_at >= :events_from" in sql
-    assert "(occurred_at)::date <> ALL(CAST(:closed_days AS date[]))" in sql
+    assert "(occurred_at)::date <> ALL(CAST(:skip_days AS date[]))" in sql
     closed = str(stats.CLOSED_DAYS)
     assert "FROM public_mcp_usage_closed_days" in closed
     assert "day >= :first_day AND day < :today" in closed
+
+
+async def test_with_every_past_day_closed_only_today_is_counted_from_the_events(
+    serving,
+) -> None:
+    clock = _Clock()
+    db = _Session(clock)
+    today = stats.utcnow().date()
+    first = today - timedelta(days=89)
+    closed = [first + timedelta(days=i) for i in range(89)]
+    db.results[stats.CLOSED_DAYS] = [(day,) for day in closed]
+    await _read(db, clock, days=90)
+    [params] = [p for s, p in db.executed if s is stats.DAY_COUNTS]
+    assert params is not None
+    assert params["closed_days"] == closed
+    assert params["events_from"] == datetime.combine(today, datetime.min.time())
+    assert params["skip_days"] == []
