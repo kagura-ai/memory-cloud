@@ -214,6 +214,36 @@ Store a new memory with 3-layer architecture (summary, context_summary, details)
 }
 ```
 
+**Refused at the workspace's memory limit** (`429 QUOTA-001`, [#3022](https://github.com/kagura-ai/memory-cloud/issues/3022)):
+
+```json
+{
+  "error": "QUOTA-001",
+  "message": "Memory quota exceeded. Current: 1000, Limit: 1000 (free plan + addons) 12 of your memories in this context are over 180 days old and were never delivered.",
+  "details": {
+    "gate": "quota",
+    "quota_type": "memories",
+    "current": 1000,
+    "limit": 1000,
+    "current_plan": "free",
+    "required_plan": "basic",
+    "required_plan_display": "M",
+    "feature": null,
+    "resets_at": null,
+    "remedies": ["cleanup", "upgrade"],
+    "never_delivered_count": 12
+  }
+}
+```
+
+`never_delivered_count` is how many of your own memories in the target context are never
+delivered (the `total` of `GET /api/v1/memory/list?context_id=…&never_delivered=true`); it is
+left out when it could not be read, and the message names it only when it is above 0.
+`remedies` is `["cleanup", "upgrade"]`, `["cleanup", "admin"]` (no billing on this deployment)
+or `["cleanup"]` (top tier). The daily creation limit answers `QUOTA-001` with
+`quota_type: "memories_per_day"` and `resets_at` instead. See
+[error responses](api-surface-1.0/error-responses.md#the-total-memory-cap-3022).
+
 **Example (Python):**
 
 ```python

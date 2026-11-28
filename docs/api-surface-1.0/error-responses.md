@@ -219,7 +219,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `BONUS-001` | `InsufficientReasonError` — exceptions.py:283 | 400 | Slot-bonus shrink below owned count requires a reason. |
 | `BONUS-002` | `BonusBelowZeroError` — exceptions.py:301 | 400 | Resulting workspace_slot_bonus would be negative. |
 | `RATE-001` | `RateLimitError` — exceptions.py:318; also inline at api/middleware/rate_limit.py:124 | 429 | Per-minute rate limit exceeded; `Retry-After` + `X-RateLimit-*` headers on the middleware path. |
-| `QUOTA-001` | `QuotaExceededError` — exceptions.py:339; also inline at api/middleware/rate_limit.py:156 | 429 (**403** on two caps) | Quota exceeded; `Retry-After: 86400` on the middleware path. Since #1644 every **typed** instance — one whose `quota_type` is in the [frozen vocabulary](#quota_type-vocabulary-frozen) — carries the [quota gate block](#gate-refusals-1644) (`gate: "quota"`, `quota_type`, and `current`/`limit` where counts exist). An untyped `QUOTA-001` (the 1 MB memory-size guard, the total memory cap, a missing workspace) is not a plan quota and carries **no** `gate` — see [Not every `QUOTA-001` is a gate](#not-every-quota-001-is-a-gate). ⚠ Two caps answer **403**, not 429, because they always have and clients branch on it: the resource-token cap (`POST /resource-tokens`) and — under its own `CONNECTOR-001` code — the connector seat cap. `QuotaExceededError` takes a `status_code` kwarg for exactly those two; everything else uses the 429 default. |
+| `QUOTA-001` | `QuotaExceededError` — exceptions.py:339; also inline at api/middleware/rate_limit.py:156 | 429 (**403** on two caps) | Quota exceeded; `Retry-After: 86400` on the middleware path. Since #1644 every **typed** instance — one whose `quota_type` is in the [frozen vocabulary](#quota_type-vocabulary-frozen) — carries the [quota gate block](#gate-refusals-1644) (`gate: "quota"`, `quota_type`, and `current`/`limit` where counts exist). An untyped `QUOTA-001` (the 1 MB memory-size guard, a missing workspace) is not a plan quota and carries **no** `gate`; the total memory cap is typed (`quota_type: "memories"`) since #3022 — see [Not every `QUOTA-001` is a gate](#not-every-quota-001-is-a-gate). ⚠ Two caps answer **403**, not 429, because they always have and clients branch on it: the resource-token cap (`POST /resource-tokens`) and — under its own `CONNECTOR-001` code — the connector seat cap. `QuotaExceededError` takes a `status_code` kwarg for exactly those two; everything else uses the 429 default. |
 | `QUOTA-002` | `EmbeddingSpendCapExceeded` — exceptions.py:383 | 429 | BYOK embedding spend cap reached (`details.period` = daily/monthly). Carries `gate: "quota"` and `quota_type` (`embedding_spend_daily` / `embedding_spend_monthly`) but **no** `current`/`limit`: the cap is USD, and the canonical count pair is integers. `cap_usd` / `current_usd` remain the numbers to render. |
 | `FEAT-001` | `FeatureNotAvailableError` — exceptions.py:602 | 403 | Feature not available on current plan tier. Since #1551 also the "may create" refusal for XL-only features — `POST /resource-tokens` (`details.feature="resources"`), connector provisioning (`"connectors"`, REST and MCP `setup_connector`, where MCP surfaces it under `plan_required` with `required_plan`), `PUT /contexts/{id}` with `is_public=true` and the bound public API-key mint (`"public_contexts"`). The message names the minimum tier from the plan registry (`feature_denied_message`). Existing objects on lower tiers are never refused (block-new-only). Since #1644 it also covers `team_invitations` (`POST /invitations`, previously a raw `HTTPException(403)`), `shared_contexts` (previously `VAL-001`/422 on the service path), `sleep_mode`, `managed_embeddings` (previously `CFG-001`/500) and `managed_llm`; every instance carries the [feature gate block](#gate-refusals-1644), and `details.gate` distinguishes a **plan** refusal from an **allowlist** (rollout kill switch) or **deployment** (operator switch) refusal — the three used to be wire-identical. |
 | `CAPACITY-001` | `CapacityLockedError` — exceptions.py | 403 | Capacity-over lock (#1941): a Free workspace whose entitlement came from the billing service holds more memories or file bytes than Free allows. Search and saving (recall, reference, explore, pinned loads, remember, memory edits, uploads, context creation) are refused until it is cleaned up or re-subscribed; listing, deleting, export and guardrails stay allowed. Carries the [capacity gate block](#capacity-001-403--capacity-gate-1941). On MCP the envelope code is `capacity_locked`. |
@@ -393,6 +393,7 @@ legacy names that keep shipping, per refusal:
 |---|---|---|
 | Analysis daily quota | `used_today`, `limit_today`, `addon_bonus`, `remaining_today`, `resets_at` | `current`, `limit` |
 | Memories per day | `limit`, `used_today`, `requested`, `resets_at` | `current` |
+| Total memories (#3022) | none (the refusal was untyped before) | `current`, `limit`; also `remedies` and, where the caller and the target context are known, `never_delivered_count` (below) |
 | Workspace cap | `owned_count`, `cap`, `tier`, `next_tier` | `current`, `limit` |
 | Storage bytes | `limit`, `current`, `requested` | already canonical |
 | Sleep-enabled contexts | `limit`, `current`, `addon_bonus`, `requested` | already canonical |
@@ -407,13 +408,33 @@ interpolating a `limit` it was never sent.
 ### Not every `QUOTA-001` is a gate
 
 `QuotaExceededError` is also raised for limits no tier lifts: the 1 MB memory-size guard on
-remember / update / patch, the total memory cap, and the "workspace not found" anomalies. They
+remember / update / patch and the "workspace not found" anomalies. They
 answer `QUOTA-001` / 429 as they always have, but with `details: {"quota_type": null}` and no
 `gate`: the server stamps `gate: "quota"` only on a refusal whose `quota_type` is in the frozen
 vocabulary below, so an untyped raise cannot be read as an upsell. A client falling back to the
 error code (a server predating #1644 sends no `gate`) applies the same rule — `QUOTA-001` is a
 quota gate only when it names a frozen `quota_type`; counts alone do not qualify. `QUOTA-002`
 and `CONNECTOR-001` each name exactly one cap, so their code is enough.
+
+### The total memory cap (#3022)
+
+The workspace's total (live) memory limit was an untyped `QUOTA-001` until #3022; it now
+carries the quota gate block with `quota_type: "memories"`, `current` / `limit` (the live count
+and the effective limit), `current_plan` and `required_plan` (the lowest tier whose base limit
+is higher; `null` on the top tier). Two keys are its own:
+
+- `remedies` — `["cleanup", "upgrade"]`, `["cleanup", "admin"]` on a deployment whose plan page
+  cannot upgrade (no billing), or `["cleanup"]` on the top tier: the tokens of the MCP
+  `plan_headroom` notice.
+- `never_delivered_count` — on `POST /memory/remember` and the MCP writes: how many of the
+  caller's own memories in the target context are never delivered (the `total` of
+  `GET /memory/list?context_id=…&never_delivered=true` for the same caller). Read after the
+  refused write is rolled back and left out when it cannot be read in time. When it is above 0
+  the message gains one sentence naming it; the prefix
+  `Memory quota exceeded. Current: N, Limit: M (<plan> plan + addons)` is unchanged.
+
+A client that classifies by `gate` (the SDKs do) now reads this refusal as a quota refusal
+instead of a generic error.
 
 ### MCP envelopes carry the same block
 
@@ -423,8 +444,10 @@ one forward the same keys the REST `details` carries — `gate`, `feature`, `req
 `resets_at` — as top-level envelope fields: `feature_not_available` and `quota_exceeded` from
 the analysis tools; `plan_required` from `create_context`, `update_context` (`is_public`),
 `setup_resource` and `setup_connector` (whose seat cap keeps its `CONNECTOR-001` code);
-`quota_exceeded` from `remember`, `init_file_upload`, `register_agent`, and the context and
-token caps of `create_context` / `setup_resource`. Every envelope keeps the `error` code and
+`quota_exceeded` from `remember`, `update_memory` (the create half of an `external_id` upsert),
+`init_file_upload`, `register_agent`, and the context and token caps of `create_context` /
+`setup_resource`. The total memory cap adds `remedies`, `never_delivered_count` and a `help`
+there (`remember_batch` puts the three on its envelope once). Every envelope keeps the `error` code and
 the fields it carried before (`required_plan`, `help`, the legacy counts); the gate keys are
 added beside them. The `quota_exceeded` envelopes omit `null` values, which a client reads the
 same as `null`. `test_gate_error_contract.py` lists which refusals reach an MCP tool and why the
@@ -551,10 +574,10 @@ instructions carry one notice line instead of the digest.
 
 ### `quota_type` vocabulary (frozen)
 
-`contexts`, `members`, `workspace_limit_reached`, `memories_per_day`, `memory_analysis`,
-`sleep_enabled_contexts`, `storage_bytes`, `agents`, `resource_tokens`, `connectors`,
-`embedding_spend_daily`, `embedding_spend_monthly`, `api_mcp_daily`, `api_rest_daily`,
-`api_public_daily`.
+`contexts`, `members`, `workspace_limit_reached`, `memories`, `memories_per_day`,
+`memory_analysis`, `sleep_enabled_contexts`, `storage_bytes`, `agents`, `resource_tokens`,
+`connectors`, `content_chunk_contexts`, `llm_selector_contexts`, `embedding_spend_daily`,
+`embedding_spend_monthly`, `api_mcp_daily`, `api_rest_daily`, `api_public_daily`.
 
 Frozen in `backend/src/config/constants.py` and enumerated by
 `backend/tests/api/test_gate_error_contract.py`, which fails if a refusal emits a type outside
